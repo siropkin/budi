@@ -5440,6 +5440,264 @@ fn breakdown_other_label_is_stable_wire_value() {
     assert_eq!(BREAKDOWN_OTHER_LABEL, "(other)");
 }
 
+// ─── #484 RC-2 property test: reconciliation under fractional cents ───────
+//
+// The 2026-04-22 audit found `sum(rows) + other - total_cost_cents`
+// diverged by 1-4¢ in most views and by 22¢ on `--models -p 30d`. The
+// reconciliation tests above (`breakdown_*_reconcile_with_other_row_*`)
+// seed integer-cent fixtures (`cost = 0.5 + idx * 0.37`, etc.), which
+// produce exact f64 sums by accident — those tests couldn't catch the
+// float-rounding-in-aggregation path that live data actually exercises.
+//
+// This property test seeds ≥ 100 rows whose per-row `cost_cents` is
+// derived from the same token-count × rate-per-million arithmetic that
+// `CostEnricher` runs at ingest (plus a tiny jitter to guarantee
+// non-integer values). It sweeps every breakdown view × `today / 7d /
+// 30d` and asserts the reconciliation contract holds TO THE CENT. The
+// contract is load-bearing for the `#448` "sum reconciles to grand
+// total" shape every downstream consumer depends on.
+
+/// Row shape for `seed_fractional_cents_for_reconciliation`. Each row
+/// contributes a unique dimension value on every axis so the breakdown
+/// can't collapse rows by accident. The arg count mirrors the
+/// breakdown axes this property test sweeps (repo, branch, ticket,
+/// activity, file, model); the clippy allow is intentional.
+#[allow(clippy::too_many_arguments)]
+fn fractional_cost_msg(
+    idx: usize,
+    ts: chrono::DateTime<chrono::Utc>,
+    ticket: &str,
+    branch: &str,
+    repo: &str,
+    model: &str,
+    cwd: &str,
+    cost_cents: f64,
+) -> ParsedMessage {
+    let mut m = assistant_msg(
+        &format!("recon-frac-{idx}"),
+        &format!("s-recon-frac-{idx}"),
+        cost_cents,
+    );
+    m.timestamp = ts;
+    m.git_branch = Some(branch.to_string());
+    m.repo_id = Some(repo.to_string());
+    m.model = Some(model.to_string());
+    m.cwd = Some(cwd.to_string());
+    m.cost_confidence = "estimated".to_string();
+    let _ = ticket; // ticket is attached via Tag; kept as param for symmetry.
+    m
+}
+
+/// Seed `count` assistant messages whose per-row cost_cents is
+/// deliberately non-integer (derived from `input_tokens * 15 /
+/// 1_000_000 × jitter`, the same fractional-cents arithmetic that
+/// `CostEnricher` runs at ingest). Every dimension axis gets a unique
+/// value per row so `--projects/--branches/--tickets/--activities/
+/// --files/--models` all rank 100-way. Returns total cost in cents.
+fn seed_fractional_cents_for_reconciliation(
+    conn: &mut Connection,
+    now: chrono::DateTime<chrono::Utc>,
+    count: usize,
+) -> f64 {
+    use chrono::Duration;
+    let mut msgs = Vec::new();
+    let mut tags = Vec::new();
+    let mut total = 0.0;
+    for i in 0..count {
+        // Spread rows across today / 7d / 30d windows. Anchors mirror
+        // the `breakdown_tickets_reconcile_across_today_7d_and_30d`
+        // fixture: today-cohort inside today, 7d-cohort at -3d, 30d-
+        // cohort at -20d.
+        let ts = match i % 3 {
+            0 => now - Duration::hours(1),
+            1 => now - Duration::days(3),
+            _ => now - Duration::days(20),
+        };
+        // `input_tokens × rate-per-million` is where CostEnricher
+        // introduces f64 sub-cent remainders. Use $15 / M (Claude
+        // Sonnet-ish output rate) for input-tokens proxy; multiply by
+        // a non-integer jitter per row so no two rows share a cost.
+        let input_tokens = 10_000u64 + (i as u64 * 37);
+        let jitter = 1.0 + (i as f64 * 0.00073);
+        let cost = (input_tokens as f64) * 15.0 / 1_000_000.0 * jitter * 100.0; // dollars → cents
+        total += cost;
+        let ticket = format!("RECON-FRAC-{i:03}");
+        let branch = format!("feat/recon-frac-{i:03}");
+        let repo = format!("repo-recon-{:02}", i % 10);
+        let model = format!(
+            "claude-recon-{}-sonnet",
+            match i % 4 {
+                0 => "a",
+                1 => "b",
+                2 => "c",
+                _ => "d",
+            }
+        );
+        let cwd = format!("/tmp/recon-{repo}/src/module-{i:03}.rs");
+        let m = fractional_cost_msg(i, ts, &ticket, &branch, &repo, &model, &cwd, cost);
+        msgs.push(m);
+        tags.push(vec![
+            Tag {
+                key: "ticket_id".to_string(),
+                value: ticket.clone(),
+            },
+            Tag {
+                key: "activity".to_string(),
+                value: format!("bucket-{}", i % 7),
+            },
+            Tag {
+                key: "file".to_string(),
+                value: cwd.clone(),
+            },
+        ]);
+    }
+    ingest_messages(conn, &msgs, Some(&tags)).unwrap();
+    total
+}
+
+/// RC-2 acceptance: `sum(rows.cost_cents) + other.cost_cents ==
+/// total_cost_cents` for every breakdown view × period, under
+/// fractional per-row costs. Pins the contract at 1/1000 cent tolerance
+/// (tighter than the 1/100 cent tolerance the existing reconciliation
+/// tests use).
+#[test]
+fn breakdown_reconciles_under_fractional_per_row_costs() {
+    use chrono::Utc;
+    let mut conn = test_db();
+    // Anchor `now` at noon UTC of the current UTC date so the today
+    // cohort at `now - 1h` stays inside today's UTC window regardless
+    // of when the test runs (see #502 fix for the same class of flake).
+    let now = Utc::now()
+        .date_naive()
+        .and_hms_opt(12, 0, 0)
+        .unwrap()
+        .and_utc();
+    let _total_30d = seed_fractional_cents_for_reconciliation(&mut conn, now, 120);
+
+    let today_since = now
+        .date_naive()
+        .and_hms_opt(0, 0, 0)
+        .unwrap()
+        .and_utc()
+        .to_rfc3339();
+    let since_7d = (now - chrono::Duration::days(7)).to_rfc3339();
+    let since_30d = (now - chrono::Duration::days(30)).to_rfc3339();
+
+    let windows: [(&str, Option<&str>); 3] = [
+        ("today", Some(today_since.as_str())),
+        ("7d", Some(since_7d.as_str())),
+        ("30d", Some(since_30d.as_str())),
+    ];
+
+    for (window_label, since) in windows {
+        // --projects
+        let all_projects = repo_usage_with_filters(
+            &conn,
+            since,
+            None,
+            &DimensionFilters::default(),
+            BREAKDOWN_FETCH_ALL_LIMIT,
+        )
+        .unwrap();
+        let page = paginate_breakdown(all_projects, 30);
+        assert_breakdown_reconciles_tight(&page, &format!("projects/{window_label}"));
+
+        // --branches
+        let all_branches = branch_cost_with_filters(
+            &conn,
+            since,
+            None,
+            &DimensionFilters::default(),
+            BREAKDOWN_FETCH_ALL_LIMIT,
+        )
+        .unwrap();
+        let page = paginate_breakdown(all_branches, 30);
+        assert_breakdown_reconciles_tight(&page, &format!("branches/{window_label}"));
+
+        // --tickets
+        let all_tickets = ticket_cost_with_filters(
+            &conn,
+            since,
+            None,
+            &DimensionFilters::default(),
+            BREAKDOWN_FETCH_ALL_LIMIT,
+        )
+        .unwrap();
+        let page = paginate_breakdown(all_tickets, 30);
+        assert_breakdown_reconciles_tight(&page, &format!("tickets/{window_label}"));
+
+        // --activities
+        let all_activities = activity_cost_with_filters(
+            &conn,
+            since,
+            None,
+            &DimensionFilters::default(),
+            BREAKDOWN_FETCH_ALL_LIMIT,
+        )
+        .unwrap();
+        let page = paginate_breakdown(all_activities, 30);
+        assert_breakdown_reconciles_tight(&page, &format!("activities/{window_label}"));
+
+        // --files
+        let all_files = file_cost_with_filters(
+            &conn,
+            since,
+            None,
+            &DimensionFilters::default(),
+            BREAKDOWN_FETCH_ALL_LIMIT,
+        )
+        .unwrap();
+        let page = paginate_breakdown(all_files, 30);
+        assert_breakdown_reconciles_tight(&page, &format!("files/{window_label}"));
+
+        // --models
+        let all_models = model_usage_with_filters(
+            &conn,
+            since,
+            None,
+            &DimensionFilters::default(),
+            BREAKDOWN_FETCH_ALL_LIMIT,
+        )
+        .unwrap();
+        let page = paginate_breakdown(all_models, 30);
+        assert_breakdown_reconciles_tight(&page, &format!("models/{window_label}"));
+    }
+}
+
+/// Tight reconciliation: `sum(rows.cost_cents) + other.cost_cents ==
+/// total_cost_cents` to within 0.0005 cents (effectively exact). This
+/// is the contract the #484 audit expected; the pre-8.3.1
+/// `paginate_breakdown` shape drifted by up to a few cents due to f64
+/// associativity between `sum(all_rows)` and `sum(kept) + sum(rest)`.
+fn assert_breakdown_reconciles_tight<T: BreakdownRowCost>(page: &BreakdownPage<T>, label: &str) {
+    let rows_cost: f64 = page.rows.iter().map(BreakdownRowCost::cost_cents).sum();
+    let other_cost = page.other.as_ref().map(|o| o.cost_cents).unwrap_or(0.0);
+    let delta = (rows_cost + other_cost - page.total_cost_cents).abs();
+    assert!(
+        delta < 0.0005,
+        "{label}: rows + other != total_cost_cents to the cent ({rows_cost} + {other_cost} = {} vs {}, delta = {})",
+        rows_cost + other_cost,
+        page.total_cost_cents,
+        delta,
+    );
+    if let Some(other) = page.other.as_ref() {
+        assert!(
+            other.row_count > 0,
+            "{label}: other row must be non-empty when Some(other)"
+        );
+        assert_eq!(
+            page.shown_rows + other.row_count,
+            page.total_rows,
+            "{label}: shown + other != total_rows",
+        );
+    } else {
+        assert_eq!(
+            page.shown_rows, page.total_rows,
+            "{label}: other=None implies shown_rows == total_rows",
+        );
+    }
+}
+
 // ─── #452 text-vs-JSON parity property tests ─────────────────────────────────
 //
 // The audit reported a 74-message gap between `budi stats` text output and
