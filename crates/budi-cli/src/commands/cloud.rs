@@ -17,6 +17,7 @@ use std::fs;
 use std::io::{self, IsTerminal, Write};
 
 use anyhow::{Context, Result, anyhow};
+use budi_core::cloud_sync::{WhoamiOutcome, whoami};
 use budi_core::config::{CLOUD_API_KEY_STUB, cloud_config_path, load_cloud_config};
 use serde_json::Value;
 
@@ -25,13 +26,29 @@ use crate::client::DaemonClient;
 
 use super::ansi;
 
-/// `budi cloud init` — generate a commented `~/.config/budi/cloud.toml`
-/// template so a fresh user never has to hand-write the schema from
-/// ADR-0083 §9. If `api_key` is `Some`, the template is written with
-/// `enabled = true` and the real key in place; otherwise a stub key
-/// (`CLOUD_API_KEY_STUB`) is written so the user can open the file and
-/// paste their real key.
-pub fn cmd_cloud_init(api_key: Option<String>, force: bool, yes: bool) -> Result<()> {
+const DEFAULT_CLOUD_ENDPOINT: &str = "https://app.getbudi.dev";
+
+/// `budi cloud init` — generate `~/.config/budi/cloud.toml` from the
+/// documented template so a fresh user never has to hand-write the
+/// schema from ADR-0083 §9.
+///
+/// 8.3.4 (#521) auto-seeds `device_id` on a subsequent `budi init`.
+/// 8.3.5 (#541) goes further: when `--api-key KEY` is supplied and
+/// `--org-id` isn't set manually, the CLI calls `GET /v1/whoami` to
+/// resolve the `org_id` for that key and writes both identity fields
+/// into the template inline. `--device-id` / `--org-id` are escape
+/// hatches for offline installs or self-hosted clouds that don't
+/// expose `/v1/whoami`. When `whoami` fails (401, 404, network
+/// error), the CLI falls back to the pre-#541 commented-placeholder
+/// template so a transient cloud outage never blocks a user from
+/// writing a config file.
+pub fn cmd_cloud_init(
+    api_key: Option<String>,
+    force: bool,
+    yes: bool,
+    device_id: Option<String>,
+    org_id: Option<String>,
+) -> Result<()> {
     let path = cloud_config_path().context("failed to resolve ~/.config/budi/cloud.toml path")?;
 
     let existed = path.exists();
@@ -63,25 +80,187 @@ pub fn cmd_cloud_init(api_key: Option<String>, force: bool, yes: bool) -> Result
             .with_context(|| format!("failed to create {}", parent.display()))?;
     }
 
-    let (key_value, enabled) = match api_key.as_deref().map(str::trim) {
-        Some(k) if !k.is_empty() => (k.to_string(), true),
-        _ => (CLOUD_API_KEY_STUB.to_string(), false),
+    // Normalize --api-key: empty or whitespace-only strings are treated as
+    // "not provided", so `--api-key ""` behaves like a bare `budi cloud init`.
+    let trimmed_key = api_key.as_deref().map(str::trim).filter(|s| !s.is_empty());
+
+    let (key_value, enabled) = match trimmed_key {
+        Some(k) => (k.to_string(), true),
+        None => (CLOUD_API_KEY_STUB.to_string(), false),
     };
-    let rendered = render_cloud_toml_template(&key_value, enabled);
+
+    // #541: when a real key is on-hand, try to auto-seed device_id +
+    // org_id. Flags override the automatic fetch. The whoami outcome
+    // lets us distinguish "key is bad, don't enable cloud" from "cloud
+    // doesn't expose /v1/whoami, fall through".
+    let seed = match trimmed_key {
+        Some(k) => resolve_seed(k, device_id, org_id),
+        None => SeedOutcome::Skipped,
+    };
+
+    // If whoami rejected the key outright, DON'T write `enabled = true`
+    // — leave the template honest and tell the user.
+    let seed_for_template = match &seed {
+        SeedOutcome::KeyRejected => None,
+        other => other.seeded_ids(),
+    };
+    let effective_enabled = enabled && !matches!(seed, SeedOutcome::KeyRejected);
+
+    let rendered =
+        render_cloud_toml_template(&key_value, effective_enabled, seed_for_template.as_ref());
     fs::write(&path, rendered).with_context(|| format!("failed to write {}", path.display()))?;
 
-    render_init_text(&path, existed, enabled);
+    render_init_text(&path, existed, effective_enabled, &seed);
     Ok(())
+}
+
+/// Identity pair seeded into the new `cloud.toml`. Each id is tagged
+/// with its provenance so the init output can say
+/// "device_id auto-generated" vs "device_id from --device-id flag".
+#[derive(Debug, Clone)]
+pub(crate) struct SeededIdentity {
+    pub device_id: String,
+    pub device_id_source: IdentitySource,
+    pub org_id: Option<String>,
+    pub org_id_source: Option<IdentitySource>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum IdentitySource {
+    /// Generated via UUID v4 in this process.
+    Generated,
+    /// Pulled from `GET /v1/whoami`.
+    Whoami,
+    /// Passed explicitly via `--device-id` / `--org-id`.
+    Flag,
+}
+
+/// Outcome of the #541 seeding flow, carried from `cmd_cloud_init` down
+/// to the template renderer + the human-facing printout.
+#[derive(Debug, Clone)]
+pub(crate) enum SeedOutcome {
+    /// No `--api-key` supplied — seeding not attempted (pre-#541 behavior).
+    Skipped,
+    /// Cloud auth rejected the key. Template reverts to disabled + stub.
+    KeyRejected,
+    /// Cloud returned 404/405 — endpoint not present on this deployment.
+    EndpointAbsent {
+        status: u16,
+        device_id: String,
+        device_id_source: IdentitySource,
+    },
+    /// Network / 5xx / parse failure talking to the cloud.
+    TransientError {
+        detail: String,
+        device_id: String,
+        device_id_source: IdentitySource,
+    },
+    /// Happy path: device_id + org_id both resolved.
+    Seeded(SeededIdentity),
+}
+
+impl SeedOutcome {
+    fn seeded_ids(&self) -> Option<SeededIdentity> {
+        match self {
+            SeedOutcome::Seeded(ids) => Some(ids.clone()),
+            SeedOutcome::EndpointAbsent {
+                device_id,
+                device_id_source,
+                ..
+            }
+            | SeedOutcome::TransientError {
+                device_id,
+                device_id_source,
+                ..
+            } => Some(SeededIdentity {
+                device_id: device_id.clone(),
+                device_id_source: *device_id_source,
+                org_id: None,
+                org_id_source: None,
+            }),
+            SeedOutcome::Skipped | SeedOutcome::KeyRejected => None,
+        }
+    }
+}
+
+/// #541: resolve the device_id + org_id for a fresh cloud.toml.
+/// - `--device-id` overrides UUID v4 generation.
+/// - `--org-id` overrides the whoami fetch entirely (skips the network
+///   call — useful for offline installs).
+/// - Otherwise we call `GET /v1/whoami` against the default endpoint.
+pub(crate) fn resolve_seed(
+    api_key: &str,
+    device_id_flag: Option<String>,
+    org_id_flag: Option<String>,
+) -> SeedOutcome {
+    let (device_id, device_id_source) = match device_id_flag {
+        Some(id) => (id, IdentitySource::Flag),
+        None => (uuid::Uuid::new_v4().to_string(), IdentitySource::Generated),
+    };
+
+    if let Some(org_id_override) = org_id_flag {
+        return SeedOutcome::Seeded(SeededIdentity {
+            device_id,
+            device_id_source,
+            org_id: Some(org_id_override),
+            org_id_source: Some(IdentitySource::Flag),
+        });
+    }
+
+    match whoami(DEFAULT_CLOUD_ENDPOINT, api_key) {
+        WhoamiOutcome::Ok(resp) => SeedOutcome::Seeded(SeededIdentity {
+            device_id,
+            device_id_source,
+            org_id: Some(resp.org_id),
+            org_id_source: Some(IdentitySource::Whoami),
+        }),
+        WhoamiOutcome::Unauthorized => SeedOutcome::KeyRejected,
+        WhoamiOutcome::EndpointAbsent(status) => SeedOutcome::EndpointAbsent {
+            status,
+            device_id,
+            device_id_source,
+        },
+        WhoamiOutcome::TransientError(detail) => SeedOutcome::TransientError {
+            detail,
+            device_id,
+            device_id_source,
+        },
+    }
 }
 
 /// Build the on-disk template text. Kept pure and public-to-crate so the
 /// unit tests can pin the shape without going through the filesystem.
-fn render_cloud_toml_template(api_key: &str, enabled: bool) -> String {
+///
+/// `seeded` is `Some` when `budi cloud init --api-key KEY` resolved the
+/// device_id (+ optionally org_id via whoami) in-process. The two ids
+/// then land as uncommented TOML lines instead of the commented
+/// placeholders; if only device_id resolved (e.g. whoami fell through
+/// to `EndpointAbsent` / `TransientError`), org_id stays commented.
+pub(crate) fn render_cloud_toml_template(
+    api_key: &str,
+    enabled: bool,
+    seeded: Option<&SeededIdentity>,
+) -> String {
     // Heavily commented so a user reading the file understands every field
     // without cross-referencing ADR-0083. Keep lines <= 78 cols so a
     // standard terminal pager doesn't wrap.
     let enabled_line = if enabled { "true" } else { "false" };
     let today = chrono::Utc::now().format("%Y-%m-%d");
+
+    let (device_id_line, org_id_line) = match seeded {
+        Some(ids) => (
+            format!("device_id = \"{}\"", ids.device_id),
+            match ids.org_id.as_deref() {
+                Some(v) => format!("org_id = \"{v}\""),
+                None => "# org_id = \"your-org-id\"".to_string(),
+            },
+        ),
+        None => (
+            "# device_id = \"your-device-id\"".to_string(),
+            "# org_id = \"your-org-id\"".to_string(),
+        ),
+    };
+
     format!(
         "\
 # budi cloud sync configuration (ADR-0083 §9)
@@ -106,16 +285,14 @@ endpoint = \"https://app.getbudi.dev\"
 # These two fields identify which device and workspace the daily rollups
 # belong to on the dashboard.
 #
-# `device_id` is auto-seeded by `budi init` (UUID v4) once `enabled = true`
-# and `api_key` is non-stub. You can also set it explicitly for multi-
-# machine setups — any stable non-empty string works.
-#
-# `org_id` must be copied by hand from the Settings page at
-# https://app.getbudi.dev/dashboard/settings — `budi init` does not
-# reach out to the dashboard to discover it. `budi cloud sync` refuses
-# to run until both fields are present (see `budi cloud status`).
-# device_id = \"your-device-id\"
-# org_id = \"your-org-id\"
+# When `budi cloud init --api-key KEY` is run with a real key, both are
+# auto-seeded: `device_id` from a fresh UUID v4, `org_id` from the
+# cloud's `/v1/whoami` endpoint. Pass `--device-id` / `--org-id` to
+# override either lookup (useful on multi-machine setups or self-
+# hosted clouds that don't expose `/v1/whoami`). `budi cloud sync`
+# refuses to run until both fields are present (see `budi cloud status`).
+{device_id_line}
+{org_id_line}
 
 [cloud.sync]
 # Background sync interval in seconds. Defaults to 300 (5 minutes).
@@ -150,8 +327,10 @@ fn confirm_overwrite(path: &std::path::Path) -> Result<bool> {
     ))
 }
 
-fn render_init_text(path: &std::path::Path, existed: bool, enabled: bool) {
+fn render_init_text(path: &std::path::Path, existed: bool, enabled: bool, seed: &SeedOutcome) {
     let green = ansi("\x1b[32m");
+    let yellow = ansi("\x1b[33m");
+    let red = ansi("\x1b[31m");
     let dim = ansi("\x1b[90m");
     let bold = ansi("\x1b[1m");
     let reset = ansi("\x1b[0m");
@@ -162,6 +341,56 @@ fn render_init_text(path: &std::path::Path, existed: bool, enabled: bool) {
         "  {green}✓{reset} {bold}{verb} cloud config template:{reset} {}",
         path.display()
     );
+
+    // #541: surface what the seeding flow did. Each SeedOutcome variant
+    // maps to a single line explaining "what's in the file and why".
+    // `Skipped` stays quiet (matches pre-#541 render shape for the
+    // bare-run path) — the trailing "Next steps" block already covers it.
+    match seed {
+        SeedOutcome::Skipped => {}
+        SeedOutcome::Seeded(ids) => {
+            println!();
+            println!("  {green}✓{reset} {bold}Seeded cloud identity:{reset}",);
+            println!(
+                "    {dim}device_id:{reset} {}  {dim}({}){reset}",
+                ids.device_id,
+                describe_source(ids.device_id_source),
+            );
+            if let (Some(org), Some(src)) = (ids.org_id.as_deref(), ids.org_id_source) {
+                println!(
+                    "    {dim}org_id:{reset}    {org}  {dim}({}){reset}",
+                    describe_source(src),
+                );
+            }
+        }
+        SeedOutcome::KeyRejected => {
+            println!();
+            println!(
+                "  {red}✗{reset} {bold}API key rejected by cloud.{reset} Template was written with {bold}enabled = false{reset} and the placeholder key; fix the key and re-run `budi cloud init --api-key KEY --force`."
+            );
+        }
+        SeedOutcome::EndpointAbsent {
+            status, device_id, ..
+        } => {
+            println!();
+            println!(
+                "  {yellow}!{reset} {bold}Cloud endpoint returned {status}{reset} for `/v1/whoami` — auto-seeding `org_id` wasn't available. device_id was still generated ({}). Set `org_id` manually in {} or re-run with `--org-id <ID>`.",
+                device_id,
+                path.display(),
+            );
+        }
+        SeedOutcome::TransientError {
+            detail, device_id, ..
+        } => {
+            println!();
+            println!(
+                "  {yellow}!{reset} {bold}Couldn't reach cloud to auto-seed org_id:{reset} {detail}. device_id was still generated ({}). Set `org_id` manually in {} or re-run with `--org-id <ID>`.",
+                device_id,
+                path.display(),
+            );
+        }
+    }
+
     println!();
     if enabled {
         println!("  {bold}Next steps{reset}");
@@ -183,6 +412,14 @@ fn render_init_text(path: &std::path::Path, existed: bool, enabled: bool) {
         println!("    6. {dim}Push now:{reset} budi cloud sync");
     }
     println!();
+}
+
+fn describe_source(src: IdentitySource) -> &'static str {
+    match src {
+        IdentitySource::Generated => "generated",
+        IdentitySource::Whoami => "from /v1/whoami",
+        IdentitySource::Flag => "from flag",
+    }
 }
 
 /// `budi cloud sync` — flush the pending cloud queue now.
@@ -393,7 +630,7 @@ mod tests {
 
     #[test]
     fn template_stub_variant_is_disabled_and_carries_placeholder() {
-        let out = render_cloud_toml_template(CLOUD_API_KEY_STUB, false);
+        let out = render_cloud_toml_template(CLOUD_API_KEY_STUB, false, None);
         assert!(out.contains("enabled = false"));
         assert!(out.contains("PASTE_YOUR_KEY_HERE"));
         assert!(
@@ -408,7 +645,7 @@ mod tests {
 
     #[test]
     fn template_with_real_key_is_enabled() {
-        let out = render_cloud_toml_template("fake-test-key", true);
+        let out = render_cloud_toml_template("fake-test-key", true, None);
         assert!(out.contains("enabled = true"));
         assert!(out.contains("api_key = \"fake-test-key\""));
         // The comment above `api_key = ...` legitimately references the
@@ -424,7 +661,7 @@ mod tests {
 
     #[test]
     fn template_is_valid_toml_and_round_trips_through_cloud_config() {
-        let out = render_cloud_toml_template("fake-test-key", true);
+        let out = render_cloud_toml_template("fake-test-key", true, None);
         // The generated file uses a top-level [cloud] section, so parse it
         // via a small wrapper that mirrors `load_cloud_config`'s contract.
         #[derive(serde::Deserialize)]
@@ -440,7 +677,7 @@ mod tests {
 
     #[test]
     fn template_stub_round_trips_as_stub() {
-        let out = render_cloud_toml_template(CLOUD_API_KEY_STUB, false);
+        let out = render_cloud_toml_template(CLOUD_API_KEY_STUB, false, None);
         #[derive(serde::Deserialize)]
         struct Wrapper {
             cloud: CloudConfig,
@@ -448,5 +685,107 @@ mod tests {
         let w: Wrapper = toml::from_str(&out).unwrap();
         assert!(!w.cloud.enabled);
         assert!(w.cloud.is_api_key_stub());
+    }
+
+    #[test]
+    fn template_with_full_seed_writes_uncommented_identity_lines() {
+        // #541 happy path: device_id + org_id both land as real TOML
+        // assignments, not commented placeholders.
+        let seed = SeededIdentity {
+            device_id: "7b322df1-3bcd-4e72-9e2a-0b2f3c4d5e6f".to_string(),
+            device_id_source: IdentitySource::Generated,
+            org_id: Some("org_xEvtA".to_string()),
+            org_id_source: Some(IdentitySource::Whoami),
+        };
+        let out = render_cloud_toml_template("budi_realkey", true, Some(&seed));
+        assert!(out.contains("device_id = \"7b322df1-3bcd-4e72-9e2a-0b2f3c4d5e6f\""));
+        assert!(out.contains("org_id = \"org_xEvtA\""));
+        // No commented placeholder lines should leak through.
+        assert!(!out.contains("# device_id = \"your-device-id\""));
+        assert!(!out.contains("# org_id = \"your-org-id\""));
+
+        // Round-trip through CloudConfig to make sure the uncommented
+        // lines parse and are picked up by the loader.
+        #[derive(serde::Deserialize)]
+        struct Wrapper {
+            cloud: CloudConfig,
+        }
+        let w: Wrapper = toml::from_str(&out).expect("seeded template parses");
+        assert_eq!(
+            w.cloud.device_id.as_deref(),
+            Some("7b322df1-3bcd-4e72-9e2a-0b2f3c4d5e6f"),
+        );
+        assert_eq!(w.cloud.org_id.as_deref(), Some("org_xEvtA"));
+        assert!(
+            w.cloud.is_ready(),
+            "full seed should produce a ready config"
+        );
+    }
+
+    #[test]
+    fn template_with_device_id_only_leaves_org_id_commented() {
+        // #541 fallback: whoami failed (EndpointAbsent / TransientError)
+        // → device_id still seeded, org_id stays commented so the user
+        // has to set it manually.
+        let seed = SeededIdentity {
+            device_id: "7b322df1-3bcd-4e72-9e2a-0b2f3c4d5e6f".to_string(),
+            device_id_source: IdentitySource::Generated,
+            org_id: None,
+            org_id_source: None,
+        };
+        let out = render_cloud_toml_template("budi_realkey", true, Some(&seed));
+        assert!(out.contains("device_id = \"7b322df1-3bcd-4e72-9e2a-0b2f3c4d5e6f\""));
+        assert!(out.contains("# org_id = \"your-org-id\""));
+        // Round-trip: not is_ready because org_id is None.
+        #[derive(serde::Deserialize)]
+        struct Wrapper {
+            cloud: CloudConfig,
+        }
+        let w: Wrapper = toml::from_str(&out).unwrap();
+        assert!(!w.cloud.is_ready());
+        assert_eq!(
+            w.cloud.disabled_reason(),
+            Some("missing org_id"),
+            "fallback config must surface the precise missing field",
+        );
+    }
+
+    #[test]
+    fn seed_outcome_seeded_ids_mirrors_the_variant() {
+        // #541: `SeedOutcome::seeded_ids` is the helper that feeds the
+        // template renderer. KeyRejected / Skipped must yield None; the
+        // remaining variants must surface device_id so the template at
+        // least records what was generated even when cloud is down.
+        assert!(SeedOutcome::Skipped.seeded_ids().is_none());
+        assert!(SeedOutcome::KeyRejected.seeded_ids().is_none());
+
+        let absent = SeedOutcome::EndpointAbsent {
+            status: 404,
+            device_id: "dev-1".to_string(),
+            device_id_source: IdentitySource::Generated,
+        };
+        let got = absent.seeded_ids().unwrap();
+        assert_eq!(got.device_id, "dev-1");
+        assert!(got.org_id.is_none());
+
+        let transient = SeedOutcome::TransientError {
+            detail: "boom".to_string(),
+            device_id: "dev-2".to_string(),
+            device_id_source: IdentitySource::Flag,
+        };
+        let got = transient.seeded_ids().unwrap();
+        assert_eq!(got.device_id, "dev-2");
+        assert_eq!(got.device_id_source, IdentitySource::Flag);
+        assert!(got.org_id.is_none());
+
+        let seeded = SeedOutcome::Seeded(SeededIdentity {
+            device_id: "dev-3".to_string(),
+            device_id_source: IdentitySource::Generated,
+            org_id: Some("org_x".to_string()),
+            org_id_source: Some(IdentitySource::Whoami),
+        });
+        let got = seeded.seeded_ids().unwrap();
+        assert_eq!(got.org_id.as_deref(), Some("org_x"));
+        assert_eq!(got.org_id_source, Some(IdentitySource::Whoami));
     }
 }
