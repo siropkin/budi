@@ -10,7 +10,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::daemon::{daemon_health, ensure_daemon_running, resolve_daemon_binary};
 
-pub fn cmd_doctor(repo_root: Option<PathBuf>, deep: bool) -> Result<()> {
+pub fn cmd_doctor(repo_root: Option<PathBuf>, deep: bool, quiet: bool) -> Result<()> {
     let repo_root = super::try_resolve_repo_root(repo_root);
     let config = match &repo_root {
         Some(root) => config::load_or_default(root)?,
@@ -30,7 +30,7 @@ pub fn cmd_doctor(repo_root: Option<PathBuf>, deep: bool) -> Result<()> {
     let mut report = DoctorReport::default();
 
     let daemon = check_daemon_health(repo_root.as_deref(), &config);
-    daemon.result.print();
+    daemon.result.print_respecting(quiet);
     report.record(&daemon.result);
 
     if daemon.started_this_run {
@@ -42,20 +42,20 @@ pub fn cmd_doctor(repo_root: Option<PathBuf>, deep: bool) -> Result<()> {
 
     let db_path = budi_core::analytics::db_path()?;
     let schema = check_schema(&db_path, deep);
-    schema.result.print();
+    schema.result.print_respecting(quiet);
     report.record(&schema.result);
 
     let proxy_residue = check_legacy_proxy_residue();
-    proxy_residue.print();
+    proxy_residue.print_respecting(quiet);
     report.record(&proxy_residue);
 
     let statusline_check = check_claude_statusline_integration();
-    statusline_check.print();
+    statusline_check.print_respecting(quiet);
     report.record(&statusline_check);
 
     if let Some(conn) = schema.conn.as_ref() {
         let legacy_proxy_history = check_legacy_proxy_history(conn);
-        legacy_proxy_history.print();
+        legacy_proxy_history.print_respecting(quiet);
         report.record(&legacy_proxy_history);
     }
 
@@ -69,7 +69,7 @@ pub fn cmd_doctor(repo_root: Option<PathBuf>, deep: bool) -> Result<()> {
                     .to_string(),
             ),
         );
-        no_providers.print();
+        no_providers.print_respecting(quiet);
         report.record(&no_providers);
     } else {
         let conn = schema.conn.as_ref();
@@ -77,17 +77,20 @@ pub fn cmd_doctor(repo_root: Option<PathBuf>, deep: bool) -> Result<()> {
             let diag = gather_provider_doctor_data(conn, provider.as_ref());
 
             let tailer = summarize_tailer_health(&diag);
-            tailer.print();
+            tailer.print_respecting(quiet);
             report.record(&tailer);
 
             let visibility = summarize_transcript_visibility(&diag);
-            visibility.print();
+            visibility.print_respecting(quiet);
             report.record(&visibility);
         }
     }
 
     println!();
     if report.fails == 0 && report.warns == 0 {
+        // #487: on a clean green run, `--quiet` suppresses every
+        // individual PASS line above; the final summary stays as-is
+        // so the operator still gets the one-line all-clear signal.
         println!("All checks passed.");
         return Ok(());
     }
@@ -204,6 +207,20 @@ impl CheckResult {
         if let Some(ref fix) = self.fix {
             println!("       fix: {fix}");
         }
+    }
+
+    /// Print unless `quiet` is set and the state is `Pass`. Keeps
+    /// WARN / FAIL lines visible in every mode so an operator never
+    /// misses a real problem under `--quiet`; exists as a named
+    /// helper (rather than an inline `if`) so #487's contract is
+    /// testable at the unit level and so new callers can't forget
+    /// to respect `--quiet`. Green-path PASS lines + summary line
+    /// are still printed on the default (non-quiet) path.
+    fn print_respecting(&self, quiet: bool) {
+        if quiet && self.state == CheckState::Pass {
+            return;
+        }
+        self.print();
     }
 }
 

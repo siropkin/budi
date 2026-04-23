@@ -47,6 +47,11 @@ enum Commands {
         /// Run full SQLite integrity_check (slower). Default uses quick_check.
         #[arg(long, default_value_t = false)]
         deep: bool,
+        /// Suppress individual PASS lines on a green run — WARN / FAIL
+        /// lines and the final summary still render. Useful for CI
+        /// gates and for a glance-only human check on a working box.
+        #[arg(long, default_value_t = false)]
+        quiet: bool,
         #[arg(long, hide = true)]
         repo_root: Option<PathBuf>,
     },
@@ -559,7 +564,11 @@ fn main() -> Result<()> {
             no_integrations,
             no_daemon,
         } => commands::init::cmd_init(cleanup, yes, no_integrations, no_daemon),
-        Commands::Doctor { deep, repo_root } => commands::doctor::cmd_doctor(repo_root, deep),
+        Commands::Doctor {
+            deep,
+            quiet,
+            repo_root,
+        } => commands::doctor::cmd_doctor(repo_root, deep, quiet),
         Commands::Stats {
             period,
             projects,
@@ -814,7 +823,27 @@ mod tests {
     fn cli_parses_doctor_deep_flag() {
         let cli = Cli::try_parse_from(["budi", "doctor", "--deep"]).expect("doctor --deep parses");
         match cli.command {
-            Commands::Doctor { deep, .. } => assert!(deep),
+            Commands::Doctor { deep, quiet, .. } => {
+                assert!(deep);
+                assert!(!quiet, "--deep should not imply --quiet");
+            }
+            _ => panic!("expected doctor command"),
+        }
+    }
+
+    /// #487 (U-4): `--quiet` suppresses individual PASS lines on a
+    /// green run. The flag is parsed in isolation here; the rendering
+    /// contract (`CheckResult::print_respecting`) has its own unit
+    /// coverage in `commands::doctor::tests`.
+    #[test]
+    fn cli_parses_doctor_quiet_flag() {
+        let cli =
+            Cli::try_parse_from(["budi", "doctor", "--quiet"]).expect("doctor --quiet parses");
+        match cli.command {
+            Commands::Doctor { deep, quiet, .. } => {
+                assert!(quiet);
+                assert!(!deep, "--quiet should not imply --deep");
+            }
             _ => panic!("expected doctor command"),
         }
     }
