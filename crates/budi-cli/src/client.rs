@@ -405,6 +405,15 @@ impl DaemonClient {
     /// refresh, bypassing the worker's 24 h cadence. Longer timeout than
     /// `pricing_status` because this actually hits the network and runs
     /// validation + atomic write + backfill.
+    ///
+    /// #493 (RC-3): the daemon returns 502 on a validation failure with
+    /// a structured `{"ok": false, "error": "..."}` body. Those
+    /// validation bodies are a first-class signal for the CLI renderer,
+    /// not a generic "Bad Gateway". This method short-circuits
+    /// `check_response` whenever the 502 payload parses as that shape
+    /// so the caller sees the structured body; the CLI in
+    /// `cmd_pricing_status` already distinguishes `body.ok == true`
+    /// from `body.ok == false` on the rendering side.
     pub fn pricing_refresh(&self) -> Result<Value> {
         let resp = self
             .client
@@ -412,8 +421,29 @@ impl DaemonClient {
             .timeout(std::time::Duration::from_secs(60))
             .send()
             .map_err(describe_send_error)?;
-        let resp = check_response(resp)?;
-        Ok(resp.json()?)
+        let status = resp.status();
+        if status.is_success() {
+            return Ok(resp.json()?);
+        }
+        if status == reqwest::StatusCode::BAD_GATEWAY {
+            let body = resp.text().unwrap_or_default();
+            if let Ok(parsed) = serde_json::from_str::<Value>(&body)
+                && parsed.get("ok").and_then(Value::as_bool) == Some(false)
+                && parsed.get("error").is_some()
+            {
+                return Ok(parsed);
+            }
+            anyhow::bail!(
+                "Daemon returned 502 on pricing refresh (no JSON body). \
+                 Run `budi doctor` to diagnose. Body: {body}"
+            );
+        }
+        let body = resp.text().unwrap_or_default();
+        if body.is_empty() {
+            anyhow::bail!("Daemon returned {status} on pricing refresh");
+        } else {
+            anyhow::bail!("Daemon returned {status} on pricing refresh: {body}");
+        }
     }
 
     // ─── Analytics ───────────────────────────────────────────────────

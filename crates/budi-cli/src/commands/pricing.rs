@@ -168,9 +168,93 @@ fn render_refresh_text(body: &Value) {
             .and_then(Value::as_str)
             .unwrap_or("refresh failed");
         println!();
-        println!("  {red}✗{reset} Refresh failed: {err}");
-        println!("    {dim}previous cache stays authoritative{reset}");
+        // #493 (RC-3): parse the daemon's validation-error shape and
+        // render a fresh-user-friendly explanation instead of echoing
+        // the raw 502 body text. The three whole-payload validation
+        // failures produce distinct structured reasons via
+        // `ValidationError::Display`; grepping the `err` string for
+        // their prefixes classifies the failure without widening the
+        // `/pricing/refresh` wire contract.
+        let (headline, detail) = classify_refresh_error(err);
+        println!("  {red}✗{reset} {headline}");
+        if let Some(d) = detail {
+            println!("    {dim}{d}{reset}");
+        }
+        println!(
+            "    {dim}Budi is continuing with its previous pricing source. Run `budi pricing status` to see which.{reset}"
+        );
     }
+}
+
+/// RC-3 (#493): translate a daemon `/pricing/refresh` error string into
+/// a headline + optional detail pair the CLI can render without echoing
+/// the raw 502 body. Every match arm below corresponds to a
+/// `ValidationError::Display` shape from
+/// `budi_core::pricing::ValidationError`; the fallback preserves the
+/// daemon's exact text so nothing is silently dropped.
+fn classify_refresh_error(err: &str) -> (String, Option<String>) {
+    // The common pre-amendment "one bad row blocked every refresh" path
+    // was `validation rejected: model X price $Y/M exceeds sanity ceiling
+    // $1000/M`. 8.3.1's row-level rejection means this specific whole-
+    // payload failure should never fire from a properly-deployed daemon
+    // — but if an operator runs a mixed daemon/CLI version (or a future
+    // validation shape reuses the phrasing), the friendly wrap still
+    // applies.
+    if err.contains("exceeds sanity ceiling") {
+        return (
+            "Pricing manifest refresh rejected by the sanity ceiling".to_string(),
+            Some(format!(
+                "Upstream row over the $1,000/M per-token ceiling: {}",
+                shorten_error_for_human_eye(err)
+            )),
+        );
+    }
+    if err.contains("previously-known models retained") {
+        return (
+            "Pricing manifest refresh below the retention floor".to_string(),
+            Some(format!(
+                "Fewer than 95% of previously-known models survived this refresh. Details: {}",
+                shorten_error_for_human_eye(err)
+            )),
+        );
+    }
+    if err.contains("exceeds") && err.contains("-byte cap") {
+        return (
+            "Pricing manifest refresh rejected: payload too large".to_string(),
+            Some(format!(
+                "Upstream payload exceeded the 10 MB size cap. Details: {}",
+                shorten_error_for_human_eye(err)
+            )),
+        );
+    }
+    if err.contains("negative or NaN price") {
+        return (
+            "Pricing manifest refresh rejected: malformed price value".to_string(),
+            Some(format!(
+                "One or more upstream rows had a negative or NaN price. Details: {}",
+                shorten_error_for_human_eye(err)
+            )),
+        );
+    }
+    if err.contains("upstream fetch failed") || err.contains("upstream read failed") {
+        return (
+            "Pricing manifest refresh could not reach upstream".to_string(),
+            Some("Network error fetching the LiteLLM manifest. Check connectivity, or set `BUDI_PRICING_REFRESH=0` to disable the refresher."
+                .to_string()),
+        );
+    }
+    // Fallback: preserve the daemon's exact text so no information is
+    // dropped. Still reads better than `Daemon returned 502 Bad Gateway
+    // { ... JSON ... }`.
+    (format!("Refresh failed: {err}"), None)
+}
+
+/// Trim the daemon's raw `validation rejected:` prefix so the wrapped
+/// output doesn't repeat the word "rejected" next to the headline.
+fn shorten_error_for_human_eye(err: &str) -> String {
+    err.strip_prefix("validation rejected: ")
+        .unwrap_or(err)
+        .to_string()
 }
 
 fn render_status_text(body: &Value) {
@@ -269,4 +353,80 @@ fn render_status_text(body: &Value) {
         }
     }
     println!();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// #493 (RC-3): every `ValidationError::Display` shape from
+    /// `budi_core::pricing::ValidationError` has a matching classifier
+    /// arm. The pre-fix pattern was that a validation failure
+    /// surfaced as `Error: Daemon returned 502 Bad Gateway: {...raw
+    /// JSON...}` — this test locks in the friendly wrap for every
+    /// variant so a future Display string change fails here first.
+    #[test]
+    fn classify_refresh_error_covers_every_validation_variant() {
+        let cases: &[(&str, &str)] = &[
+            // SanityCeilingExceeded
+            (
+                "validation rejected: model wandb/Qwen/Qwen3-Coder-480B-A35B-Instruct price $100000.00/M exceeds sanity ceiling $1000/M",
+                "sanity ceiling",
+            ),
+            // RetentionBelowFloor
+            (
+                "validation rejected: only 80 of required 95 previously-known models retained",
+                "retention floor",
+            ),
+            // PayloadTooLarge
+            (
+                "validation rejected: payload 11000000 bytes exceeds 10485760-byte cap",
+                "payload too large",
+            ),
+            // NegativePrice / NaN
+            (
+                "validation rejected: model foo has a negative or NaN price",
+                "malformed price",
+            ),
+            // Upstream network failure
+            (
+                "upstream fetch failed: request timed out",
+                "could not reach upstream",
+            ),
+        ];
+        for (raw, expected_headline_fragment) in cases {
+            let (headline, detail) = classify_refresh_error(raw);
+            assert!(
+                headline
+                    .to_lowercase()
+                    .contains(&expected_headline_fragment.to_lowercase()),
+                "headline for {raw:?} was {headline:?}, expected to contain {expected_headline_fragment:?}",
+            );
+            assert!(
+                detail.is_some(),
+                "every classified variant should have a non-empty detail line (raw={raw:?})",
+            );
+            // The friendly output must NOT contain the raw
+            // `validation rejected:` prefix — that's daemon-speak.
+            assert!(
+                !headline.contains("validation rejected"),
+                "headline must drop the 'validation rejected:' prefix (raw={raw:?}, headline={headline:?})",
+            );
+        }
+
+        // Fallback path: preserve the exact text so nothing is lost.
+        let (headline, detail) = classify_refresh_error("some unexpected daemon error");
+        assert_eq!(headline, "Refresh failed: some unexpected daemon error");
+        assert!(detail.is_none());
+    }
+
+    #[test]
+    fn shorten_error_strips_validation_rejected_prefix() {
+        assert_eq!(
+            shorten_error_for_human_eye("validation rejected: foo bar"),
+            "foo bar"
+        );
+        assert_eq!(shorten_error_for_human_eye("foo bar"), "foo bar");
+        assert_eq!(shorten_error_for_human_eye(""), "");
+    }
 }
