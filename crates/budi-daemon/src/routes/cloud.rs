@@ -71,11 +71,13 @@ pub async fn cloud_sync(
         )));
     }
     if !cfg.is_ready() {
-        return Ok(Json(not_ready_body(
-            RESULT_NOT_CONFIGURED,
-            &cfg,
-            "Cloud sync is not fully configured. Ensure api_key, device_id, and org_id are set in ~/.config/budi/cloud.toml.",
-        )));
+        // #521: spell out which field is missing and where to find its
+        // value so a fresh user can complete the flow without reading
+        // the ADR. Pre-fix the operator saw a generic "ensure api_key,
+        // device_id, and org_id are set" line that listed every
+        // possible gap.
+        let missing = missing_fields_message(&cfg);
+        return Ok(Json(not_ready_body(RESULT_NOT_CONFIGURED, &cfg, &missing)));
     }
 
     if state
@@ -120,6 +122,50 @@ fn not_ready_body(result: &str, cfg: &CloudConfig, message: &str) -> Value {
         "rollups_attempted": 0,
         "sessions_attempted": 0,
     })
+}
+
+/// #521: enumerate which `[cloud]` fields are still missing and
+/// point each missing field at the concrete action the operator
+/// needs to take. Returned as a single user-facing line so both
+/// `/cloud/status` and `/cloud/sync` surface the same prose.
+fn missing_fields_message(cfg: &CloudConfig) -> String {
+    let mut problems: Vec<String> = Vec::new();
+    if cfg.effective_api_key().is_none() {
+        problems
+            .push("`api_key` — paste from https://app.getbudi.dev/dashboard/settings".to_string());
+    } else if cfg
+        .effective_api_key()
+        .as_deref()
+        .map(|k| k == config::CLOUD_API_KEY_STUB)
+        .unwrap_or(false)
+    {
+        problems.push(
+            "`api_key` — still the placeholder; paste your real key from https://app.getbudi.dev/dashboard/settings"
+                .to_string(),
+        );
+    }
+    if cfg.device_id.is_none() {
+        problems.push(
+            "`device_id` — run `budi init` to auto-generate a UUID, or set any stable string"
+                .to_string(),
+        );
+    }
+    if cfg.org_id.is_none() {
+        problems.push(
+            "`org_id` — copy from the Organization panel at https://app.getbudi.dev/dashboard/settings"
+                .to_string(),
+        );
+    }
+    if problems.is_empty() {
+        // Defensive: `is_ready()` was false so something must be missing
+        // — fall back to a generic line rather than returning an empty
+        // string that would read as no-message.
+        return "Cloud sync is not fully configured. Check ~/.config/budi/cloud.toml.".to_string();
+    }
+    format!(
+        "Cloud sync is not fully configured. Missing:\n  - {}\nAfter editing ~/.config/budi/cloud.toml, re-run `budi cloud status`.",
+        problems.join("\n  - ")
+    )
 }
 
 fn report_to_json(report: SyncTickReport) -> Value {

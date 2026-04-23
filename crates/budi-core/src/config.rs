@@ -568,6 +568,129 @@ pub fn cloud_config_exists() -> bool {
         .unwrap_or(false)
 }
 
+/// Outcome of a call to [`seed_cloud_device_id_if_needed`]. Surfaced to
+/// the CLI so `budi init` can log exactly what happened (generated /
+/// already set / skipped because cloud is disabled).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SeedDeviceIdOutcome {
+    /// `cloud.toml` didn't exist, cloud was disabled, or the api_key is
+    /// still the stub. No seeding attempted. The CLI shouldn't nag the
+    /// user — they haven't opted into cloud yet.
+    Skipped,
+    /// `device_id` was already present in the config file. No-op.
+    AlreadySet,
+    /// Generated a fresh UUID v4 and wrote it into the commented
+    /// `# device_id = ...` slot. Returns the generated id so the CLI
+    /// can log it for operator visibility.
+    Generated(String),
+}
+
+/// If the on-disk cloud config has `enabled = true` + a non-stub
+/// `api_key` + no `device_id`, generate a fresh UUID v4 and write it
+/// into the `device_id` line. Preserves all other content (comments,
+/// formatting, other fields) by doing a targeted string edit rather
+/// than a serde round-trip that would drop comments.
+///
+/// Idempotent: returns `AlreadySet` on the second call without
+/// touching the file. Returns `Skipped` whenever cloud sync isn't
+/// configured enough to matter — fresh installs that never opted
+/// into cloud never see a `cloud.toml` modification.
+///
+/// `org_id` is NOT auto-generated; it has to come from the dashboard
+/// Settings page. The CLI render step nudges users to that value
+/// separately.
+///
+/// See #521 for context.
+pub fn seed_cloud_device_id_if_needed() -> Result<SeedDeviceIdOutcome> {
+    let path = cloud_config_path()?;
+    if !path.exists() {
+        return Ok(SeedDeviceIdOutcome::Skipped);
+    }
+
+    // Re-read the raw file for string-level editing (parser drops comments).
+    let raw = fs::read_to_string(&path)
+        .with_context(|| format!("read cloud config at {}", path.display()))?;
+
+    // Parse the struct to check gating conditions (enabled + real api_key).
+    let config = load_cloud_config();
+    if !config.effective_enabled() {
+        return Ok(SeedDeviceIdOutcome::Skipped);
+    }
+    let api_key = match config.effective_api_key() {
+        Some(k) if !k.is_empty() && k != CLOUD_API_KEY_STUB => k,
+        _ => return Ok(SeedDeviceIdOutcome::Skipped),
+    };
+    let _ = api_key; // used only for the gate
+
+    if config.device_id.is_some() {
+        return Ok(SeedDeviceIdOutcome::AlreadySet);
+    }
+
+    // Generate a fresh UUID v4. `uuid` is already a workspace dep.
+    let new_device_id = uuid::Uuid::new_v4().to_string();
+
+    // Surgical string edit: replace the commented template line. The
+    // template writes exactly `# device_id = "your-device-id"`; match
+    // that verbatim, fall back to appending a fresh `device_id` line
+    // under `[cloud]` when the commented template line is absent (e.g.
+    // the user hand-removed it).
+    let commented = "# device_id = \"your-device-id\"";
+    let uncommented = format!("device_id = \"{new_device_id}\"");
+
+    let new_raw = if raw.contains(commented) {
+        raw.replacen(commented, &uncommented, 1)
+    } else {
+        // Fallback: append the field under the `[cloud]` section. Walk
+        // the raw lines to find the first `[cloud]` header line and
+        // insert after the `api_key` line (so the field lives inside
+        // the `[cloud]` table, not accidentally in `[cloud.sync]`).
+        match find_insertion_line_for_device_id(&raw) {
+            Some(idx) => {
+                let mut lines: Vec<String> = raw.lines().map(str::to_string).collect();
+                lines.insert(idx, uncommented.clone());
+                // Preserve the trailing newline of the original file.
+                let mut joined = lines.join("\n");
+                if raw.ends_with('\n') {
+                    joined.push('\n');
+                }
+                joined
+            }
+            None => {
+                // Truly foreign structure — don't rewrite; let the
+                // user hand-edit. Surface as skipped so the CLI
+                // doesn't claim a generation that didn't happen.
+                return Ok(SeedDeviceIdOutcome::Skipped);
+            }
+        }
+    };
+
+    fs::write(&path, new_raw)
+        .with_context(|| format!("write cloud config at {}", path.display()))?;
+
+    Ok(SeedDeviceIdOutcome::Generated(new_device_id))
+}
+
+/// Locate the line index in `raw` where a fresh `device_id = "..."`
+/// line should be inserted when the commented template slot is
+/// missing. Returns the line immediately after the last `api_key = ...`
+/// line inside the `[cloud]` section (before any `[cloud.sync]` or
+/// other table), or `None` if no such anchor is found.
+fn find_insertion_line_for_device_id(raw: &str) -> Option<usize> {
+    let mut in_cloud_section = false;
+    let mut last_api_key_line: Option<usize> = None;
+    for (i, line) in raw.lines().enumerate() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('[') {
+            in_cloud_section = trimmed == "[cloud]";
+            continue;
+        }
+        if in_cloud_section && trimmed.starts_with("api_key") {
+            last_api_key_line = Some(i + 1);
+        }
+    }
+    last_api_key_line
+}
+
 /// Load cloud config. Returns default (disabled) if the file does not exist.
 pub fn load_cloud_config() -> CloudConfig {
     let path = match cloud_config_path() {
@@ -1014,5 +1137,52 @@ api_key = "budi_test"
         assert_eq!(config.api_key.as_deref(), Some("budi_test"));
         assert_eq!(config.endpoint, "https://app.getbudi.dev");
         assert_eq!(config.sync.interval_seconds, 300);
+    }
+
+    /// #521: locate the insertion line for a fresh `device_id` when the
+    /// commented-template slot has been removed by a hand-edit. The
+    /// helper is a pure string pass — no file I/O — so we can unit-
+    /// test every branch without touching `~/.config`.
+    #[test]
+    fn find_insertion_line_for_device_id_anchors_after_api_key() {
+        let raw = r#"# comment
+[cloud]
+enabled = true
+api_key = "budi_real"
+endpoint = "https://app.getbudi.dev"
+
+[cloud.sync]
+interval_seconds = 300
+"#;
+        let idx = find_insertion_line_for_device_id(raw).expect("should find an anchor");
+        // The line after `api_key = "budi_real"` is line index 3 (0-based),
+        // so insertion index is 4.
+        let lines: Vec<&str> = raw.lines().collect();
+        assert_eq!(lines[idx - 1], "api_key = \"budi_real\"");
+    }
+
+    #[test]
+    fn find_insertion_line_for_device_id_returns_none_without_cloud_section() {
+        let raw = r#"# something else
+[unrelated]
+foo = "bar"
+"#;
+        assert!(find_insertion_line_for_device_id(raw).is_none());
+    }
+
+    #[test]
+    fn find_insertion_line_for_device_id_skips_cloud_sync_section() {
+        // `api_key` inside `[cloud.sync]` (unlikely but possible) must
+        // NOT be treated as the anchor — we want the `[cloud]` table's
+        // api_key.
+        let raw = r#"[cloud]
+enabled = true
+
+[cloud.sync]
+api_key = "wrong_table"
+"#;
+        // No `api_key` exists in the `[cloud]` section itself, so the
+        // helper returns None rather than anchoring inside `[cloud.sync]`.
+        assert!(find_insertion_line_for_device_id(raw).is_none());
     }
 }
