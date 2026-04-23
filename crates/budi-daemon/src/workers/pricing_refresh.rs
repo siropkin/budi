@@ -27,7 +27,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use budi_core::pricing::{self, MAX_PAYLOAD_BYTES, Manifest, PricingSource};
+use budi_core::pricing::{self, MAX_PAYLOAD_BYTES, Manifest, PricingSource, RejectedUpstreamRow};
 
 const UPSTREAM_URL: &str =
     "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json";
@@ -95,7 +95,7 @@ async fn warm_load_disk_cache(db_path: &std::path::Path) {
     let db_path = db_path.to_path_buf();
     let result = tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
         let cache_path = pricing::pricing_cache_path()?;
-        let Some(entries) = pricing::load_disk_cache(&cache_path)? else {
+        let Some(mut entries) = pricing::load_disk_cache(&cache_path)? else {
             return Ok(());
         };
         // Attach the version from `pricing_manifests` if there's a cached
@@ -103,17 +103,34 @@ async fn warm_load_disk_cache(db_path: &std::path::Path) {
         let version = latest_manifest_version(&db_path).unwrap_or(1);
         let fetched_at =
             cache_file_mtime(&cache_path).unwrap_or_else(|| chrono::Utc::now().to_rfc3339());
+        // ADR-0091 §2 amendment (8.3.1 / #483): the on-disk cache holds
+        // the raw upstream bytes for audit, so warm load must re-run
+        // row-level sanity on restart. Otherwise a daemon restart after a
+        // tick that wrote bytes containing a ceiling-exceeding row would
+        // re-admit the row into the in-memory lookup.
+        let rejected_upstream_rows = pricing::partition_rows_by_sanity(&mut entries);
         let manifest = Manifest {
             version,
             entries,
             fetched_at,
         };
         pricing::install_manifest(manifest, PricingSource::Manifest { version });
+        pricing::install_rejected_upstream_rows(rejected_upstream_rows.clone());
         tracing::info!(
             target: "budi_daemon::pricing_refresh",
             version,
+            rejected_upstream_rows = rejected_upstream_rows.len(),
             "warm-loaded on-disk pricing cache"
         );
+        for row in &rejected_upstream_rows {
+            tracing::warn!(
+                target: "budi_daemon::pricing_refresh",
+                event = "rejected_upstream_row",
+                model_id = row.model_id,
+                reason = row.reason,
+                "warm-load dropped cached row failing per-row sanity"
+            );
+        }
         Ok(())
     })
     .await;
@@ -172,13 +189,29 @@ async fn tick(db_path: &std::path::Path) {
     let db_path = db_path.to_path_buf();
     let result = tokio::task::spawn_blocking(move || run_tick(&db_path)).await;
     match result {
-        Ok(Ok(report)) => tracing::info!(
-            target: "budi_daemon::pricing_refresh",
-            version = report.version,
-            known_models = report.known_model_count,
-            backfilled_rows = report.backfilled_rows,
-            "pricing manifest refreshed"
-        ),
+        Ok(Ok(report)) => {
+            tracing::info!(
+                target: "budi_daemon::pricing_refresh",
+                version = report.version,
+                known_models = report.known_model_count,
+                backfilled_rows = report.backfilled_rows,
+                rejected_upstream_rows = report.rejected_upstream_rows.len(),
+                "pricing manifest refreshed"
+            );
+            // One structured warn per rejected row so an operator grepping
+            // the daemon log for `rejected_upstream_row` sees exactly what
+            // the current refresh filtered out. ADR-0091 §2 amendment
+            // acceptance: every skipped row is identified by model id.
+            for row in &report.rejected_upstream_rows {
+                tracing::warn!(
+                    target: "budi_daemon::pricing_refresh",
+                    event = "rejected_upstream_row",
+                    model_id = row.model_id,
+                    reason = row.reason,
+                    "dropped upstream pricing row failed per-row sanity"
+                );
+            }
+        }
         Ok(Err(e)) => tracing::warn!(
             target: "budi_daemon::pricing_refresh",
             error = %e,
@@ -195,16 +228,28 @@ async fn tick(db_path: &std::path::Path) {
 /// Public return shape for a single refresh tick. Serialized directly by
 /// `POST /pricing/refresh` so the CLI `--refresh` flag can surface the
 /// outcome without re-running its own lookup.
+///
+/// `rejected_upstream_rows` (8.3.1+, #483) lists upstream rows dropped
+/// by the row-level sanity partition. Pre-8.3.1 the same rows would
+/// have whole-payload-rejected the refresh (ADR-0091 §2 amendment).
 #[derive(Debug, serde::Serialize)]
 pub struct RefreshReport {
     pub version: u32,
     pub known_model_count: usize,
     pub backfilled_rows: usize,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub rejected_upstream_rows: Vec<RejectedUpstreamRow>,
 }
 
-/// Run a single refresh tick: fetch → validate → atomic-write → install
-/// → backfill unknowns. Called by the daemon's periodic loop and by the
-/// `POST /pricing/refresh` route.
+/// Run a single refresh tick: fetch → partition/validate → atomic-write
+/// → install → backfill unknowns. Called by the daemon's periodic loop
+/// and by the `POST /pricing/refresh` route.
+///
+/// ADR-0091 §2 amendment (8.3.1 / #483): per-row sanity failures no
+/// longer hard-fail the tick. Rows are partitioned, the kept rows are
+/// written to the cache, and the rejected rows are returned via
+/// `RefreshReport.rejected_upstream_rows` + surfaced on
+/// `GET /pricing/status`.
 pub fn run_tick(db_path: &std::path::Path) -> anyhow::Result<RefreshReport> {
     let bytes = fetch_upstream()?;
     let entries = pricing::parse_entries(&bytes)?;
@@ -219,16 +264,22 @@ pub fn run_tick(db_path: &std::path::Path) -> anyhow::Result<RefreshReport> {
     // (none in practice, but defensive) can't collide on the primary key.
     let conn = budi_core::analytics::open_db(db_path)?;
     let next_version = next_manifest_version(&conn)?;
-    let candidate = Manifest {
+    let mut candidate = Manifest {
         version: next_version,
         entries,
         fetched_at: now.clone(),
     };
-    if let Err(e) = pricing::validate_payload(&candidate, previous_opt, bytes.len()) {
-        return Err(anyhow::anyhow!("validation rejected: {e}"));
-    }
+    let rejected_upstream_rows =
+        match pricing::validate_payload(&mut candidate, previous_opt, bytes.len()) {
+            Ok(rejected) => rejected,
+            Err(e) => return Err(anyhow::anyhow!("validation rejected: {e}")),
+        };
     // Persist the raw bytes atomically before updating in-memory state so
     // the on-disk cache and the `pricing_manifests` row are coherent.
+    // Note: the on-disk cache holds the RAW upstream bytes, not the
+    // partitioned kept set. `load_disk_cache` re-runs `parse_entries` on
+    // warm-load, and the kept set is re-derived from the in-memory
+    // install below. This preserves exact fidelity for audit / replay.
     let cache_path = pricing::pricing_cache_path()?;
     pricing::atomic_write_cache(&cache_path, &bytes)?;
     insert_manifest_row(
@@ -246,11 +297,13 @@ pub fn run_tick(db_path: &std::path::Path) -> anyhow::Result<RefreshReport> {
             version: next_version,
         },
     );
+    pricing::install_rejected_upstream_rows(rejected_upstream_rows.clone());
     let backfilled_rows = pricing::backfill_unknown_rows(&conn, next_version).unwrap_or(0);
     Ok(RefreshReport {
         version: next_version,
         known_model_count,
         backfilled_rows,
+        rejected_upstream_rows,
     })
 }
 
@@ -377,6 +430,114 @@ mod tests {
         let enabled = !is_refresh_disabled();
         unsafe { std::env::remove_var(DISABLE_ENV_VAR) };
         assert!(enabled);
+    }
+
+    /// ADR-0091 §2 amendment (8.3.1 / #483): a payload containing one
+    /// ceiling-exceeding row refreshes successfully; the bad row is
+    /// filtered, the rest of the manifest lands. This is the 2026-04-22
+    /// `wandb/Qwen3-Coder-480B-A35B-Instruct` regression fixed in
+    /// RC-1.
+    ///
+    /// Test acts on the `pricing::` public API directly (rather than
+    /// spinning the network path) so it stays hermetic in CI. The
+    /// wire/cache/install contract is the same — `run_tick` is a thin
+    /// wrapper over `validate_payload` + `install_manifest` +
+    /// `install_rejected_upstream_rows` + `backfill_unknown_rows`.
+    /// Serial mutex for daemon tests that touch the process-global
+    /// pricing state. Kept private to this test module; budi-core has
+    /// its own separate serial lock in `pricing::pricing_tests`.
+    fn pricing_state_serial() -> &'static std::sync::Mutex<()> {
+        static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+        LOCK.get_or_init(|| std::sync::Mutex::new(()))
+    }
+
+    #[test]
+    fn refresh_skips_invalid_row_keeps_rest_when_majority_valid() {
+        use budi_core::pricing::{
+            self as pricing, ManifestEntry, PricingOutcome, PricingSource, RejectedUpstreamRow,
+        };
+        use std::collections::HashMap;
+
+        let _g = pricing_state_serial().lock().unwrap();
+
+        // Build a 50-row payload where 1 row exceeds the sanity ceiling
+        // and 49 rows are valid. Uses the same entry shape the real
+        // LiteLLM manifest uses.
+        let mut entries: HashMap<String, ManifestEntry> = HashMap::new();
+        entries.insert(
+            "wandb/Qwen/Qwen3-Coder-480B-A35B-Instruct".to_string(),
+            ManifestEntry {
+                // 0.1/token = $100,000/M — 100x the ceiling (the
+                // actual 2026-04-22 upstream value).
+                input_cost_per_token: 0.1,
+                output_cost_per_token: 0.1,
+                cache_creation_input_token_cost: None,
+                cache_read_input_token_cost: None,
+                litellm_provider: Some("wandb".to_string()),
+            },
+        );
+        for i in 0..49 {
+            entries.insert(
+                format!("claude-test-{i}"),
+                ManifestEntry {
+                    input_cost_per_token: 0.000003,
+                    output_cost_per_token: 0.000015,
+                    cache_creation_input_token_cost: Some(0.00000375),
+                    cache_read_input_token_cost: Some(0.0000003),
+                    litellm_provider: Some("anthropic".to_string()),
+                },
+            );
+        }
+        let mut candidate = pricing::Manifest {
+            version: 2,
+            entries,
+            fetched_at: chrono::Utc::now().to_rfc3339(),
+        };
+
+        let rejected = pricing::validate_payload(&mut candidate, None, 10_000)
+            .expect("validation must accept the payload after row-level partitioning");
+
+        // Exactly the bad row is rejected; the 49 good ones stay.
+        assert_eq!(
+            rejected,
+            vec![RejectedUpstreamRow {
+                model_id: "wandb/Qwen/Qwen3-Coder-480B-A35B-Instruct".to_string(),
+                reason: "$100000.00/M exceeds sanity ceiling $1000/M".to_string(),
+            }]
+        );
+        assert_eq!(candidate.entries.len(), 49);
+
+        // Install the partitioned manifest. The rejected row must NOT
+        // resolve via `lookup` — it was dropped from the kept set.
+        pricing::install_manifest(candidate, PricingSource::Manifest { version: 2 });
+        pricing::install_rejected_upstream_rows(rejected);
+
+        match pricing::lookup("wandb/Qwen/Qwen3-Coder-480B-A35B-Instruct", "wandb") {
+            PricingOutcome::Known { .. } => {
+                panic!("rejected row must not resolve in lookup")
+            }
+            PricingOutcome::Unknown { .. } => {}
+        }
+        // Good rows still resolve.
+        match pricing::lookup("claude-test-0", "claude_code") {
+            PricingOutcome::Known { .. } => {}
+            PricingOutcome::Unknown { .. } => panic!("kept row should resolve"),
+        }
+
+        // `pricing status` surfaces the rejected row.
+        let state = pricing::current_state();
+        assert_eq!(state.rejected_upstream_rows.len(), 1);
+        assert_eq!(
+            state.rejected_upstream_rows[0].model_id,
+            "wandb/Qwen/Qwen3-Coder-480B-A35B-Instruct"
+        );
+
+        // Reset rejected-rows list + re-install embedded baseline so
+        // this test doesn't leak state into sibling tests that share
+        // the process-global pricing state.
+        pricing::install_rejected_upstream_rows(Vec::new());
+        let baseline = pricing::load_embedded_manifest().expect("embedded baseline must parse");
+        pricing::install_manifest(baseline, PricingSource::EmbeddedBaseline);
     }
 
     /// ADR-0091 §6 / #376 test gate 7: when `BUDI_PRICING_REFRESH=0` is

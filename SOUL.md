@@ -468,7 +468,7 @@ Key points:
 - `crates/budi-core/src/file_attribution.rs` — Repo-relative file-path extractor; enforces ADR-0083 privacy limits (no absolute paths, no outside-of-repo paths, no file contents).
 - `crates/budi-core/src/work_outcome.rs` — Session-scoped `work_outcome` derivation (`committed`, `branch_merged`, `no_commit`, `unknown`) from local git state only; no remote API calls, no content capture.
 - `crates/budi-core/src/cost.rs` — Cost estimation glue (aggregates `cost_cents` from `messages`). Rates come exclusively from the manifest-backed `pricing::lookup` ([ADR-0091](docs/adr/0091-model-pricing-manifest-source-of-truth.md)); there is no fallback path.
-- `crates/budi-core/src/pricing/mod.rs` — Pricing loader + `lookup` API. Three-layer resolution (on-disk cache → embedded LiteLLM baseline → `unknown`), `PricingSource` tagging for immutable history, `backfill_unknown_rows` for retroactive fill-in once upstream catches up, validation guards (>95% retention floor, $1,000/M sanity ceiling, 10 MB size cap).
+- `crates/budi-core/src/pricing/mod.rs` — Pricing loader + `lookup` API. Three-layer resolution (on-disk cache → embedded LiteLLM baseline → `unknown`), `PricingSource` tagging for immutable history, `backfill_unknown_rows` for retroactive fill-in once upstream catches up, validation guards (>95% retention floor on kept rows, $1,000/M sanity ceiling applied row-by-row per the 8.3.1 ADR-0091 §2 amendment so one bad upstream row can't DoS the whole refresh, 10 MB size cap). `partition_rows_by_sanity` + `RejectedUpstreamRow` surface the dropped rows on `GET /pricing/status`.
 - `crates/budi-core/src/pricing/manifest.embedded.json` — Vendored snapshot of LiteLLM's `model_prices_and_context_window.json`, refreshed per release by `scripts/pricing/sync_baseline.sh`.
 - `crates/budi-core/src/hooks.rs` — Prompt classification helpers (hook ingestion removed in 8.0; `hook_events` table gone in schema v1).
 - `crates/budi-core/src/jsonl.rs` — JSONL transcript parser, `ParsedMessage` struct.
@@ -484,7 +484,7 @@ Key points:
 - `crates/budi-cli/build.rs` — Build script: creates empty vsix placeholder if not pre-built.
 - `crates/budi-daemon/src/main.rs` — HTTP server (port 7878) + cloud sync worker + startup hooks for tailer / migration / legacy-residue notices.
 - `crates/budi-daemon/src/workers/cloud_sync.rs` — Background cloud sync loop: configurable interval, backoff, auth/schema error handling.
-- `crates/budi-daemon/src/workers/pricing_refresh.rs` — 24 h LiteLLM manifest refresh loop. Warm-loads the on-disk cache, validates fetched payloads, atomic-writes, hot-swaps `pricing` state, runs `backfill_unknown_rows`. Disabled via `BUDI_PRICING_REFRESH=0`.
+- `crates/budi-daemon/src/workers/pricing_refresh.rs` — 24 h LiteLLM manifest refresh loop. Warm-loads the on-disk cache (running row-level sanity partitioning on restart per the 8.3.1 ADR-0091 §2 amendment), validates fetched payloads, atomic-writes, hot-swaps `pricing` state, runs `backfill_unknown_rows`. Rejected rows are structured-logged and surfaced on `GET /pricing/status`. Disabled via `BUDI_PRICING_REFRESH=0`.
 - `crates/budi-daemon/src/routes/pricing.rs` — `GET /pricing/status` + `POST /pricing/refresh` (loopback-only).
 - `crates/budi-daemon/src/routes/hooks.rs` — `/sync*`, `/health*`, `/admin/integrations/install` endpoints (hook ingestion removed; route file name retained for stability).
 - `crates/budi-daemon/src/routes/cloud.rs` — `/cloud/sync` (loopback-only manual cloud flush) and `/cloud/status`.

@@ -1,9 +1,9 @@
 # ADR-0091: Model Pricing via Embedded Baseline + LiteLLM Runtime Refresh
 
-- **Date**: 2026-04-21
-- **Status**: Accepted (promoted 2026-04-21 after [#376](https://github.com/siropkin/budi/issues/376) and [#377](https://github.com/siropkin/budi/issues/377) merged with all Promotion Criteria test gates green)
-- **Issue**: [#375](https://github.com/siropkin/budi/issues/375)
-- **Milestone**: 8.3.0 (epic: [#436](https://github.com/siropkin/budi/issues/436))
+- **Date**: 2026-04-21 (§2 amendment 2026-04-22 — 8.3.1 / [#483](https://github.com/siropkin/budi/issues/483))
+- **Status**: Accepted (promoted 2026-04-21 after [#376](https://github.com/siropkin/budi/issues/376) and [#377](https://github.com/siropkin/budi/issues/377) merged with all Promotion Criteria test gates green; §2 amendment landed 2026-04-22 alongside v8.3.1 post-tag hardening)
+- **Issue**: [#375](https://github.com/siropkin/budi/issues/375) (§2 amendment: [#483](https://github.com/siropkin/budi/issues/483))
+- **Milestone**: 8.3.0 (epic: [#436](https://github.com/siropkin/budi/issues/436); §2 amendment: 8.3.1 / [#481](https://github.com/siropkin/budi/issues/481))
 - **Amends**: [ADR-0083](./0083-cloud-ingest-identity-and-privacy-contract.md) §Neutral (outbound-network surface; see §6 below)
 - **Closes**: [#373](https://github.com/siropkin/budi/issues/373) — superseded by this ADR
 
@@ -69,8 +69,8 @@ A single worker inside `budi-daemon` is responsible for keeping the on-disk cach
 - **Transport**: the existing `reqwest` client already in the dependency tree (used for cloud sync). No new HTTP stack.
 - **Validation**: before writing the fetched payload to disk, the worker asserts:
   - The body parses as a JSON object.
-  - Every per-model entry with a price field has all price fields ≥ 0 and ≤ a sanity ceiling of $1,000 per million tokens (guards against a stray decimal-point upstream).
-  - At least **95 %** of the models currently in the on-disk cache (or the embedded baseline if the cache is absent) are still present in the fetched payload. Guards against accidental upstream wipe, supply-chain tampering, or a mid-rewrite commit.
+  - Every per-model entry with a price field has all price fields ≥ 0 and ≤ a sanity ceiling of $1,000 per million tokens (guards against a stray decimal-point upstream). **§2 amendment (2026-04-22, 8.3.1 / [#483](https://github.com/siropkin/budi/issues/483))**: row-level rejection, not whole-payload rejection. Rows failing the per-row sanity checks (NaN, negative, or over the $1,000 / M ceiling) are filtered out of the installed manifest and surfaced via `rejected_upstream_rows[]` on `GET /pricing/status` and on the text `budi pricing status` output. The rest of the payload still refreshes. Rationale: the pre-amendment shape hard-failed the whole tick on one bad upstream row (2026-04-22: `wandb/Qwen/Qwen3-Coder-480B-A35B-Instruct` at $100,000/M blocked every `v8.3.0` user's refresh), which defeats the daily-refresh guarantee. Ceiling is unchanged — still $1,000 / M, still the right guardrail; the amendment only changes the blast radius.
+  - At least **95 %** of the models currently in the on-disk cache (or the embedded baseline if the cache is absent) are still present in the fetched payload (after per-row partitioning — §2 amendment). Guards against accidental upstream wipe, supply-chain tampering, or a mid-rewrite commit. A mass per-row-rejection upstream regression that pushed kept-row retention below 95 % still hard-fails the whole tick; the amendment does not weaken this fail-safe.
   - The payload is ≤ 10 MB (current file is ~400 KB; 25× headroom).
 - **Write**: the validated payload is written atomically — write to a sibling temp file in the same directory, `fsync`, then `rename`. The in-memory lookup table is swapped under an `RwLock` on success.
 - **Failure behavior**: any validation or network failure is logged at `warn` level and does not block ingestion. The previous cache (or embedded baseline) continues to serve lookups. The worker retries at the next scheduled interval. No exponential backoff beyond the 24 h cadence — the cost of a stale cache is bounded by the embedded baseline being correct at release time.

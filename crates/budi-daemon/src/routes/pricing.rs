@@ -43,12 +43,27 @@ pub async fn pricing_refresh() -> Result<Json<Value>, (StatusCode, Json<Value>)>
         })?;
 
     match result {
-        Ok(report) => Ok(Json(json!({
-            "ok": true,
-            "version": report.version,
-            "known_model_count": report.known_model_count,
-            "backfilled_rows": report.backfilled_rows,
-        }))),
+        Ok(report) => {
+            let mut body = json!({
+                "ok": true,
+                "version": report.version,
+                "known_model_count": report.known_model_count,
+                "backfilled_rows": report.backfilled_rows,
+            });
+            // ADR-0091 §2 amendment (8.3.1 / #483): surface row-level
+            // rejections on the refresh response so `budi pricing
+            // status --refresh` can print them on the spot.
+            // `skip-if-none` for older-client compatibility.
+            if !report.rejected_upstream_rows.is_empty()
+                && let Some(map) = body.as_object_mut()
+            {
+                map.insert(
+                    "rejected_upstream_rows".to_string(),
+                    serde_json::to_value(&report.rejected_upstream_rows).unwrap_or(json!([])),
+                );
+            }
+            Ok(Json(body))
+        }
         Err(e) => Err((
             StatusCode::BAD_GATEWAY,
             Json(json!({

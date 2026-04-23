@@ -1,5 +1,18 @@
 # Changelog
 
+## 8.3.1 — Unreleased
+
+8.3.1 is the post-tag hardening train on top of `v8.3.0`. It closes
+release-candidate gaps surfaced by the 2026-04-22 fresh-user smoke
+audit plus the dogfooding findings from a 30-day live walk on the
+shipped binary. No re-scope, no new features, no ADR amendments
+except the row-level-rejection change called out in §2 of
+[ADR-0091](docs/adr/0091-model-pricing-manifest-source-of-truth.md).
+
+### Fixed
+
+- **Pricing manifest refresh: one bad upstream row no longer blocks the whole payload** (#483 / [ADR-0091 §2 amendment](docs/adr/0091-model-pricing-manifest-source-of-truth.md)) — on 2026-04-22 LiteLLM upstream added `wandb/Qwen/Qwen3-Coder-480B-A35B-Instruct` at `$100,000/M`; the pre-8.3.1 validator rejected the whole payload on the sanity ceiling, pinning every `v8.3.0` user to the embedded baseline until LiteLLM patched. The refresher now partitions rows: NaN, negative, or over-$1,000/M prices are dropped from the installed manifest (kept deterministically sorted for reproducible log/pricing-status output), and the rest of the payload still refreshes. Dropped rows surface on `GET /pricing/status` and in `budi pricing status` under a new "Rejected upstream rows" section, and on the refresh response so `--refresh` prints them inline. Structured `rejected_upstream_row` warns go to the daemon log one per row. The ≥ 95% retention floor applies to the kept rows, so a mass upstream mispricing regression still hard-fails the tick. The $1,000/M ceiling is unchanged — still the right guardrail; only the blast radius of a single bad row is different. Daemon warm-load re-runs the sanity partition on restart so a bad row cached to disk mid-incident cannot re-admit itself into the in-memory lookup after a restart. Cache still persists the raw upstream bytes for audit / replay fidelity.
+
 ## 8.3.0 — 2026-04-22
 
 8.3.0 is the pricing source-of-truth pivot, plus the deferred 8.2
