@@ -220,6 +220,28 @@ fn fetch_latest_release_tag() -> Result<String> {
 }
 
 fn run_brew_upgrade() -> Result<()> {
+    // #517: run `brew update --quiet` before `brew upgrade budi` so the
+    // tap's `formula.jws.json` is refreshed. Without this pre-flight,
+    // `brew upgrade` hits the local stale tap index right after a new
+    // homebrew-budi release cuts and exits with a confusing
+    // "already installed" warning, leaving the user on the old version
+    // even though a newer one just published. Observed during the
+    // 8.3.1 post-tag smoke — first `budi update --yes` reported
+    // "Warning: siropkin/budi/budi 8.3.0 already installed", a second
+    // invocation a minute later succeeded because the background
+    // auto-update refreshed the tap between runs.
+    //
+    // `--quiet` suppresses the line-noise so `budi update`'s output
+    // stays readable. Any refresh failure (network dropped mid-fetch,
+    // etc.) is non-fatal — fall through to `brew upgrade`, which will
+    // either succeed against a cached index or surface its own error.
+    let _ = Command::new("brew")
+        .args(["update", "--quiet"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .status();
+
     let status = Command::new("brew")
         .args(["upgrade", "budi"])
         .stdin(Stdio::inherit())
