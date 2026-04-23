@@ -692,17 +692,38 @@ fn format_summary(
     // Cost-component sub-line — unconditional (#451). Reads $0.00 in
     // each cell when the window has no spend, so the shape stays
     // identical to a populated summary. Uses the same fixed-decimal
-    // formatter as the top-line so the four components always sum to
-    // the top-line value on the rendered screen.
-    writeln!(
-        out,
-        "  {dim}  input {}  output {}  cache write {}  cache read {}{reset}",
-        format_cost_cents_fixed(est.input_cost * 100.0),
-        format_cost_cents_fixed(est.output_cost * 100.0),
-        format_cost_cents_fixed(est.cache_write_cost * 100.0),
-        format_cost_cents_fixed(est.cache_read_cost * 100.0),
-    )
-    .unwrap();
+    // formatter as the top-line so the four base components always
+    // sum to the top-line value on the rendered screen.
+    //
+    // #520: if `other_cost` is non-zero — typically Cursor fast-mode,
+    // thinking-token cost, or web-search fees that are in
+    // `total_cost` (via `SUM(cost_cents)` at ingest) but absent from
+    // the four base token×rate components — render a fifth `other`
+    // cell so the sub-line visually reconciles to the top-line.
+    // Silently omitted when the residual is zero (typical for a
+    // Claude-only window) to keep the sub-line readable.
+    if est.other_cost > 0.0 {
+        writeln!(
+            out,
+            "  {dim}  input {}  output {}  cache write {}  cache read {}  other {}{reset}",
+            format_cost_cents_fixed(est.input_cost * 100.0),
+            format_cost_cents_fixed(est.output_cost * 100.0),
+            format_cost_cents_fixed(est.cache_write_cost * 100.0),
+            format_cost_cents_fixed(est.cache_read_cost * 100.0),
+            format_cost_cents_fixed(est.other_cost * 100.0),
+        )
+        .unwrap();
+    } else {
+        writeln!(
+            out,
+            "  {dim}  input {}  output {}  cache write {}  cache read {}{reset}",
+            format_cost_cents_fixed(est.input_cost * 100.0),
+            format_cost_cents_fixed(est.output_cost * 100.0),
+            format_cost_cents_fixed(est.cache_write_cost * 100.0),
+            format_cost_cents_fixed(est.cache_read_cost * 100.0),
+        )
+        .unwrap();
+    }
     // Cache-savings line — unconditional (#451). $0.00 when no cache
     // hits accumulated; skipping it in 8.2 made `today` look
     // structurally different from `1d` whenever cache savings happened
@@ -2872,6 +2893,7 @@ mod tests {
             output_cost: 20.82,
             cache_write_cost: 27.48,
             cache_read_cost: 65.94,
+            other_cost: 0.0,
             cache_savings,
         }
     }
@@ -3304,6 +3326,7 @@ mod tests {
             output_cost: 19.92,
             cache_write_cost: 32.36,
             cache_read_cost: 74.08,
+            other_cost: 0.0,
             cache_savings: 0.0,
         };
         let providers = vec![fixture_provider(
@@ -3344,6 +3367,85 @@ mod tests {
                 assert!(
                     !line.contains("K") && !line.contains("M"),
                     "top-line `Est. cost` must not humanize: {line:?}",
+                );
+            }
+        }
+    }
+
+    /// #520: when `other_cost > 0`, the summary sub-line grows a
+    /// fifth `other $N.NN` cell so the four base components + `other`
+    /// sum to the top line. Fresh Claude-only windows (other_cost=0)
+    /// keep the pre-8.3.2 four-cell sub-line so the surface stays
+    /// uncluttered.
+    #[test]
+    fn summary_renders_other_cost_cell_when_nonzero() {
+        let summary = fixture_summary();
+        // Seed the 2026-04-22 audit's actual 30d numbers: top-line
+        // \$3,915.47, components sum \$3,800.47, other = \$115.00.
+        let est = budi_core::cost::CostEstimate {
+            total_cost: 3_915.47,
+            input_cost: 995.38,
+            output_cost: 316.65,
+            cache_write_cost: 703.15,
+            cache_read_cost: 1_785.29,
+            other_cost: 115.00,
+            cache_savings: 0.0,
+        };
+        let providers = vec![fixture_provider(
+            "claude_code",
+            "Claude Code",
+            262,
+            391_547.0,
+        )];
+        let palette = SummaryPalette::plain();
+        let rendered = format_summary(
+            StatsPeriod::Today,
+            None,
+            &summary,
+            &est,
+            &providers,
+            &palette,
+        );
+        assert!(
+            rendered.contains("other $115.00"),
+            "other cell must render when non-zero:\n{rendered}",
+        );
+        assert!(
+            rendered.contains("Est. cost    $3,915.47"),
+            "top-line cost precision must carry thousands sep + cents:\n{rendered}",
+        );
+    }
+
+    #[test]
+    fn summary_omits_other_cost_cell_when_zero() {
+        let summary = fixture_summary();
+        let est = budi_core::cost::CostEstimate {
+            total_cost: 7.50,
+            input_cost: 5.00,
+            output_cost: 2.50,
+            cache_write_cost: 0.0,
+            cache_read_cost: 0.0,
+            other_cost: 0.0,
+            cache_savings: 0.0,
+        };
+        let providers = vec![fixture_provider("claude_code", "Claude Code", 10, 750.0)];
+        let palette = SummaryPalette::plain();
+        let rendered = format_summary(
+            StatsPeriod::Today,
+            None,
+            &summary,
+            &est,
+            &providers,
+            &palette,
+        );
+        // The "other" label only appears inside the summary block
+        // when `other_cost > 0`; a zero window keeps the pre-8.3.2
+        // four-cell shape.
+        for line in rendered.lines() {
+            if line.contains("input ") && line.contains("output ") {
+                assert!(
+                    !line.contains("other"),
+                    "sub-line should not contain `other` when other_cost == 0: {line:?}",
                 );
             }
         }
