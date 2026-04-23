@@ -58,8 +58,8 @@ use crate::provider::ModelPricing;
 /// | `EmbeddedBaseline`    | `embedded:vBUILD`     |
 /// | `LegacyPreManifest`   | `legacy:pre-manifest` |
 ///
-/// Two further column literals (`"unknown"` and `"upstream:api"`) are
-/// intentionally *not* variants of this enum:
+/// Three further column literals (`"unknown"`, `"upstream:api"`,
+/// `"unpriced:no_tokens"`) are intentionally *not* variants of this enum:
 /// - `"unknown"` is the absence of a source, produced when
 ///   [`lookup`] returns [`PricingOutcome::Unknown`]. Callers serialize
 ///   that literal directly.
@@ -67,8 +67,13 @@ use crate::provider::ModelPricing;
 ///   whose `cost_cents` came from Cursor's Usage API (not from our
 ///   manifest). See [ADR-0091] §1 commentary on `cost_confidence =
 ///   "exact"` rows and the decision note in #376.
+/// - `"unpriced:no_tokens"` is written by `CostEnricher` for rows that
+///   will never have a priceable token cost — user messages, tool-result
+///   messages, or any row ingested with zero tokens. Prevents these
+///   rows from falling through to the DB's `"legacy:pre-manifest"`
+///   DEFAULT, which is reserved for genuinely pre-migration rows (#533).
 ///
-/// `parse_column` returns `None` for both literals so callers handle
+/// `parse_column` returns `None` for all three literals so callers handle
 /// them explicitly rather than via a silent fallback.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -90,6 +95,14 @@ pub const COLUMN_VALUE_UPSTREAM_API: &str = "upstream:api";
 /// Column literal written by the schema migration for pre-manifest rows.
 pub const COLUMN_VALUE_LEGACY: &str = "legacy:pre-manifest";
 
+/// Column literal for rows that will never have a priceable token cost — user
+/// messages, tool-result messages, any row ingested with zero tokens. Written
+/// by `CostEnricher` so these rows don't fall through to the DB's
+/// `"legacy:pre-manifest"` DEFAULT, which is reserved for genuinely
+/// pre-migration rows (#533). Not a [`PricingSource`] variant — follows the
+/// same sentinel-literal pattern as `"unknown"` / `"upstream:api"`.
+pub const COLUMN_VALUE_UNPRICED_NO_TOKENS: &str = "unpriced:no_tokens";
+
 impl PricingSource {
     /// Serialize to the exact string stored in `messages.pricing_source`.
     pub fn as_column_value(&self) -> String {
@@ -102,12 +115,16 @@ impl PricingSource {
     }
 
     /// Parse `messages.pricing_source` back into a variant, or `None` for
-    /// the literal `"unknown"` / `"upstream:api"` / anything malformed.
+    /// the literals `"unknown"` / `"upstream:api"` / `"unpriced:no_tokens"`,
+    /// or anything malformed.
     pub fn parse_column(value: &str) -> Option<Self> {
         if value == COLUMN_VALUE_LEGACY {
             return Some(PricingSource::LegacyPreManifest);
         }
-        if value == COLUMN_VALUE_UNKNOWN || value == COLUMN_VALUE_UPSTREAM_API {
+        if value == COLUMN_VALUE_UNKNOWN
+            || value == COLUMN_VALUE_UPSTREAM_API
+            || value == COLUMN_VALUE_UNPRICED_NO_TOKENS
+        {
             return None;
         }
         // All other valid shapes are `<prefix>:v<rest>`. Colon is ASCII (1
@@ -1345,9 +1362,15 @@ mod pricing_tests {
             PricingSource::parse_column(&embedded),
             Some(PricingSource::EmbeddedBaseline)
         );
-        // Unknown + upstream:api round-trip to None (not variants).
+        // Unknown + upstream:api + unpriced:no_tokens round-trip to None
+        // (sentinel literals, not enum variants).
         assert_eq!(PricingSource::parse_column(COLUMN_VALUE_UNKNOWN), None);
         assert_eq!(PricingSource::parse_column(COLUMN_VALUE_UPSTREAM_API), None);
+        // #533: new sentinel for zero-token / user-role rows.
+        assert_eq!(
+            PricingSource::parse_column(COLUMN_VALUE_UNPRICED_NO_TOKENS),
+            None,
+        );
         assert_eq!(PricingSource::parse_column("garbage"), None);
     }
 

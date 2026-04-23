@@ -401,6 +401,24 @@ impl Enricher for CostEnricher {
             msg.uuid
         );
 
+        // #533: tag rows that will never have a priceable token cost —
+        // user messages, tool results, any `role != "assistant"` row, and
+        // assistant rows that made it here with zero tokens and no cost
+        // (e.g. ingested from a JSONL that emits a stub-shaped event).
+        // Without this, they fall through to the `messages.pricing_source`
+        // DEFAULT `"legacy:pre-manifest"`, which ADR-0091 §4 reserves for
+        // genuinely pre-migration rows. `"unpriced:no_tokens"` is the
+        // absence-of-provenance sentinel for this class.
+        if msg.pricing_source.is_none()
+            && msg.cost_cents.is_none()
+            && msg.input_tokens == 0
+            && msg.output_tokens == 0
+            && msg.cache_creation_tokens == 0
+            && msg.cache_read_tokens == 0
+        {
+            msg.pricing_source = Some(crate::pricing::COLUMN_VALUE_UNPRICED_NO_TOKENS.to_string());
+        }
+
         if let Some(ref speed) = msg.speed
             && speed != "standard"
         {
@@ -547,6 +565,50 @@ mod tests {
         msg.role = "user".to_string();
         enricher.enrich(&mut msg);
         assert!(msg.cost_cents.is_none());
+    }
+
+    #[test]
+    fn cost_enricher_tags_user_messages_as_unpriced_no_tokens() {
+        // #533: user-role rows with no tokens must land with
+        // `pricing_source = "unpriced:no_tokens"` instead of falling
+        // through to the DB `DEFAULT 'legacy:pre-manifest'`, which
+        // ADR-0091 §4 reserves for genuinely pre-migration rows.
+        let mut enricher = CostEnricher;
+        let mut msg = test_msg();
+        msg.role = "user".to_string();
+        msg.input_tokens = 0;
+        msg.output_tokens = 0;
+        msg.cache_creation_tokens = 0;
+        msg.cache_read_tokens = 0;
+        enricher.enrich(&mut msg);
+        assert!(msg.cost_cents.is_none());
+        assert_eq!(
+            msg.pricing_source.as_deref(),
+            Some(crate::pricing::COLUMN_VALUE_UNPRICED_NO_TOKENS),
+        );
+    }
+
+    #[test]
+    fn cost_enricher_assistant_with_tokens_keeps_manifest_provenance() {
+        // Regression guard for #533: priced assistant rows still get the
+        // manifest provenance and never collapse to `"unpriced:no_tokens"`.
+        let mut enricher = CostEnricher;
+        let mut msg = test_msg();
+        msg.role = "assistant".to_string();
+        msg.model = Some("claude-opus-4-6".to_string());
+        msg.input_tokens = 1_000_000;
+        msg.output_tokens = 100_000;
+        enricher.enrich(&mut msg);
+        assert!(msg.cost_cents.is_some());
+        let src = msg.pricing_source.as_deref().expect("provenance set");
+        assert_ne!(src, crate::pricing::COLUMN_VALUE_UNPRICED_NO_TOKENS);
+        assert_ne!(src, crate::pricing::COLUMN_VALUE_LEGACY);
+        // Real provenance: `embedded:v*` or `manifest:v*` depending on
+        // whether a manifest refresh has landed in this test process.
+        assert!(
+            src.starts_with("embedded:v") || src.starts_with("manifest:v"),
+            "unexpected provenance: {src}",
+        );
     }
 
     #[test]

@@ -147,7 +147,7 @@ filesystem poke on every render.
 ### Database (SQLite, WAL mode, schema v1)
 
 Core tables:
-- **messages** - Single cost entity. One row per API call. All token/cost data lives here. Fields: id, session_id, role, model, provider, timestamp, input/output/cache tokens, cost_cents, cost_confidence, pricing_source (8.3+, [ADR-0091](docs/adr/0091-model-pricing-manifest-source-of-truth.md); one of `manifest:vNNN` / `backfilled:vNNN` / `embedded:vBUILD` / `legacy:pre-manifest` / `unknown`), git_branch, repo_id, cwd, request_id
+- **messages** - Single cost entity. One row per API call. All token/cost data lives here. Fields: id, session_id, role, model, provider, timestamp, input/output/cache tokens, cost_cents, cost_confidence, pricing_source (8.3+, [ADR-0091](docs/adr/0091-model-pricing-manifest-source-of-truth.md); one of `manifest:vNNN` / `backfilled:vNNN` / `embedded:vBUILD` / `legacy:pre-manifest` / `unknown` / `upstream:api` (Cursor Usage API rows) / `unpriced:no_tokens` (zero-token rows — user messages, tool results; 8.3.4+)), git_branch, repo_id, cwd, request_id
 - **sessions** - Lifecycle context (start/end, duration, mode, title) without mixing cost concerns. One row per conversation. Primary key field: id
 - **tags** - Flexible key-value pairs per message (repo, ticket_id, activity, user, etc.) using message_id FK to messages(id)
 - **sync_state** - Tracks incremental ingestion progress per file for progressive sync. Also stores cloud sync watermarks (`__budi_cloud_sync__` keys) for idempotent cloud uploads
