@@ -5339,10 +5339,24 @@ fn breakdown_tickets_reconcile_across_today_7d_and_30d() {
     // `today/7d/30d`. We plant tickets at three different anchor dates
     // and query with the corresponding `since` bound so each window's
     // total is a known strict subset of the universe.
+    //
+    // Fix (#502 / D-4): anchor `now` to noon UTC of today's UTC date
+    // rather than the wall clock. Pre-fix the test used `Utc::now()`
+    // directly, so a CI run at 00:07 UTC on 2026-04-23 put the today
+    // cohort at `now - 1h = 23:07 UTC on 2026-04-22` — the previous
+    // UTC day — and the `today_since = midnight UTC of today_date`
+    // window filtered every today row out, dropping `shown_rows` from
+    // the expected 30 to 0. Noon UTC is > 12h away from midnight on
+    // both sides so the `- 1h` anchor stays inside today's UTC day
+    // regardless of when the test runs.
     use chrono::{Duration, Utc};
 
     let mut conn = test_db();
-    let now = Utc::now();
+    let now = Utc::now()
+        .date_naive()
+        .and_hms_opt(12, 0, 0)
+        .expect("12:00:00 is a valid time")
+        .and_utc();
     // Anchor ticket cohorts in each of the three windows. Each cohort
     // has 40 distinct tickets so the default cap of 30 forces
     // truncation, and each cost is unique (0.5 cent steps) so every row
