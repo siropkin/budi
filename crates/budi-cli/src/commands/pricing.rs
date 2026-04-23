@@ -132,6 +132,7 @@ fn render_alias_map_text() {
 fn render_refresh_text(body: &Value) {
     let green = ansi("\x1b[32m");
     let red = ansi("\x1b[31m");
+    let yellow = ansi("\x1b[33m");
     let dim = ansi("\x1b[90m");
     let reset = ansi("\x1b[0m");
     let ok = body.get("ok").and_then(Value::as_bool).unwrap_or(false);
@@ -149,6 +150,18 @@ fn render_refresh_text(body: &Value) {
         println!(
             "  {green}✓{reset} Manifest refreshed — now v{version} ({known} models, {backfilled} rows backfilled)"
         );
+        // ADR-0091 §2 amendment (8.3.1 / #483): surface row-level
+        // rejections so the operator sees why the kept-model count
+        // might be one or two short of the raw upstream payload.
+        if let Some(rejected) = body.get("rejected_upstream_rows").and_then(Value::as_array)
+            && !rejected.is_empty()
+        {
+            println!(
+                "  {yellow}!{reset} {n} upstream row{s} skipped (see below)",
+                n = rejected.len(),
+                s = if rejected.len() == 1 { "" } else { "s" },
+            );
+        }
     } else {
         let err = body
             .get("error")
@@ -225,6 +238,33 @@ fn render_status_text(body: &Value) {
             println!(
                 "    {dim}• … {} more (run with --format json for the full list){reset}",
                 unknowns.len() - 10
+            );
+        }
+    }
+
+    // ADR-0091 §2 amendment (8.3.1 / #483): rows the most-recent
+    // refresh tick skipped for failing per-row sanity (NaN, negative,
+    // or > $1,000/M). Pre-8.3.1 a single bad row would whole-payload-
+    // reject the refresh; the amendment surfaces them here instead.
+    let rejected = body
+        .get("rejected_upstream_rows")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    if !rejected.is_empty() {
+        println!();
+        println!(
+            "  {yellow}!{reset} {bold}Rejected upstream rows{reset} {dim}(skipped by row-level sanity; rest of manifest still refreshed){reset}"
+        );
+        for entry in rejected.iter().take(10) {
+            let model = entry.get("model_id").and_then(Value::as_str).unwrap_or("?");
+            let reason = entry.get("reason").and_then(Value::as_str).unwrap_or("?");
+            println!("    {dim}•{reset} {model} — {reason}");
+        }
+        if rejected.len() > 10 {
+            println!(
+                "    {dim}• … {} more (run with --format json for the full list){reset}",
+                rejected.len() - 10
             );
         }
     }

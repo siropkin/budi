@@ -540,7 +540,7 @@ Every message carries a `cost_confidence` tag that indicates how the cost was de
 
 Messages with `exact` confidence show exact cost in the dashboard. Estimated costs are prefixed with `~`.
 
-Pricing is sourced from the community-maintained [LiteLLM pricing manifest](https://github.com/BerriAI/litellm/blob/main/model_prices_and_context_window.json) via a three-layer lookup (on-disk cache → embedded baseline → hard-fail to `unknown`), refreshed daily by the daemon (opt-out: `BUDI_PRICING_REFRESH=0`), with every row tagged `pricing_source` so history is auditable and immutable. See [ADR-0091](docs/adr/0091-model-pricing-manifest-source-of-truth.md) for the full contract and `budi pricing status` for the operator surface.
+Pricing is sourced from the community-maintained [LiteLLM pricing manifest](https://github.com/BerriAI/litellm/blob/main/model_prices_and_context_window.json) via a three-layer lookup (on-disk cache → embedded baseline → hard-fail to `unknown`), refreshed daily by the daemon (opt-out: `BUDI_PRICING_REFRESH=0`), with every row tagged `pricing_source` so history is auditable and immutable. See [ADR-0091](docs/adr/0091-model-pricing-manifest-source-of-truth.md) for the full contract and `budi pricing status` for the operator surface. Upstream rows that fail per-row sanity (NaN, negative, or > $1,000/M) are dropped on refresh and listed under "Rejected upstream rows" in `budi pricing status` (ADR-0091 §2 amendment, 8.3.1).
 
 </details>
 

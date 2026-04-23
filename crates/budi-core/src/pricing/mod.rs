@@ -186,6 +186,12 @@ pub fn lookup(model_id: &str, provider: &str) -> PricingOutcome {
 
 /// Snapshot of the current in-memory manifest for `GET /pricing/status`
 /// and `budi pricing status`. Shape is golden-file tested (#376 gate 9).
+///
+/// `rejected_upstream_rows` (8.3.1+, #483 / ADR-0091 §2 amendment) lists
+/// rows the most-recent refresh tick filtered out because they failed
+/// per-row sanity checks (NaN, negative, or > $1,000/M). Serialized with
+/// `skip_serializing_if = "Vec::is_empty"` so older-client JSON
+/// consumers that predate 8.3.1 still see the pre-amendment shape.
 #[derive(Debug, Clone, Serialize)]
 pub struct PricingState {
     pub source_label: String,
@@ -195,6 +201,8 @@ pub struct PricingState {
     pub known_model_count: usize,
     pub embedded_baseline_build: String,
     pub unknown_models: Vec<UnknownModelEntry>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rejected_upstream_rows: Vec<RejectedUpstreamRow>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -203,6 +211,20 @@ pub struct UnknownModelEntry {
     pub model_id: String,
     pub first_seen_at: String,
     pub message_count: u64,
+}
+
+/// A row the most-recent refresh tick skipped because it failed
+/// per-row sanity (NaN price, negative price, or rate over the sanity
+/// ceiling). Surfaced on `GET /pricing/status` so an operator can see
+/// which upstream rows were dropped without reading the daemon log.
+///
+/// ADR-0091 §2 amendment (#483 / 8.3.1): `RejectedUpstreamRow` replaces
+/// the pre-8.3.1 whole-payload rejection — one bad LiteLLM row no
+/// longer blocks the entire manifest refresh.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RejectedUpstreamRow {
+    pub model_id: String,
+    pub reason: String,
 }
 
 /// Clone the currently-authoritative [`Manifest`] for validation of a
@@ -243,7 +265,17 @@ pub fn current_state() -> PricingState {
         known_model_count: guard.manifest.entries.len(),
         embedded_baseline_build: EMBEDDED_BASELINE_BUILD.to_string(),
         unknown_models: snapshot_unknowns(),
+        rejected_upstream_rows: guard.rejected_upstream_rows.clone(),
     }
+}
+
+/// Replace the cached rejected-upstream-rows list. Called by the
+/// refresh worker after each successful partition/install tick so
+/// `GET /pricing/status` reflects the most recent run. Passing an empty
+/// vec clears the list — used when a tick succeeds with no rejections.
+pub fn install_rejected_upstream_rows(rows: Vec<RejectedUpstreamRow>) {
+    let mut guard = state().write().expect("pricing state RwLock poisoned");
+    guard.rejected_upstream_rows = rows;
 }
 
 // ---------------------------------------------------------------------------
@@ -395,6 +427,11 @@ pub fn atomic_write_cache(path: &Path, bytes: &[u8]) -> Result<()> {
 struct ManifestState {
     manifest: Manifest,
     source: PricingSource,
+    /// Rows dropped by the most recent refresh tick per ADR-0091 §2
+    /// amendment (8.3.1 / #483). Empty in the pre-refresh state and
+    /// after a clean refresh. Serialized under `rejected_upstream_rows`
+    /// on `GET /pricing/status`.
+    rejected_upstream_rows: Vec<RejectedUpstreamRow>,
 }
 
 fn state() -> &'static RwLock<ManifestState> {
@@ -414,6 +451,7 @@ fn state() -> &'static RwLock<ManifestState> {
         RwLock::new(ManifestState {
             manifest,
             source: PricingSource::EmbeddedBaseline,
+            rejected_upstream_rows: Vec::new(),
         })
     })
 }
@@ -448,6 +486,13 @@ pub const MAX_PAYLOAD_BYTES: usize = 10 * 1024 * 1024;
 /// fraction) to avoid `f64` rounding drift at the boundary.
 const RETENTION_FLOOR_PERCENT: u64 = 95;
 
+/// Whole-payload validation outcomes. Pre-8.3.1 the `NegativePrice`
+/// and `SanityCeilingExceeded` variants were returned when any single
+/// row failed per-row sanity. 8.3.1 (ADR-0091 §2 amendment / #483)
+/// changed row-level sanity failures into non-fatal rejections
+/// surfaced as [`RejectedUpstreamRow`]; those two variants are kept
+/// so [`ValidationError::Display`] stays stable for any external log
+/// scraper, but [`validate_payload`] no longer produces them.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ValidationError {
     ParseFailed(String),
@@ -486,41 +531,38 @@ impl std::fmt::Display for ValidationError {
 
 impl std::error::Error for ValidationError {}
 
-/// Run all guards from ADR-0091 §3. Pure — no state mutation.
+/// Run all guards from ADR-0091 §3, including the §2 row-level
+/// rejection amendment (8.3.1 / #483).
+///
+/// `new.entries` is mutated in place: rows that fail per-row sanity
+/// (NaN, negative price, or rate over [`PRICE_CEILING_PER_MILLION`])
+/// are removed and returned in the `Ok(Vec<RejectedUpstreamRow>)` arm
+/// so callers can log them and surface on `GET /pricing/status`. One
+/// bad upstream row no longer blocks the whole manifest refresh; pre-
+/// 8.3.1 the LiteLLM `wandb/Qwen3-Coder-480B-A35B-Instruct` entry at
+/// $100,000/M would `Err(SanityCeilingExceeded)` the whole payload and
+/// DoS every user's refresh until upstream patched.
+///
+/// Whole-payload hard failures still apply:
+/// - `raw_bytes_len > MAX_PAYLOAD_BYTES` → `Err(PayloadTooLarge)`.
+/// - kept-row retention vs `previous` below
+///   [`RETENTION_FLOOR_PERCENT`] → `Err(RetentionBelowFloor)`. The
+///   floor runs against KEPT rows (post-partition), so a mass upstream
+///   regression still triggers the fail-safe.
 ///
 /// `raw_bytes_len` is checked first so oversized payloads are rejected
 /// before any parsing cost.
 pub fn validate_payload(
-    new: &Manifest,
+    new: &mut Manifest,
     previous: Option<&Manifest>,
     raw_bytes_len: usize,
-) -> std::result::Result<(), ValidationError> {
+) -> std::result::Result<Vec<RejectedUpstreamRow>, ValidationError> {
     if raw_bytes_len > MAX_PAYLOAD_BYTES {
         return Err(ValidationError::PayloadTooLarge {
             bytes: raw_bytes_len,
         });
     }
-    for (model_id, entry) in &new.entries {
-        for price in [
-            entry.input_cost_per_token,
-            entry.output_cost_per_token,
-            entry.cache_creation_input_token_cost.unwrap_or(0.0),
-            entry.cache_read_input_token_cost.unwrap_or(0.0),
-        ] {
-            if price.is_nan() || price < 0.0 {
-                return Err(ValidationError::NegativePrice {
-                    model_id: model_id.clone(),
-                });
-            }
-            let per_million = price * 1_000_000.0;
-            if per_million > PRICE_CEILING_PER_MILLION {
-                return Err(ValidationError::SanityCeilingExceeded {
-                    model_id: model_id.clone(),
-                    per_million,
-                });
-            }
-        }
-    }
+    let rejected = partition_rows_by_sanity(&mut new.entries);
     if let Some(prev) = previous {
         let prev_total = prev.entries.len();
         if prev_total > 0 {
@@ -537,7 +579,57 @@ pub fn validate_payload(
             }
         }
     }
-    Ok(())
+    Ok(rejected)
+}
+
+/// Drop per-row sanity failures from `entries` in place and return
+/// them. Pure — no state mutation beyond the passed-in map. Broken
+/// out from [`validate_payload`] so callers can run row-level
+/// partitioning without the size + retention-floor checks. The
+/// daemon's `warm_load_disk_cache` calls this directly so a restart
+/// re-runs sanity against whatever the disk cache holds.
+///
+/// A row is rejected if any of its four price fields (input, output,
+/// cache-creation, cache-read) is NaN, negative, or exceeds
+/// [`PRICE_CEILING_PER_MILLION`] in per-million terms. The reason
+/// string is human-readable and surfaced verbatim on
+/// `GET /pricing/status` and in the daemon log.
+pub fn partition_rows_by_sanity(
+    entries: &mut HashMap<String, ManifestEntry>,
+) -> Vec<RejectedUpstreamRow> {
+    let mut rejected: Vec<RejectedUpstreamRow> = Vec::new();
+    entries.retain(|model_id, entry| {
+        for price in [
+            entry.input_cost_per_token,
+            entry.output_cost_per_token,
+            entry.cache_creation_input_token_cost.unwrap_or(0.0),
+            entry.cache_read_input_token_cost.unwrap_or(0.0),
+        ] {
+            if price.is_nan() || price < 0.0 {
+                rejected.push(RejectedUpstreamRow {
+                    model_id: model_id.clone(),
+                    reason: "negative or NaN price".to_string(),
+                });
+                return false;
+            }
+            let per_million = price * 1_000_000.0;
+            if per_million > PRICE_CEILING_PER_MILLION {
+                rejected.push(RejectedUpstreamRow {
+                    model_id: model_id.clone(),
+                    reason: format!(
+                        "${per_million:.2}/M exceeds sanity ceiling ${:.0}/M",
+                        PRICE_CEILING_PER_MILLION
+                    ),
+                });
+                return false;
+            }
+        }
+        true
+    });
+    // Deterministic order by model_id so the daemon log and
+    // `pricing status` render identically across runs.
+    rejected.sort_by(|a, b| a.model_id.cmp(&b.model_id));
+    rejected
 }
 
 // ---------------------------------------------------------------------------
@@ -696,6 +788,7 @@ pub(crate) fn reset_state_for_test() {
         fetched_at: Utc::now().to_rfc3339(),
     });
     guard.source = PricingSource::EmbeddedBaseline;
+    guard.rejected_upstream_rows.clear();
     drop(guard);
     unknown_cache()
         .lock()
@@ -962,6 +1055,11 @@ mod pricing_tests {
     /// ADR-0091 §3: the validator rejects payloads that drop more than 5%
     /// of previously-known models. Guards against an accidental upstream
     /// wipe, supply-chain tampering, or a mid-rewrite commit.
+    ///
+    /// 8.3.1 (#483): the floor applies to the kept rows after per-row
+    /// sanity partitioning runs, so a payload that would otherwise pass
+    /// but has enough per-row rejections to drop below the floor still
+    /// hard-fails.
     #[test]
     fn gate_5_retention_floor_rejects_wiped_payload() {
         // Build a previous manifest of 100 known models.
@@ -981,13 +1079,13 @@ mod pricing_tests {
         for i in 0..80 {
             new_entries.insert(format!("prev-model-{i}"), entry(0.000001, 0.000002));
         }
-        let candidate = Manifest {
+        let mut candidate = Manifest {
             version: 6,
             entries: new_entries,
             fetched_at: Utc::now().to_rfc3339(),
         };
 
-        let err = validate_payload(&candidate, Some(&previous), 10_000).unwrap_err();
+        let err = validate_payload(&mut candidate, Some(&previous), 10_000).unwrap_err();
         assert!(
             matches!(
                 err,
@@ -1004,31 +1102,100 @@ mod pricing_tests {
         for i in 0..96 {
             pass.insert(format!("prev-model-{i}"), entry(0.000001, 0.000002));
         }
-        let candidate = Manifest {
+        let mut candidate = Manifest {
             version: 6,
             entries: pass,
             fetched_at: Utc::now().to_rfc3339(),
         };
-        validate_payload(&candidate, Some(&previous), 10_000).expect("96%% retention must pass");
+        let rejected = validate_payload(&mut candidate, Some(&previous), 10_000)
+            .expect("96% retention must pass");
+        assert!(
+            rejected.is_empty(),
+            "clean payload should have no rejected rows"
+        );
     }
 
-    // ---- Gate 6: $1,000/M sanity ceiling rejects a mispriced payload -------
+    // ---- Gate 6 (8.3.1 amendment): one insane row is rejected, rest kept ---
 
-    /// Guards against a stray decimal-point upstream.
+    /// ADR-0091 §2 amendment (8.3.1 / #483): a row exceeding the
+    /// $1,000/M sanity ceiling is filtered out of the manifest and
+    /// surfaced in `RejectedUpstreamRow`, but the rest of the payload
+    /// still refreshes. Pre-8.3.1 the same input would hard-fail via
+    /// `ValidationError::SanityCeilingExceeded`, DoSing the refresher
+    /// until the bad row was patched upstream (the 2026-04-22
+    /// `wandb/Qwen3-Coder-480B-A35B-Instruct` $100,000/M incident).
     #[test]
-    fn gate_6_sanity_ceiling_rejects_insane_prices() {
+    fn gate_6_sanity_ceiling_rejects_row_keeps_rest() {
+        // Enough good rows so the retention floor (no previous here) is
+        // not the bottleneck. $0.001 per token = $1,000/M, right at the
+        // ceiling — stays below, kept. $0.002 per token = $2,000/M,
+        // 2x over the ceiling, rejected.
         let mut entries = HashMap::new();
-        // $2,000 per million tokens — 2× the ceiling.
         entries.insert("mispriced".to_string(), entry(0.002, 0.002));
-        let candidate = Manifest {
+        for i in 0..50 {
+            entries.insert(format!("ok-model-{i}"), entry(0.000001, 0.000002));
+        }
+        let mut candidate = Manifest {
             version: 1,
             entries,
             fetched_at: Utc::now().to_rfc3339(),
         };
-        let err = validate_payload(&candidate, None, 10_000).unwrap_err();
+        let rejected = validate_payload(&mut candidate, None, 10_000)
+            .expect("row-level rejection must not fail payload");
+        assert_eq!(rejected.len(), 1, "exactly one row should be rejected");
+        assert_eq!(rejected[0].model_id, "mispriced");
         assert!(
-            matches!(err, ValidationError::SanityCeilingExceeded { .. }),
-            "expected SanityCeilingExceeded, got {err:?}"
+            rejected[0].reason.contains("sanity ceiling"),
+            "reason should mention the sanity ceiling, got {:?}",
+            rejected[0].reason
+        );
+        assert_eq!(
+            candidate.entries.len(),
+            50,
+            "the 50 ok rows must remain after partitioning"
+        );
+        assert!(
+            !candidate.entries.contains_key("mispriced"),
+            "the mispriced row must be dropped from the kept set"
+        );
+    }
+
+    /// 8.3.1 / #483: row-level rejection drops enough rows that the
+    /// kept count falls below the retention floor. Whole payload must
+    /// still hard-fail so a mass upstream mispricing incident can't
+    /// sneak through.
+    #[test]
+    fn row_level_rejection_still_triggers_retention_floor() {
+        let mut prev_entries = HashMap::new();
+        for i in 0..100 {
+            prev_entries.insert(format!("m-{i}"), entry(0.000001, 0.000002));
+        }
+        let previous = Manifest {
+            version: 5,
+            entries: prev_entries,
+            fetched_at: Utc::now().to_rfc3339(),
+        };
+        // 100 entries in the new payload — same ids as previous — but
+        // 50 of them are over the sanity ceiling. 50 kept out of 100
+        // previously-known = 50% retention, below the 95% floor.
+        let mut new_entries = HashMap::new();
+        for i in 0..100 {
+            let e = if i < 50 {
+                entry(0.002, 0.002) // over ceiling — rejected
+            } else {
+                entry(0.000001, 0.000002)
+            };
+            new_entries.insert(format!("m-{i}"), e);
+        }
+        let mut candidate = Manifest {
+            version: 6,
+            entries: new_entries,
+            fetched_at: Utc::now().to_rfc3339(),
+        };
+        let err = validate_payload(&mut candidate, Some(&previous), 10_000).unwrap_err();
+        assert!(
+            matches!(err, ValidationError::RetentionBelowFloor { kept: 50, .. }),
+            "row-level rejection must still trip the retention floor, got {err:?}"
         );
     }
 
@@ -1090,6 +1257,11 @@ mod pricing_tests {
     /// and types are asserted against the committed contract; values are
     /// not pinned so this test is stable across releases (fetched_at
     /// and embedded_baseline_build naturally drift).
+    ///
+    /// 8.3.1 / #483: `rejected_upstream_rows` is `skip_serializing_if =
+    /// "Vec::is_empty"`, so a clean snapshot does NOT include the key
+    /// (preserves pre-8.3.1 client compat). The populated shape is
+    /// exercised in `pricing_status_surfaces_rejected_rows_when_populated`.
     #[test]
     fn gate_9_pricing_status_json_shape_is_stable() {
         let _g = serial().lock().unwrap();
@@ -1102,7 +1274,8 @@ mod pricing_tests {
         let j = serde_json::to_value(&state).unwrap();
         let obj = j.as_object().expect("top-level should be object");
 
-        // Pin the exact set of top-level keys.
+        // Pin the exact set of top-level keys on the clean (empty-
+        // rejected-rows) snapshot — stable across older clients.
         let mut keys: Vec<&str> = obj.keys().map(String::as_str).collect();
         keys.sort();
         assert_eq!(
@@ -1176,5 +1349,50 @@ mod pricing_tests {
         assert_eq!(PricingSource::parse_column(COLUMN_VALUE_UNKNOWN), None);
         assert_eq!(PricingSource::parse_column(COLUMN_VALUE_UPSTREAM_API), None);
         assert_eq!(PricingSource::parse_column("garbage"), None);
+    }
+
+    /// 8.3.1 / #483: when the last refresh tick dropped rows, they
+    /// surface on `GET /pricing/status` under `rejected_upstream_rows`.
+    /// Each entry has `model_id` + `reason`.
+    #[test]
+    fn pricing_status_surfaces_rejected_rows_when_populated() {
+        let _g = serial().lock().unwrap();
+        reset_state_for_test();
+        install_rejected_upstream_rows(vec![
+            RejectedUpstreamRow {
+                model_id: "wandb/Qwen/Qwen3-Coder-480B-A35B-Instruct".to_string(),
+                reason: "$100000.00/M exceeds sanity ceiling $1000/M".to_string(),
+            },
+            RejectedUpstreamRow {
+                model_id: "broken/nan-price".to_string(),
+                reason: "negative or NaN price".to_string(),
+            },
+        ]);
+
+        let state = current_state();
+        let j = serde_json::to_value(&state).unwrap();
+        let obj = j.as_object().unwrap();
+        let rejected = obj["rejected_upstream_rows"]
+            .as_array()
+            .expect("rejected_upstream_rows must be array when populated");
+        assert_eq!(rejected.len(), 2);
+        for entry in rejected {
+            let e = entry.as_object().unwrap();
+            let mut ek: Vec<&str> = e.keys().map(String::as_str).collect();
+            ek.sort();
+            assert_eq!(ek, vec!["model_id", "reason"]);
+            assert!(e["model_id"].is_string());
+            assert!(e["reason"].is_string());
+        }
+
+        // Clearing mid-run (clean refresh tick) removes the key again.
+        install_rejected_upstream_rows(Vec::new());
+        let state = current_state();
+        let j = serde_json::to_value(&state).unwrap();
+        let obj = j.as_object().unwrap();
+        assert!(
+            !obj.contains_key("rejected_upstream_rows"),
+            "empty list must be skipped (back-compat with older clients)"
+        );
     }
 }
