@@ -59,6 +59,24 @@ pub fn cmd_init(cleanup: bool, yes: bool, no_integrations: bool, no_daemon: bool
         install_default_integrations(&config);
     }
 
+    // #548: auto-import historical transcripts so `budi stats` has
+    // data immediately after setup. `cmd_import(false, false)` is
+    // idempotent (ingest skips already-seen message ids via the
+    // per-path offset table), so this is safe to run on every
+    // `budi init` — first install walks the full history, repeat
+    // inits become fast no-ops. Skipped under `--no-daemon` because
+    // the import routes through `/sync/*` on the daemon we didn't
+    // start. Import failure is warn-only — init stays successful.
+    if !no_daemon {
+        println!();
+        if let Err(e) = super::import::cmd_import(false, false) {
+            let yellow = super::ansi("\x1b[33m");
+            let reset = super::ansi("\x1b[0m");
+            eprintln!("{yellow}  Warning:{reset} historical import failed: {e:#}");
+            eprintln!("  Run `budi db import` to retry.");
+        }
+    }
+
     let bold_cyan = super::ansi("\x1b[1;36m");
     let dim = super::ansi("\x1b[90m");
     let reset = super::ansi("\x1b[0m");
