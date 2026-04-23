@@ -4479,6 +4479,87 @@ fn health_batch_matches_detail_thresholds() {
     assert_eq!(batch["s1"], detail.state);
 }
 
+/// #497 (D-1): the sessions LIST health dot (`session_health_batch`) and
+/// the sessions DETAIL health verdict (`session_health`) must agree on
+/// the same session's overall state, regardless of which shape the
+/// vitals land in. Pre-ticket the list used a separate heuristic that
+/// could paint red while detail computed `insufficient_data` for the
+/// same session (≥3 of 4 vitals N/A).
+///
+/// This test parametrizes the two paths across four fixture shapes,
+/// including the two specific cases called out in the ticket's
+/// acceptance list.
+#[test]
+fn health_list_detail_parity_across_fixture_shapes() {
+    // Case A: ≥ 3 vitals N/A — too few messages / events for any
+    // per-vital calculation to score. Expected: insufficient_data.
+    {
+        let mut conn = test_db();
+        conn.execute(
+            "INSERT INTO sessions (id, provider, started_at) VALUES ('sA', 'claude_code', '2026-03-14')",
+            [],
+        ).unwrap();
+        let msgs: Vec<ParsedMessage> = (0..2)
+            .map(|i| health_msg(&format!("a{i}"), "sA", i, 500, 300, 1.0))
+            .collect();
+        ingest_messages(&mut conn, &msgs, None).unwrap();
+
+        let detail = session_health(&conn, Some("sA")).unwrap();
+        let batch = session_health_batch(&conn, &["sA"]).unwrap();
+        assert_eq!(
+            batch["sA"], detail.state,
+            "list ↔ detail disagree for ≥3-N/A fixture (list={}, detail={})",
+            batch["sA"], detail.state
+        );
+        // Pin the verdict itself so a future threshold change that
+        // accidentally promotes a two-message session from
+        // `insufficient_data` to `green` fails here too.
+        assert_eq!(batch["sA"], "insufficient_data");
+    }
+
+    // Case B: empty session (zero messages). Same verdict from both
+    // paths. Pre-#441 batch returned `green` here; the #441 batch
+    // test above covers the non-existent-session case, and this one
+    // covers the "session row exists but no messages" case.
+    {
+        let conn = test_db();
+        conn.execute(
+            "INSERT INTO sessions (id, provider, started_at) VALUES ('sB', 'claude_code', '2026-03-14')",
+            [],
+        ).unwrap();
+        // No ingest_messages call — the session is known but has zero
+        // assistant rows.
+        let detail = session_health(&conn, Some("sB")).unwrap();
+        let batch = session_health_batch(&conn, &["sB"]).unwrap();
+        assert_eq!(batch["sB"], detail.state);
+        assert_eq!(batch["sB"], "insufficient_data");
+    }
+
+    // Case C: enough messages to score at least one vital green.
+    // Both paths should agree on the computed state regardless of
+    // what that state is.
+    {
+        let mut conn = test_db();
+        conn.execute(
+            "INSERT INTO sessions (id, provider, started_at) VALUES ('sC', 'claude_code', '2026-03-14')",
+            [],
+        ).unwrap();
+        // 8 messages with stable input sizes — cache-efficiency can
+        // score once, context-drag once. Thrashing + cost-accel stay
+        // N/A without tool events / cost spikes.
+        let msgs: Vec<ParsedMessage> = (0..8)
+            .map(|i| health_msg(&format!("c{i}"), "sC", i, 1000, 500, 1.0))
+            .collect();
+        ingest_messages(&mut conn, &msgs, None).unwrap();
+        let detail = session_health(&conn, Some("sC")).unwrap();
+        let batch = session_health_batch(&conn, &["sC"]).unwrap();
+        assert_eq!(
+            batch["sC"], detail.state,
+            "list ↔ detail disagree for scored-vitals fixture"
+        );
+    }
+}
+
 // --- Coverage: insufficient_data when no vitals can be scored (v22) ---
 
 #[test]
