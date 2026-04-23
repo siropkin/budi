@@ -6,6 +6,17 @@ use rusqlite::Connection;
 use crate::analytics::{DimensionFilters, UNTAGGED_DIMENSION};
 
 /// Estimated cost breakdown.
+///
+/// #520 (8.3.2): `total_cost` is `SUM(cost_cents)` from `messages`
+/// (the authoritative cost stored at ingest time by `CostEnricher`,
+/// which may include thinking tokens, fast-mode multipliers, and web-
+/// search fees). The four per-component fields (`input_cost` /
+/// `output_cost` / `cache_write_cost` / `cache_read_cost`) are re-
+/// derived from base token sums × current manifest pricing and cover
+/// only those four buckets. When Cursor fast-mode or thinking-token
+/// cost contributes to a session, the four components can sum to less
+/// than `total_cost`. `other_cost` captures that gap so the summary
+/// view visibly reconciles.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct CostEstimate {
     pub total_cost: f64,
@@ -13,6 +24,13 @@ pub struct CostEstimate {
     pub output_cost: f64,
     pub cache_write_cost: f64,
     pub cache_read_cost: f64,
+    /// #520: residual cost present in `total_cost` but not captured by
+    /// the four base-token components above. Non-zero when Cursor
+    /// fast-mode, thinking tokens, or web-search fees contributed to
+    /// the aggregate. Defaults to 0 for back-compat; callers that pre-
+    /// 8.3.2 ignored this field see no behavior change.
+    #[serde(default)]
+    pub other_cost: f64,
     pub cache_savings: f64,
 }
 
@@ -177,6 +195,7 @@ pub fn estimate_cost_with_filters(
         output_cost: 0.0,
         cache_write_cost: 0.0,
         cache_read_cost: 0.0,
+        other_cost: 0.0,
         cache_savings: 0.0,
     };
 
@@ -214,6 +233,19 @@ pub fn estimate_cost_with_filters(
     total.cache_write_cost = (total.cache_write_cost * 100.0).round() / 100.0;
     total.cache_read_cost = (total.cache_read_cost * 100.0).round() / 100.0;
     total.cache_savings = (total.cache_savings * 100.0).round() / 100.0;
+
+    // #520: the four per-component fields sum from base-token × rate,
+    // while `total_cost` is `SUM(cost_cents)` from ingest (which can
+    // include thinking / fast-mode / web-search contributions).
+    // Compute `other_cost` as the residual so the summary view
+    // visually reconciles. Clamp to >= 0 — a negative residual would
+    // mean the four components over-counted vs the stored total,
+    // which shouldn't happen but guards against a future pricing
+    // drift surfacing as a confusing "other -$N" row on screen.
+    let components_sum =
+        total.input_cost + total.output_cost + total.cache_write_cost + total.cache_read_cost;
+    let other = total.total_cost - components_sum;
+    total.other_cost = ((other * 100.0).round() / 100.0).max(0.0);
 
     Ok(total)
 }
@@ -525,5 +557,82 @@ mod tests {
             cost.total_cost > 0.0,
             "sub-cent messages should not be lost"
         );
+    }
+
+    /// #520: when `cost_cents` at ingest exceeds the sum of the four
+    /// base-token components (e.g. Cursor fast-mode, thinking tokens,
+    /// web-search fees), `other_cost` captures the residual so the
+    /// summary render sums back to the top line.
+    #[test]
+    fn cost_other_component_captures_residual_above_base_tokens() {
+        let conn = setup_db();
+        // Seed a row whose stored `cost_cents` (1000 ¢ = $10.00) is
+        // higher than the pure base-token × manifest-rate recomputation.
+        // For `claude-opus-4-6`: 1M input × $5/M = $5.00, 100K output ×
+        // $25/M = $2.50 → components sum $7.50. The extra $2.50 is the
+        // "other" bucket — thinking/fast-mode/web-search in real data.
+        conn.execute(
+            "INSERT INTO messages (id, role, timestamp, model, input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens, cost_cents)
+             VALUES (?1, 'assistant', '2026-03-21T00:00:00Z', 'claude-opus-4-6', ?2, ?3, 0, 0, ?4)",
+            params!["msg1", 1_000_000i64, 100_000i64, 1000.0],
+        ).unwrap();
+        let cost = estimate_cost_filtered(&conn, None, None, None).unwrap();
+        assert_eq!(cost.total_cost, 10.0);
+        assert_eq!(cost.input_cost, 5.0);
+        assert_eq!(cost.output_cost, 2.5);
+        assert_eq!(cost.cache_write_cost, 0.0);
+        assert_eq!(cost.cache_read_cost, 0.0);
+        assert_eq!(cost.other_cost, 2.5);
+        // Reconciliation: four components + other == total.
+        let sum = cost.input_cost
+            + cost.output_cost
+            + cost.cache_write_cost
+            + cost.cache_read_cost
+            + cost.other_cost;
+        assert!(
+            (sum - cost.total_cost).abs() < 0.005,
+            "sub-line must reconcile to top line: sum={sum}, total={}",
+            cost.total_cost,
+        );
+    }
+
+    /// #520: when the four base-token components already equal the
+    /// stored total, `other_cost` is 0 so the render suppresses the
+    /// "other" cell and the sub-line reads as pre-8.3.2.
+    #[test]
+    fn cost_other_component_is_zero_when_no_residual() {
+        let conn = setup_db();
+        // `claude-opus-4-6`: 1M input × $5/M + 100K output × $25/M = $7.50.
+        // Stored `cost_cents` matches the recomputation exactly, so
+        // `other_cost` should be zero.
+        conn.execute(
+            "INSERT INTO messages (id, role, timestamp, model, input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens, cost_cents)
+             VALUES (?1, 'assistant', '2026-03-21T00:00:00Z', 'claude-opus-4-6', ?2, ?3, 0, 0, ?4)",
+            params!["msg1", 1_000_000i64, 100_000i64, 750.0],
+        ).unwrap();
+        let cost = estimate_cost_filtered(&conn, None, None, None).unwrap();
+        assert_eq!(cost.total_cost, 7.5);
+        assert_eq!(cost.other_cost, 0.0);
+    }
+
+    /// #520 defensive: a negative residual (components > total — only
+    /// possible under an incoherent pricing state) clamps to 0 so the
+    /// render never shows a confusing "other -$N" cell. The stored
+    /// `total_cost` remains the authoritative number.
+    #[test]
+    fn cost_other_component_clamps_negative_residual_to_zero() {
+        let conn = setup_db();
+        // Under-stored cost_cents vs token × rate. The recomputation
+        // says ~$7.50 for the four base components, but we persist
+        // only $5.00 at ingest time — `other_cost` should clamp at 0
+        // rather than flip negative.
+        conn.execute(
+            "INSERT INTO messages (id, role, timestamp, model, input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens, cost_cents)
+             VALUES (?1, 'assistant', '2026-03-21T00:00:00Z', 'claude-opus-4-6', ?2, ?3, 0, 0, ?4)",
+            params!["msg1", 1_000_000i64, 100_000i64, 500.0],
+        ).unwrap();
+        let cost = estimate_cost_filtered(&conn, None, None, None).unwrap();
+        assert_eq!(cost.total_cost, 5.0);
+        assert_eq!(cost.other_cost, 0.0);
     }
 }
