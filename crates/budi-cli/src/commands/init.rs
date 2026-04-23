@@ -45,6 +45,16 @@ pub fn cmd_init(cleanup: bool, yes: bool, no_integrations: bool, no_daemon: bool
         print_autostart_status(&config);
     }
 
+    // #521: auto-seed `device_id` in `~/.config/budi/cloud.toml` when
+    // cloud sync is opted in but the field is still commented out.
+    // Matches the template comment's long-standing promise that
+    // `budi init` seeds these values on a real enable. Prints a
+    // single-line status so the user sees whether the seeding just
+    // happened, already existed, or was skipped because cloud is off.
+    // `org_id` is NOT auto-generated (it has to come from the dashboard
+    // Settings page); we nudge the user separately when it's missing.
+    announce_cloud_device_id_seeding();
+
     if !no_integrations {
         install_default_integrations(&config);
     }
@@ -66,6 +76,58 @@ pub fn cmd_init(cleanup: bool, yes: bool, no_integrations: bool, no_daemon: bool
     );
 
     Ok(())
+}
+
+/// #521: seed `cloud.device_id` into `~/.config/budi/cloud.toml` when
+/// the user has opted into cloud sync but the field is still the
+/// commented template line. Pre-8.3.2 the template promised that
+/// `budi init` would do this but the seeding logic was never wired up;
+/// users were left with `budi cloud status = enabled but not fully
+/// configured` after following the documented flow.
+///
+/// On `Generated`, print a short confirmation + a nudge to set
+/// `org_id` (which the dashboard Settings page exposes). On
+/// `AlreadySet`, stay silent — subsequent `budi init` runs should not
+/// nag. On `Skipped`, stay silent — cloud sync isn't opted in, so
+/// the user hasn't asked budi to touch `cloud.toml`. Failures print a
+/// warning but do NOT abort the overall `budi init`, because the rest
+/// of init (daemon / autostart / integrations) is independent.
+fn announce_cloud_device_id_seeding() {
+    let dim = super::ansi("\x1b[90m");
+    let green = super::ansi("\x1b[32m");
+    let yellow = super::ansi("\x1b[33m");
+    let reset = super::ansi("\x1b[0m");
+    match budi_core::config::seed_cloud_device_id_if_needed() {
+        Ok(budi_core::config::SeedDeviceIdOutcome::Generated(id)) => {
+            // Surface the first 8 chars of the UUID so an operator
+            // with two devices can tell them apart in the dashboard
+            // without having to open the TOML.
+            let short = id.split('-').next().unwrap_or(&id);
+            println!(
+                "  {green}✓{reset} Cloud device_id seeded ({short}…) in ~/.config/budi/cloud.toml"
+            );
+            // Nudge for org_id if it's still missing. Checking via
+            // `load_cloud_config` keeps this one read-only pass; the
+            // file was just mutated above, so the re-load is
+            // intentional.
+            let cfg = budi_core::config::load_cloud_config();
+            if cfg.org_id.is_none() {
+                println!(
+                    "  {yellow}!{reset} Set {dim}org_id{reset} in ~/.config/budi/cloud.toml {dim}(copy from Settings page at https://app.getbudi.dev/dashboard/settings){reset}"
+                );
+            }
+        }
+        Ok(budi_core::config::SeedDeviceIdOutcome::AlreadySet) => {
+            // Quiet — user has already completed setup, no nag.
+        }
+        Ok(budi_core::config::SeedDeviceIdOutcome::Skipped) => {
+            // Quiet — no cloud.toml or cloud isn't enabled. Fresh users
+            // who haven't run `budi cloud init` see nothing.
+        }
+        Err(e) => {
+            eprintln!("  {yellow}!{reset} Could not seed cloud.device_id: {e:#}");
+        }
+    }
 }
 
 /// Install the default recommended integrations (Claude Code statusline,

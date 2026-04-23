@@ -103,10 +103,17 @@ api_key = \"{api_key}\"
 # self-hosted ingester.
 endpoint = \"https://app.getbudi.dev\"
 
-# Optional. Only prompts, code, and responses are stripped before upload —
-# these two fields identify which device and workspace the daily rollups
-# belong to on the dashboard. `budi init` seeds them automatically on a
-# real enable, but you can set them explicitly for multi-machine setups.
+# These two fields identify which device and workspace the daily rollups
+# belong to on the dashboard.
+#
+# `device_id` is auto-seeded by `budi init` (UUID v4) once `enabled = true`
+# and `api_key` is non-stub. You can also set it explicitly for multi-
+# machine setups — any stable non-empty string works.
+#
+# `org_id` must be copied by hand from the Settings page at
+# https://app.getbudi.dev/dashboard/settings — `budi init` does not
+# reach out to the dashboard to discover it. `budi cloud sync` refuses
+# to run until both fields are present (see `budi cloud status`).
 # device_id = \"your-device-id\"
 # org_id = \"your-org-id\"
 
