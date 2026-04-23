@@ -825,4 +825,48 @@ mod tests {
         let state = apply_statusline(&mut settings).expect("apply");
         assert_eq!(state, StatuslineApply::AlreadyConfigured);
     }
+
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn apply_statusline_preserves_user_command_on_merge() {
+        // #546 regression guard: the user's pre-existing non-budi
+        // statusLine command must survive installation. `apply_statusline`
+        // appends budi's bash suffix, it does NOT replace the command.
+        let mut settings = json!({
+            "statusLine": {
+                "type": "command",
+                "command": "my-custom-prompt --fancy",
+                "padding": 2
+            }
+        });
+        let state = apply_statusline(&mut settings).expect("apply");
+        assert_eq!(state, StatuslineApply::Changed);
+
+        let merged = settings["statusLine"]["command"]
+            .as_str()
+            .expect("command string")
+            .to_string();
+
+        // User's command MUST still be the head of the merged string.
+        assert!(
+            merged.starts_with("my-custom-prompt --fancy"),
+            "user command was not preserved: {merged}",
+        );
+        // Budi suffix appended after, separated by the shell statement
+        // boundary, so Claude Code's shell runs user command first then
+        // budi's statusline. Check for the known suffix marker.
+        assert!(
+            merged.contains("budi statusline"),
+            "budi suffix not appended: {merged}",
+        );
+        assert!(
+            merged.contains("; budi_out=$(budi statusline"),
+            "merged command should use the documented bash suffix shape: {merged}",
+        );
+
+        // Fields other than `command` must be preserved verbatim so
+        // the user's padding / type / other settings don't regress.
+        assert_eq!(settings["statusLine"]["type"], "command");
+        assert_eq!(settings["statusLine"]["padding"], 2);
+    }
 }

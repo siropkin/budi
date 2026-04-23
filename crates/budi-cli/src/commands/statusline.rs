@@ -35,6 +35,96 @@ fn detect_git_branch(dir: &str) -> Option<String> {
         })
 }
 
+/// #546: shorten a filesystem path for the statusline context prefix.
+/// Replaces `$HOME` with `~`, then keeps the last two path segments so a
+/// long absolute path like `/Users/alice/_projects/budi/crates/budi-cli`
+/// renders as `crates/budi-cli`. Falls back to the `~`-normalized path
+/// when it has fewer than two segments.
+fn short_display_path(cwd: &str) -> String {
+    let home = std::env::var("HOME").unwrap_or_default();
+    let normalized = if !home.is_empty() && cwd.starts_with(&home) {
+        format!("~{}", &cwd[home.len()..])
+    } else {
+        cwd.to_string()
+    };
+
+    // Keep the last two non-empty segments (or fewer) — enough to tell
+    // repos apart without blowing out the statusline width budget.
+    let trimmed = normalized.trim_end_matches('/');
+    let segments: Vec<&str> = trimmed.split('/').filter(|s| !s.is_empty()).collect();
+    if segments.len() <= 2 {
+        normalized
+    } else {
+        let tail = &segments[segments.len() - 2..];
+        tail.join("/")
+    }
+}
+
+/// #546: extract model display name from the Claude Code statusline
+/// stdin envelope. Prefers `model.display_name`, falls back to
+/// `model.id` so the field renders something useful even on older
+/// Claude Code versions that omitted the display name.
+fn extract_model_name(stdin_json: Option<&Value>) -> Option<String> {
+    let model = stdin_json?.get("model")?;
+    if let Some(display) = model.get("display_name").and_then(|v| v.as_str())
+        && !display.is_empty()
+    {
+        return Some(display.to_string());
+    }
+    model
+        .get("id")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(String::from)
+}
+
+/// #546: render the Claude-Code-default-equivalent context prefix that
+/// sits in front of the budi link + cost slots. Claude Code's built-in
+/// statusline shows model / working directory / git branch; when the
+/// user installs our `statusLine.command = "budi statusline"` we
+/// replace that slot wholesale, so we have to render equivalent context
+/// here or the user loses visibility.
+///
+/// Layout: `<model> · <short-cwd> · <branch>` — each element dropped
+/// individually when unavailable. Returns `None` when no element
+/// resolves, so the caller can fall through to the legacy "budi only"
+/// render shape (keeps starship / custom formats unaffected).
+fn render_context_prefix(
+    model: Option<&str>,
+    short_cwd: Option<&str>,
+    branch: Option<&str>,
+    ansi: bool,
+) -> Option<String> {
+    let (cyan, dim, reset) = if ansi {
+        ("\x1b[36m", "\x1b[90m", "\x1b[0m")
+    } else {
+        ("", "", "")
+    };
+
+    let mut parts: Vec<String> = Vec::with_capacity(3);
+    if let Some(m) = model
+        && !m.is_empty()
+    {
+        parts.push(format!("{cyan}{m}{reset}"));
+    }
+    if let Some(c) = short_cwd
+        && !c.is_empty()
+    {
+        parts.push(c.to_string());
+    }
+    if let Some(b) = branch
+        && !b.is_empty()
+    {
+        parts.push(format!("{dim}{b}{reset}"));
+    }
+    if parts.is_empty() {
+        None
+    } else {
+        let sep = format!(" {dim}·{reset} ");
+        Some(parts.join(&sep))
+    }
+}
+
 /// Build a map of slot name → display value from the daemon response.
 fn build_slot_values(data: &Value) -> HashMap<String, String> {
     let mut vals = HashMap::new();
@@ -273,12 +363,23 @@ pub fn cmd_statusline(format: StatuslineFormat, provider: Option<String>) -> Res
     let sl_config = config::load_statusline_config();
     let needed = sl_config.required_slots();
 
-    // Detect git branch if needed
-    let branch = if needed.contains(&"branch".to_string()) {
-        cwd.as_deref().and_then(detect_git_branch)
-    } else {
-        None
-    };
+    // #546: always detect branch for the Claude format so the CC-default-
+    // equivalent context prefix renders correctly; other formats keep the
+    // pre-#546 behavior of only resolving it when a user template asked
+    // for the `{branch}` slot.
+    let branch =
+        if needed.contains(&"branch".to_string()) || matches!(format, StatuslineFormat::Claude) {
+            cwd.as_deref().and_then(detect_git_branch)
+        } else {
+            None
+        };
+
+    // #546: context fields for the Claude-format prefix (model + short
+    // cwd + branch). Extracted up here so the offline / daemon-down
+    // branch below can also surface the info and the user doesn't drop
+    // to just `budi --` when the daemon isn't responding.
+    let model_name = extract_model_name(stdin_json.as_ref());
+    let short_cwd = cwd.as_deref().map(short_display_path);
 
     // Provider scoping: the Claude Code statusline shows Claude Code usage
     // only by default (ADR-0088 §4, #224). Other formats are unscoped unless
@@ -326,7 +427,22 @@ pub fn cmd_statusline(format: StatuslineFormat, provider: Option<String>) -> Res
     };
     let Ok(client) = daemon_client_with_timeout(timeout) else {
         if format == StatuslineFormat::Claude {
-            println!("\x1b[36mbudi\x1b[0m \x1b[90m--\x1b[0m");
+            // #546: even when the daemon is unreachable, still surface
+            // the CC-default-equivalent context prefix so the user
+            // isn't left with only `budi --` after we replace their
+            // statusline slot.
+            let prefix = render_context_prefix(
+                model_name.as_deref(),
+                short_cwd.as_deref(),
+                branch.as_deref(),
+                true,
+            );
+            let dim = "\x1b[90m";
+            let reset = "\x1b[0m";
+            match prefix {
+                Some(p) => println!("{p} {dim}·{reset} \x1b[36mbudi\x1b[0m {dim}--{reset}"),
+                None => println!("\x1b[36mbudi\x1b[0m \x1b[90m--\x1b[0m"),
+            }
         }
         return Ok(());
     };
@@ -418,12 +534,25 @@ pub fn cmd_statusline(format: StatuslineFormat, provider: Option<String>) -> Res
                 format!("{budi_link} {dim}·{reset} {joined}")
             };
 
-            if has_health {
-                let line = render_coach(&statusline_data, &extra, true, &budi_link)
-                    .unwrap_or_else(|| render_cost_line(&effective));
-                println!("{line}");
+            let body = if has_health {
+                render_coach(&statusline_data, &extra, true, &budi_link)
+                    .unwrap_or_else(|| render_cost_line(&effective))
             } else {
-                println!("{}", render_cost_line(&effective));
+                render_cost_line(&effective)
+            };
+
+            // #546: prepend Claude-Code-default-equivalent context
+            // (model · short_cwd · branch) so installing
+            // `statusLine.command = "budi statusline"` doesn't
+            // subtract information from the user's prompt footer.
+            match render_context_prefix(
+                model_name.as_deref(),
+                short_cwd.as_deref(),
+                branch.as_deref(),
+                true,
+            ) {
+                Some(prefix) => println!("{prefix} {dim}·{reset} {body}"),
+                None => println!("{body}"),
             }
         }
     }
@@ -580,6 +709,107 @@ fn is_legacy_budi_hook(cmd: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn short_display_path_normalizes_home_and_truncates() {
+        // #546: path shortening contract for the Claude-format prefix.
+        unsafe { std::env::set_var("HOME", "/Users/alice") };
+        assert_eq!(
+            short_display_path("/Users/alice/_projects/budi"),
+            "_projects/budi",
+        );
+        // Deeply nested paths drop to the final two segments so the
+        // prefix doesn't blow out the prompt width budget.
+        assert_eq!(
+            short_display_path("/Users/alice/_projects/budi/crates/budi-cli"),
+            "crates/budi-cli",
+        );
+        // Outside HOME: no tilde rewrite, still truncated to last two.
+        assert_eq!(
+            short_display_path("/opt/homebrew/Cellar/budi/8.3.5"),
+            "budi/8.3.5",
+        );
+        // Shallow paths (<= 2 segments) render intact after tilde rewrite.
+        assert_eq!(short_display_path("/Users/alice"), "~");
+        assert_eq!(short_display_path("/tmp"), "/tmp");
+    }
+
+    #[test]
+    fn extract_model_name_prefers_display_falls_back_to_id() {
+        // #546: covers the two Claude Code stdin envelope variants.
+        let with_display = serde_json::json!({
+            "model": { "display_name": "Claude Opus 4.7", "id": "claude-opus-4-7" }
+        });
+        assert_eq!(
+            extract_model_name(Some(&with_display)),
+            Some("Claude Opus 4.7".to_string()),
+        );
+
+        // Older envelope: display_name missing / empty → fall back to id.
+        let id_only = serde_json::json!({
+            "model": { "id": "claude-sonnet-4-6" }
+        });
+        assert_eq!(
+            extract_model_name(Some(&id_only)),
+            Some("claude-sonnet-4-6".to_string()),
+        );
+        let empty_display = serde_json::json!({
+            "model": { "display_name": "", "id": "claude-haiku-4-5-20251001" }
+        });
+        assert_eq!(
+            extract_model_name(Some(&empty_display)),
+            Some("claude-haiku-4-5-20251001".to_string()),
+        );
+
+        // No model key → None.
+        let no_model = serde_json::json!({ "session_id": "s1" });
+        assert_eq!(extract_model_name(Some(&no_model)), None);
+        assert_eq!(extract_model_name(None), None);
+    }
+
+    #[test]
+    fn render_context_prefix_builds_dot_separated_line_with_all_fields() {
+        // #546 happy path: model + cwd + branch all present → three-field
+        // context prefix. No ANSI so assertions are stable.
+        let out = render_context_prefix(
+            Some("Claude Opus 4.7"),
+            Some("_projects/budi"),
+            Some("main"),
+            false,
+        );
+        assert_eq!(
+            out.as_deref(),
+            Some("Claude Opus 4.7 · _projects/budi · main"),
+        );
+    }
+
+    #[test]
+    fn render_context_prefix_drops_missing_fields_individually() {
+        // Only model known (e.g. stdin arrived but not in a repo).
+        assert_eq!(
+            render_context_prefix(Some("Sonnet 4.6"), None, None, false).as_deref(),
+            Some("Sonnet 4.6"),
+        );
+        // Only dir + branch (daemon-down fallback with no stdin model).
+        assert_eq!(
+            render_context_prefix(None, Some("_projects/budi"), Some("main"), false).as_deref(),
+            Some("_projects/budi · main"),
+        );
+        // Empty strings are treated the same as None so a missing git
+        // branch doesn't render as a bare `·` separator.
+        assert_eq!(
+            render_context_prefix(Some(""), Some(""), Some(""), false),
+            None,
+        );
+    }
+
+    #[test]
+    fn render_context_prefix_returns_none_when_everything_missing() {
+        // #546: if we have no context at all (no stdin, cwd lookup
+        // failed, not in a repo), return None so the Claude-format
+        // caller falls through to the legacy "budi only" render shape.
+        assert_eq!(render_context_prefix(None, None, None, false), None);
+    }
 
     #[test]
     fn fmt_cost_formats_correctly() {
