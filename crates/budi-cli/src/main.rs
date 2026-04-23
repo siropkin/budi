@@ -113,13 +113,12 @@ Examples:
         /// emitted by the pipeline when tool-call arguments point at a
         /// file inside the repo root). Mirrors `--tickets` / `--activities`
         /// so file-level attribution is a first-class CLI dimension.
-        /// Added in R1.4 (#292).
         #[arg(long, default_value_t = false)]
         files: bool,
         /// Show cost details for a specific file (repo-relative path,
         /// forward-slashed, inside the repo root). Mirrors `--ticket <ID>`
         /// and includes per-branch and per-ticket breakdowns so you can see
-        /// which tickets touched the file. Added in R1.4 (#292).
+        /// which tickets touched the file.
         #[arg(long, value_name = "PATH")]
         file: Option<String>,
         /// Optional repository filter for --branch, --ticket, --activity,
@@ -139,14 +138,14 @@ Examples:
         /// `--branches`, `--tickets`, `--activities`, `--files`,
         /// `--models`, `--tag`). `0` = no cap (show every matching row).
         /// Truncated rows collapse into an `(other N: $X)` aggregate so
-        /// the Total footer always reconciles to the cent (#448).
+        /// the Total footer always reconciles to the cent.
         #[arg(long, default_value_t = 30)]
         limit: usize,
         /// Maximum characters for labels and label-like extra columns
         /// (branch / file path / ticket id) in breakdown views. Values
         /// longer than this truncate with a middle ellipsis (`…`). The
         /// default balances readability on an 80-col terminal with the
-        /// natural length of file paths. (#450)
+        /// natural length of file paths.
         #[arg(long, default_value_t = 40)]
         label_width: usize,
         /// Include zero-cost `(model not yet attributed)` rows in
@@ -154,13 +153,13 @@ Examples:
         /// that carry no backing cost are collapsed into a
         /// suppressed-count footnote; pass `--include-pending` to
         /// see them as their own row. Rows with real Cursor-Auto
-        /// cost always render regardless of this flag. (#443, #450)
+        /// cost always render regardless of this flag.
         #[arg(long, default_value_t = false)]
         include_pending: bool,
         /// Break out the `(no repository)` bucket in `--projects` into a
         /// per-folder breakdown keyed on the cwd basename. Off by
         /// default so the main Repositories table stays clean of
-        /// `Desktop` / `~` / scratch-dir rows. (#442)
+        /// `Desktop` / `~` / scratch-dir rows.
         #[arg(long, default_value_t = false)]
         include_non_repo: bool,
         /// Output format: text (default) or json
@@ -187,10 +186,9 @@ Examples:
     },
     /// Database admin commands (migrate, repair, import historical transcripts)
     ///
-    /// Groups migrate / repair / import under a single namespace (R2.1
-    /// CLI audit follow-up, #368). The pre-8.2.1 bare verbs
-    /// (`budi migrate` / `budi repair` / `budi import`) were removed in
-    /// 8.3.0 (#428); use `budi db <verb>` instead.
+    /// Groups migrate / repair / import under a single namespace. The
+    /// pre-8.2.1 bare verbs (`budi migrate` / `budi repair` /
+    /// `budi import`) were removed in 8.3.0; use `budi db <verb>` instead.
     #[command(after_help = "\
 Examples:
   budi db migrate                Run database migration explicitly
@@ -244,7 +242,7 @@ Examples:
         ticket: Option<String>,
         /// Filter sessions by activity (e.g. `bugfix`, `refactor`). Matches
         /// the `activity` tag emitted by the prompt classifier; promoted to
-        /// a first-class session filter in 8.1 (#305).
+        /// a first-class session filter in 8.1.
         #[arg(long, value_name = "NAME")]
         activity: Option<String>,
         /// Max sessions to show (default: 20)
@@ -252,7 +250,7 @@ Examples:
         limit: usize,
         /// Render the full 36-character session UUID instead of the
         /// 8-character short form (useful for scripting and for
-        /// `budi sessions <id>` lookup). #445.
+        /// `budi sessions <id>` lookup).
         #[arg(long, default_value_t = false)]
         full_uuid: bool,
         /// Output format: text (default) or json
@@ -263,8 +261,8 @@ Examples:
     Status,
     /// Show AI spending in your shell prompt (reads editor context from stdin when piped)
     ///
-    /// Emits the shared provider-scoped status contract (ADR-0088 §4, #224).
-    /// Rolling `1d` / `7d` / `30d` windows. The `--format claude` surface is
+    /// Emits the shared provider-scoped status contract. Rolling
+    /// `1d` / `7d` / `30d` windows. The `--format claude` surface is
     /// automatically scoped to `claude_code` usage; downstream consumers
     /// (Cursor extension, cloud dashboard) pass `--provider` explicitly.
     #[command(after_help = "\
@@ -305,11 +303,11 @@ Examples:
     ///
     /// `budi cloud init` generates a commented `~/.config/budi/cloud.toml`
     /// template so the user can paste their API key without guessing the
-    /// schema (issue #446). `budi cloud sync` pushes queued local rollups
-    /// and session summaries to the cloud now (same work the background
-    /// worker runs on an interval — ADR-0083 §9, issue #225). `budi cloud
-    /// status` reports whether cloud sync is enabled, when it last
-    /// succeeded, and how many records are queued locally.
+    /// schema. `budi cloud sync` pushes queued local rollups and session
+    /// summaries to the cloud now (same work the background worker runs
+    /// on an interval). `budi cloud status` reports whether cloud sync
+    /// is enabled, when it last succeeded, and how many records are
+    /// queued locally.
     #[command(after_help = "\
 Examples:
   budi cloud init                Generate ~/.config/budi/cloud.toml template
@@ -321,7 +319,7 @@ Examples:
         #[command(subcommand)]
         action: CloudAction,
     },
-    /// Pricing manifest: view status, trigger a manual refresh (ADR-0091)
+    /// Pricing manifest: view status, trigger a manual refresh
     #[command(after_help = "\
 Examples:
   budi pricing status              Show current manifest layer, version, and unknown models
@@ -372,10 +370,10 @@ enum CloudAction {
     /// Generate `~/.config/budi/cloud.toml` from a commented template
     ///
     /// Writes a starter config with every field commented so a fresh user
-    /// never has to read ADR-0083 to bootstrap cloud sync. Without flags it
-    /// leaves `api_key = "PASTE_YOUR_KEY_HERE"` and `enabled = false`;
-    /// `--api-key <K>` writes the real key and flips `enabled = true` in
-    /// one shot.
+    /// never has to consult external docs to bootstrap cloud sync.
+    /// Without flags it leaves `api_key = "PASTE_YOUR_KEY_HERE"` and
+    /// `enabled = false`; `--api-key <K>` writes the real key and flips
+    /// `enabled = true` in one shot.
     Init {
         /// Paste your API key directly and set `enabled = true` in the template.
         /// Without this flag the template still writes a stub that must be
@@ -441,14 +439,14 @@ enum AutostartAction {
 
 /// `--period` / `-p` argument for `budi stats` and `budi sessions`.
 ///
-/// Two flavors are supported (#404):
+/// Two flavors are supported:
 ///
 /// * **Named windows** (`today`, `week`, `month`, `all`). `today` is
 ///   anchored to the start of the current local calendar day.
 ///   `week` and `month` resolve to rolling 7 / 30 days ending now —
 ///   identical to `-p 7d` / `-p 30d` — matching the README's
-///   "last 7 / 30 calendar days including today" contract. Before 8.3
-///   (#447), `week` was calendar-week-starting-Monday and `month` was
+///   "last 7 / 30 calendar days including today" contract. Before 8.3,
+///   `week` was calendar-week-starting-Monday and `month` was
 ///   first-of-calendar-month, which collapsed to a single day of data
 ///   on Mondays and on the 1st of the month respectively.
 /// * **Rolling windows** (`Nd`, `Nw`, `Nm` where `N` is a positive integer) —
@@ -456,8 +454,7 @@ enum AutostartAction {
 ///   days / weeks from the local calendar day, and `Nm` uses calendar
 ///   months (same day-of-month N months ago, clamped to the end of the
 ///   target month). This matches the rolling `1d` / `7d` / `30d`
-///   windows used by the statusline surface and the cloud dashboard
-///   (ADR-0088 §4, #350).
+///   windows used by the statusline surface and the cloud dashboard.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum StatsPeriod {
     Today,

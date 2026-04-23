@@ -63,6 +63,33 @@ jobs:
           ./target/release/budi --version
           ./target/release/budi-daemon --version
 
+      - name: Help-text cleanliness (no internal issue refs; #495)
+        run: |
+          set -euo pipefail
+          LEAKS=0
+          for cmd in \
+            "" "stats" "sessions" "status" "statusline" "doctor" "vitals" \
+            "update" "uninstall" "integrations" "integrations list" \
+            "integrations install" "autostart" "autostart status" \
+            "autostart install" "autostart uninstall" "db" "db migrate" \
+            "db repair" "db import" "cloud" "cloud init" "cloud status" \
+            "cloud sync" "pricing" "pricing status"; do
+            OUT=$(./target/release/budi $cmd --help 2>&1 || true)
+            # Regex matches internal ticket / ADR refs and Round-N.M labels.
+            # Deliberately excludes bare `N.M` version-like strings since
+            # release notes legitimately cite `8.3.0` etc.
+            if HITS=$(printf '%s\n' "$OUT" | grep -nE '#[0-9]+|ADR-[0-9]+|R[0-9]+\.[0-9]+'); then
+              echo "::error::'budi $cmd --help' leaks internal refs:"
+              printf '%s\n' "$HITS"
+              LEAKS=$((LEAKS + 1))
+            fi
+          done
+          if [ "$LEAKS" -gt 0 ]; then
+            echo "::error::$LEAKS help surfaces leak internal refs. Move them to rustdoc."
+            exit 1
+          fi
+          echo "Help text is free of internal issue / ADR references."
+
       - name: Integration smoke test (daemon endpoints)
         env:
           SMOKE_PORT: 19876
