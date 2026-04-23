@@ -419,6 +419,27 @@ pub const TICKET_SOURCE_BRANCH: &str = "branch";
 /// fallback defined in ADR-0082 §9 (e.g. `1234` in `fix/1234-typo`).
 pub const TICKET_SOURCE_BRANCH_NUMERIC: &str = "branch_numeric";
 
+/// Alphanumeric prefixes that look like tickets (`PREFIX-NNN`) but are
+/// generic housekeeping / meta / version words rather than real ticket
+/// prefixes (#499). Matching is case-insensitive against the uppercased
+/// prefix captured by [`extract_ticket_alpha`]. A match skips the
+/// candidate and keeps searching so legitimate tickets later in the
+/// branch name still resolve.
+///
+/// Examples of false positives the denylist blocks:
+/// - `chore/dead-code-sweep-2` → `SWEEP-2`
+/// - `v8/375-adr-0091-pricing-manifest` → `ADR-0091`
+/// - `chore/refactor-pass-3` → `PASS-3`
+/// - `fix/retry-limit-5` → `LIMIT-5`
+///
+/// Kept alphabetically sorted and uppercase for easy maintenance. New
+/// entries go here, not at call sites, so the denylist stays in one
+/// place.
+pub const DENYLISTED_TICKET_PREFIXES: &[&str] = &[
+    "ADR", "CEP", "CHORE", "DEMO", "DRAFT", "FIX", "ISSUE", "ITER", "LIMIT", "PASS", "PR",
+    "REFACTOR", "RFC", "ROUND", "STEP", "SWEEP", "TASK", "TMP", "TODO", "V", "VERSION", "WIP",
+];
+
 /// Branch names that are never tickets — integration branches and the
 /// literal detached-HEAD sentinel. Kept in one place so live tailing,
 /// `budi db import`, and legacy-history handling stay aligned. Prefer the
@@ -484,6 +505,11 @@ pub fn extract_ticket_from_branch(branch: &str) -> Option<(String, &'static str)
 /// Extract an alphanumeric ticket (`[a-zA-Z]{2,}-\d+`) from anywhere in
 /// the branch, uppercased. Private helper used by both `extract_ticket_id`
 /// and `extract_ticket_from_branch`.
+///
+/// #499: candidates whose prefix is in [`DENYLISTED_TICKET_PREFIXES`] are
+/// skipped — the scan continues past the skipped candidate so legitimate
+/// tickets later in the branch name still resolve (e.g. `fix/ABC-1-chore/
+/// sweep-2` would still extract `ABC-1`).
 fn extract_ticket_alpha(branch: &str) -> Option<String> {
     let bytes = branch.as_bytes();
     let len = bytes.len();
@@ -511,6 +537,13 @@ fn extract_ticket_alpha(branch: &str) -> Option<String> {
             i += 1;
         }
         if i > digit_start {
+            let prefix_upper = branch[start..start + alpha_len].to_ascii_uppercase();
+            if DENYLISTED_TICKET_PREFIXES.contains(&prefix_upper.as_str()) {
+                // #499: generic housekeeping / meta prefix — not a
+                // real ticket. Keep scanning so a legitimate ticket
+                // later in the branch name still resolves.
+                continue;
+            }
             let ticket = &branch[start..i];
             return Some(ticket.to_ascii_uppercase());
         }
@@ -541,6 +574,66 @@ fn extract_ticket_numeric(branch: &str) -> Option<String> {
         return None;
     }
     Some(segment[..end].to_string())
+}
+
+/// Idempotent cleanup of `tags` rows whose `ticket_id` value was extracted
+/// from a now-denylisted alphanumeric prefix (`SWEEP-2`, `ADR-0091`,
+/// `CHORE-3`, etc., #499). Safe to run on every daemon startup per
+/// ADR-0082's "only delta-fill unknown, never retroactively recompute"
+/// rule — this pass removes bad attribution rather than inventing new
+/// data.
+///
+/// Scope:
+/// - Deletes every `(message_id, key='ticket_id', value=<prefix>-<num>)`
+///   tag where `<prefix>` is in [`DENYLISTED_TICKET_PREFIXES`].
+/// - Deletes the companion `ticket_prefix` and `ticket_source` tags for
+///   the same `message_id` so rollup re-aggregation doesn't see an
+///   orphaned source tag.
+///
+/// Does NOT re-insert a fresh ticket_id (via a numeric-fallback
+/// recompute). The CLI's `budi db import --force` still covers full
+/// re-derivation if a user wants the numeric attribution restored.
+///
+/// Returns the count of `tags` rows deleted. `0` on a clean database.
+pub fn backfill_remove_denylisted_ticket_tags(
+    conn: &rusqlite::Connection,
+) -> rusqlite::Result<usize> {
+    // Build the LIKE filter union once; the denylist is small (~22
+    // entries) so the resulting query plan is flat.
+    let like_fragments: Vec<String> = DENYLISTED_TICKET_PREFIXES
+        .iter()
+        .map(|p| format!("UPPER(value) LIKE '{p}-%'"))
+        .collect();
+    let predicate = like_fragments.join(" OR ");
+    // 1. Collect the message_ids whose ticket_id is denylisted.
+    let mut stmt = conn.prepare(&format!(
+        "SELECT DISTINCT message_id FROM tags
+         WHERE key = 'ticket_id' AND ({predicate})"
+    ))?;
+    let ids: Vec<String> = stmt
+        .query_map([], |row| row.get::<_, String>(0))?
+        .collect::<rusqlite::Result<_>>()?;
+    if ids.is_empty() {
+        return Ok(0);
+    }
+
+    // 2. Delete ticket_id + ticket_prefix + ticket_source tags for
+    //    each matched message. Parameter limit on SQLite is 999, so
+    //    chunk the IN list to stay under it.
+    let mut deleted = 0usize;
+    for chunk in ids.chunks(500) {
+        let placeholders = vec!["?"; chunk.len()].join(",");
+        let sql = format!(
+            "DELETE FROM tags
+             WHERE key IN ('ticket_id', 'ticket_prefix', 'ticket_source')
+               AND message_id IN ({placeholders})"
+        );
+        let params: Vec<&dyn rusqlite::ToSql> =
+            chunk.iter().map(|s| s as &dyn rusqlite::ToSql).collect();
+        deleted += conn.execute(&sql, params.as_slice())?;
+    }
+
+    Ok(deleted)
 }
 
 #[cfg(test)]
@@ -626,6 +719,121 @@ mod tests {
         );
         // No ticket at all
         assert_eq!(extract_ticket_id("kiyoshi/pava-searchbars"), None);
+    }
+
+    // #499 (D-2) acceptance — ticket extraction denylist.
+
+    #[test]
+    fn extract_ticket_skips_denylisted_prefixes() {
+        // All five cases from #499's acceptance list.
+        //
+        // 1. `chore/dead-code-sweep-2` → no ticket (`SWEEP` is
+        //    denylisted; numeric fallback doesn't match because the
+        //    last segment starts with `d`).
+        assert_eq!(extract_ticket_from_branch("chore/dead-code-sweep-2"), None);
+        // 2. `v8/375-adr-0091-pricing-manifest` → `375` via
+        //    `branch_numeric` (alpha finds `ADR-0091`, drops it via
+        //    denylist, keeps scanning, finds no other candidate;
+        //    numeric fallback picks up `375` from the last segment).
+        assert_eq!(
+            extract_ticket_from_branch("v8/375-adr-0091-pricing-manifest"),
+            Some(("375".to_string(), TICKET_SOURCE_BRANCH_NUMERIC))
+        );
+        // 3. `v8/448-stats-reconciliation` → `448` (regression guard —
+        //    no denylisted prefix in the branch).
+        assert_eq!(
+            extract_ticket_from_branch("v8/448-stats-reconciliation"),
+            Some(("448".to_string(), TICKET_SOURCE_BRANCH_NUMERIC))
+        );
+        // 4. `04-21-pava-2308_add_stubs_of_steps` → `PAVA-2308`
+        //    (regression guard — Graphite-style with legitimate
+        //    alpha prefix).
+        assert_eq!(
+            extract_ticket_from_branch("04-21-pava-2308_add_stubs_of_steps"),
+            Some(("PAVA-2308".to_string(), TICKET_SOURCE_BRANCH))
+        );
+        // 5. `fix/retry-limit-5` → no ticket (`LIMIT` denylisted;
+        //    numeric fallback doesn't match).
+        assert_eq!(extract_ticket_from_branch("fix/retry-limit-5"), None);
+    }
+
+    #[test]
+    fn extract_ticket_skips_denylisted_but_accepts_later_real_ticket() {
+        // Synthetic: denylisted prefix followed by a legitimate ticket.
+        // The scan must advance past the denylisted candidate and
+        // return the real ticket.
+        assert_eq!(
+            extract_ticket_from_branch("chore/sweep-2-pava-3141-followup"),
+            Some(("PAVA-3141".to_string(), TICKET_SOURCE_BRANCH))
+        );
+    }
+
+    #[test]
+    fn backfill_remove_denylisted_ticket_tags_is_idempotent() {
+        use rusqlite::Connection;
+        let conn = Connection::open_in_memory().unwrap();
+        // Minimal schema for the backfill — we only need the `tags`
+        // table. Messages don't need to exist for the delete to run.
+        conn.execute_batch(
+            "CREATE TABLE tags (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                message_id TEXT NOT NULL,
+                key TEXT NOT NULL,
+                value TEXT NOT NULL,
+                UNIQUE(message_id, key, value)
+            );",
+        )
+        .unwrap();
+
+        // Seed one denylisted attribution (SWEEP-2) with its companion
+        // source + prefix tags, plus a real PAVA-2308 attribution that
+        // must survive untouched.
+        for (msg_id, key, value) in [
+            ("bad1", "ticket_id", "SWEEP-2"),
+            ("bad1", "ticket_source", "branch"),
+            ("bad1", "ticket_prefix", "SWEEP"),
+            ("bad2", "ticket_id", "ADR-0091"),
+            ("bad2", "ticket_source", "branch"),
+            ("bad2", "ticket_prefix", "ADR"),
+            ("good1", "ticket_id", "PAVA-2308"),
+            ("good1", "ticket_source", "branch"),
+            ("good1", "ticket_prefix", "PAVA"),
+        ] {
+            conn.execute(
+                "INSERT INTO tags (message_id, key, value) VALUES (?1, ?2, ?3)",
+                rusqlite::params![msg_id, key, value],
+            )
+            .unwrap();
+        }
+
+        // First pass removes all six bad-attribution rows (3 per
+        // denylisted message × 2 messages).
+        let deleted = backfill_remove_denylisted_ticket_tags(&conn).unwrap();
+        assert_eq!(
+            deleted, 6,
+            "first pass should remove 3 tags × 2 denylisted messages"
+        );
+        let remaining: i64 = conn
+            .query_row("SELECT COUNT(*) FROM tags", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(remaining, 3, "only the 3 PAVA-2308 tags should remain");
+
+        // Second pass is a no-op — idempotency is the #442 precedent.
+        let deleted_again = backfill_remove_denylisted_ticket_tags(&conn).unwrap();
+        assert_eq!(
+            deleted_again, 0,
+            "second pass should be a no-op on a clean database"
+        );
+
+        // The surviving PAVA tags still read back unchanged.
+        let pava_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM tags WHERE message_id = 'good1'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(pava_count, 3, "real PAVA-2308 attribution must survive");
     }
 
     // Unified extractor contract (R1.3, #221) — must agree with proxy

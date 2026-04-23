@@ -246,6 +246,27 @@ async fn main() -> Result<()> {
                     db_path = %db_path.display(),
                     "analytics schema is ahead of this daemon binary (downgrade?); results may be inconsistent"
                 );
+            } else {
+                // #499 (D-2): once schema is aligned, run the ticket-
+                // extraction denylist backfill idempotently. Removes
+                // `SWEEP-2` / `ADR-0091` / etc. tags produced by the
+                // pre-8.3.1 extractor so `budi stats --tickets` stops
+                // counting them. Matches the #442 startup-backfill
+                // precedent; safe to run on every boot because each
+                // pass is a no-op once the DB is clean.
+                match budi_core::pipeline::backfill_remove_denylisted_ticket_tags(&conn) {
+                    Ok(0) => {}
+                    Ok(n) => tracing::info!(
+                        target: "budi_daemon::ticket_backfill",
+                        rewritten_tags = n,
+                        "ticket-extraction denylist backfill removed {n} denylisted ticket tag row(s)"
+                    ),
+                    Err(e) => tracing::warn!(
+                        target: "budi_daemon::ticket_backfill",
+                        error = %e,
+                        "ticket-extraction denylist backfill failed"
+                    ),
+                }
             }
         }
     }
