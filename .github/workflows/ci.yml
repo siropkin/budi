@@ -227,11 +227,17 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
+      # #536: EmbarkStudios/cargo-deny-action@v2.0.17 was failing on every
+      # PR with `failed to get 'FETCH_HEAD' metadata` — the action's internal
+      # gix-based advisory-db cache didn't exist on fresh runners and
+      # couldn't be bootstrapped. Install cargo-deny directly via cargo
+      # instead; its own advisory-db fetch handles the `~/.cargo/advisory-db`
+      # path correctly (same path cargo-audit uses in the rust-checks job).
+      - name: Install cargo-deny
+        run: cargo install cargo-deny --locked
+
       - name: Run cargo-deny
-        uses: EmbarkStudios/cargo-deny-action@91bf2b620e09e18d6eb78b92e7861937469acedb # v2.0.17
-        with:
-          command: check
-          arguments: --all-features
+        run: cargo deny --all-features check
 
   ci-success:
     if: always()
