@@ -262,39 +262,82 @@ fn base64url_decode(input: &str) -> Option<Vec<u8>> {
 
 /// Extract auth credentials from Cursor's state.vscdb ItemTable.
 /// Returns `None` when auth is unavailable (not installed, empty, expired, etc.).
-/// Expired tokens are logged via `tracing::warn`.
+///
+/// #504 (RC-4 Part A): every early-return emits a structured
+/// `cursor_auth` warn with a typed reason tag the first time it's
+/// observed, so operators can find out why `/analytics/providers`
+/// shows zero cost for Cursor without having to instrument the
+/// daemon. The `budi_core::providers::cursor::auth_probe` warn-once
+/// dedup (below) keeps the daemon log to one line per reason per
+/// process rather than flooding it every sync tick.
+///
+/// Does NOT log the JWT contents — only the reason code / category.
+/// Does NOT distinguish expired-by-N-minutes from expired-by-N-days
+/// beyond "expired vs not".
 fn extract_cursor_auth() -> Option<CursorAuth> {
     let paths = all_state_vscdb_paths();
-    let global_path = paths
+    let global_path = match paths
         .into_iter()
-        .find(|p| p.to_string_lossy().contains("globalStorage"))?;
+        .find(|p| p.to_string_lossy().contains("globalStorage"))
+    {
+        Some(p) => p,
+        None => {
+            warn_auth_once(CursorAuthIssue::NoStateVscdb);
+            return None;
+        }
+    };
 
-    let vscdb = Connection::open_with_flags(
+    let vscdb = match Connection::open_with_flags(
         &global_path,
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    )
-    .ok()?;
+    ) {
+        Ok(c) => c,
+        Err(_) => {
+            warn_auth_once(CursorAuthIssue::StateVscdbOpenFailed);
+            return None;
+        }
+    };
 
-    let jwt: String = vscdb
-        .query_row(
-            "SELECT value FROM ItemTable WHERE key = 'cursorAuth/accessToken'",
-            [],
-            |row| row.get(0),
-        )
-        .ok()?;
+    let jwt: String = match vscdb.query_row(
+        "SELECT value FROM ItemTable WHERE key = 'cursorAuth/accessToken'",
+        [],
+        |row| row.get(0),
+    ) {
+        Ok(v) => v,
+        Err(_) => {
+            // Covers both "row absent" and other query errors. Most
+            // commonly fires when the user is signed out of Cursor.
+            warn_auth_once(CursorAuthIssue::TokenRowMissing);
+            return None;
+        }
+    };
 
     if jwt.is_empty() {
+        warn_auth_once(CursorAuthIssue::TokenEmpty);
         return None;
     }
 
     // Decode JWT payload to extract user_id from `sub` field.
     let parts: Vec<&str> = jwt.split('.').collect();
     if parts.len() < 2 {
+        warn_auth_once(CursorAuthIssue::TokenMalformed);
         return None;
     }
 
-    let decoded = base64url_decode(parts[1])?;
-    let payload: Value = serde_json::from_slice(&decoded).ok()?;
+    let decoded = match base64url_decode(parts[1]) {
+        Some(b) => b,
+        None => {
+            warn_auth_once(CursorAuthIssue::TokenMalformed);
+            return None;
+        }
+    };
+    let payload: Value = match serde_json::from_slice(&decoded) {
+        Ok(p) => p,
+        Err(_) => {
+            warn_auth_once(CursorAuthIssue::TokenMalformed);
+            return None;
+        }
+    };
 
     // Check JWT expiry — `exp` is assumed to be in seconds (standard JWT).
     // If it looks like milliseconds (> 1_700_000_000_000), convert first.
@@ -309,17 +352,131 @@ fn extract_cursor_auth() -> Option<CursorAuth> {
             .map(|d| d.as_secs() as i64)
             .unwrap_or(0);
         if now > exp {
-            tracing::warn!(
-                "Cursor auth token expired — restart Cursor to refresh it. Using estimated costs from local files."
-            );
+            warn_auth_once(CursorAuthIssue::TokenExpired);
             return None;
         }
     }
 
-    let sub = payload.get("sub").and_then(|v| v.as_str())?;
+    let sub = match payload.get("sub").and_then(|v| v.as_str()) {
+        Some(s) => s,
+        None => {
+            warn_auth_once(CursorAuthIssue::TokenMissingSubject);
+            return None;
+        }
+    };
     let user_id = sub.split('|').next_back().unwrap_or(sub).to_string();
 
     Some(CursorAuth { user_id, jwt })
+}
+
+/// #504 (RC-4): reasons `extract_cursor_auth` can return `None`.
+/// Each variant surfaces as a stable structured-log reason tag so
+/// operators grepping `daemon.log` for `cursor_auth` see exactly one
+/// of these strings and can map it to a fix without reading source.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum CursorAuthIssue {
+    /// `state.vscdb` under a `globalStorage` root does not exist —
+    /// Cursor isn't installed, or the install is on a different user
+    /// account, or it's a machine where Cursor data lives outside the
+    /// paths `all_state_vscdb_paths()` probes.
+    NoStateVscdb,
+    /// The path exists but SQLite can't open it read-only. Most commonly
+    /// a permissions issue; rare in practice.
+    StateVscdbOpenFailed,
+    /// `ItemTable` has no row keyed `cursorAuth/accessToken`. Fires
+    /// whenever the user is signed out of Cursor, or Cursor's auth-key
+    /// schema changed upstream.
+    TokenRowMissing,
+    /// The row exists but the value is the empty string. Fires right
+    /// after sign-out on some Cursor versions before the row is deleted.
+    TokenEmpty,
+    /// JWT doesn't parse as three dot-separated base64-url parts, or
+    /// the payload isn't valid JSON. Fires on upstream auth-format
+    /// changes we haven't tracked yet.
+    TokenMalformed,
+    /// `exp` claim is in the past. User needs to restart Cursor to
+    /// refresh the token.
+    TokenExpired,
+    /// Payload parses but has no `sub` claim — can't anchor the Usage
+    /// API to a specific user account. Never seen in practice; the
+    /// variant exists so the warn is self-describing if it ever fires.
+    TokenMissingSubject,
+}
+
+impl CursorAuthIssue {
+    fn reason_tag(self) -> &'static str {
+        match self {
+            Self::NoStateVscdb => "no_state_vscdb",
+            Self::StateVscdbOpenFailed => "state_vscdb_open_failed",
+            Self::TokenRowMissing => "token_row_missing",
+            Self::TokenEmpty => "token_empty",
+            Self::TokenMalformed => "token_malformed",
+            Self::TokenExpired => "token_expired",
+            Self::TokenMissingSubject => "token_missing_subject",
+        }
+    }
+
+    fn human_message(self) -> &'static str {
+        match self {
+            Self::NoStateVscdb => {
+                "Cursor state.vscdb not found — Cursor not installed, or install is \
+                 under a different user account. `budi stats` shows Cursor cost only \
+                 when the Cursor Usage API path has run at least once."
+            }
+            Self::StateVscdbOpenFailed => {
+                "Cursor state.vscdb exists but could not be opened read-only \
+                 (permissions?). Usage API path skipped; falling back to local \
+                 transcript sync (which has no per-message cost metadata)."
+            }
+            Self::TokenRowMissing => {
+                "Cursor state.vscdb has no cursorAuth/accessToken row — signed out \
+                 of Cursor, or auth-key schema changed upstream. Usage API path \
+                 skipped until Cursor is signed back in."
+            }
+            Self::TokenEmpty => {
+                "Cursor auth token is empty (just signed out?). Usage API path \
+                 skipped until Cursor is signed back in."
+            }
+            Self::TokenMalformed => {
+                "Cursor auth token could not be decoded as a JWT. Upstream format \
+                 may have changed; Usage API path skipped."
+            }
+            Self::TokenExpired => {
+                "Cursor auth token expired — restart Cursor to refresh it. \
+                 Usage API path skipped; falling back to local transcript sync."
+            }
+            Self::TokenMissingSubject => {
+                "Cursor auth token has no `sub` claim — cannot anchor Usage API \
+                 to a user. Upstream format may have changed."
+            }
+        }
+    }
+}
+
+fn auth_warn_cache() -> &'static std::sync::Mutex<std::collections::HashSet<CursorAuthIssue>> {
+    use std::sync::{Mutex, OnceLock};
+    static CACHE: OnceLock<Mutex<std::collections::HashSet<CursorAuthIssue>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(std::collections::HashSet::new()))
+}
+
+/// Emit a structured `cursor_auth` warn on the first hit for this
+/// reason per daemon process. Subsequent hits are dedup'd silently so
+/// a 24h worker loop that fires every hour doesn't spam the log.
+fn warn_auth_once(issue: CursorAuthIssue) {
+    let mut guard = match auth_warn_cache().lock() {
+        Ok(g) => g,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    if !guard.insert(issue) {
+        return;
+    }
+    tracing::warn!(
+        target: "budi_core::providers::cursor",
+        event = "cursor_auth_skipped",
+        reason = issue.reason_tag(),
+        "Cursor Usage API not running: {}",
+        issue.human_message(),
+    );
 }
 
 fn parse_timestamp_ms(value: &Value) -> Option<i64> {
@@ -1569,6 +1726,53 @@ fn parse_timestamp(ts: &str) -> Option<DateTime<Utc>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #504 (RC-4): reason tags are a semi-stable wire contract — they
+    /// show up in `daemon.log` (`event=cursor_auth_skipped reason=...`),
+    /// so operator doc / troubleshooting scripts key off these strings.
+    /// Pinning the exact literal strings keeps a rename from silently
+    /// breaking downstream matchers.
+    #[test]
+    fn cursor_auth_issue_reason_tags_are_stable() {
+        assert_eq!(CursorAuthIssue::NoStateVscdb.reason_tag(), "no_state_vscdb");
+        assert_eq!(
+            CursorAuthIssue::StateVscdbOpenFailed.reason_tag(),
+            "state_vscdb_open_failed"
+        );
+        assert_eq!(
+            CursorAuthIssue::TokenRowMissing.reason_tag(),
+            "token_row_missing"
+        );
+        assert_eq!(CursorAuthIssue::TokenEmpty.reason_tag(), "token_empty");
+        assert_eq!(
+            CursorAuthIssue::TokenMalformed.reason_tag(),
+            "token_malformed"
+        );
+        assert_eq!(CursorAuthIssue::TokenExpired.reason_tag(), "token_expired");
+        assert_eq!(
+            CursorAuthIssue::TokenMissingSubject.reason_tag(),
+            "token_missing_subject"
+        );
+        // Every variant's human_message must also mention the Usage API
+        // path explicitly so an operator grepping for it finds the
+        // single remediation surface (sign back in to Cursor).
+        for issue in [
+            CursorAuthIssue::NoStateVscdb,
+            CursorAuthIssue::StateVscdbOpenFailed,
+            CursorAuthIssue::TokenRowMissing,
+            CursorAuthIssue::TokenEmpty,
+            CursorAuthIssue::TokenMalformed,
+            CursorAuthIssue::TokenExpired,
+            CursorAuthIssue::TokenMissingSubject,
+        ] {
+            let msg = issue.human_message();
+            assert!(
+                msg.contains("Usage API") || msg.contains("Cursor"),
+                "reason `{:?}` must mention Usage API or Cursor in its message, got {msg:?}",
+                issue,
+            );
+        }
+    }
 
     fn looks_like_uuid(s: &str) -> bool {
         if s.len() != 36 {
