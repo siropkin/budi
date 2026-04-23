@@ -437,7 +437,8 @@ pub const TICKET_SOURCE_BRANCH_NUMERIC: &str = "branch_numeric";
 /// place.
 pub const DENYLISTED_TICKET_PREFIXES: &[&str] = &[
     "ADR", "CEP", "CHORE", "DEMO", "DRAFT", "FIX", "ISSUE", "ITER", "LIMIT", "PASS", "PR",
-    "REFACTOR", "RFC", "ROUND", "STEP", "SWEEP", "TASK", "TMP", "TODO", "V", "VERSION", "WIP",
+    "REFACTOR", "RFC", "ROUND", "STEP", "SWEEP", "TASK", "TMP", "TODAY", "TODO", "V", "VERSION",
+    "WIP",
 ];
 
 /// Branch names that are never tickets — integration branches and the
@@ -755,6 +756,14 @@ mod tests {
         // 5. `fix/retry-limit-5` → no ticket (`LIMIT` denylisted;
         //    numeric fallback doesn't match).
         assert_eq!(extract_ticket_from_branch("fix/retry-limit-5"), None);
+        // 6. #518: `v8/502-fix-flaky-today-7d-30d-reconcile-test`
+        //    previously surfaced `TODAY-7` via the alpha path. `TODAY`
+        //    is now denylisted; the numeric fallback picks up the
+        //    real ticket id `502` from the `v8/NNN-...` slug.
+        assert_eq!(
+            extract_ticket_from_branch("v8/502-fix-flaky-today-7d-30d-reconcile-test"),
+            Some(("502".to_string(), TICKET_SOURCE_BRANCH_NUMERIC))
+        );
     }
 
     #[test]
