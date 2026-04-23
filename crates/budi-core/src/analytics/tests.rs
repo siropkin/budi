@@ -5946,3 +5946,63 @@ fn unknown_provider_filter_yields_zero_messages_and_zero_cost() {
     .unwrap();
     assert_eq!(cost.total_cost, 0.0);
 }
+
+// ─── #496 D-3: short-UUID prefix resolver contract ──────────────────────────
+
+#[test]
+fn resolve_session_id_covers_full_prefix_empty_and_ambiguous() {
+    // Ticket acceptance: full-uuid hit, short-prefix unique hit,
+    // short-prefix multi-hit (ambiguous), short-prefix no-hit. Every
+    // future `--session <ID>` surface inherits these four paths via
+    // `budi_core::analytics::resolve_session_id`, which is the shared
+    // resolver the daemon's `resolve_sid` helper wraps.
+    let mut conn = test_db();
+    let session_full = "670b9539-aaaa-bbbb-cccc-111122223333";
+    // One other session sharing a 4-char prefix with the full id so
+    // `670b9539` resolves uniquely, `670b` is ambiguous, and
+    // `deadbeef` matches nothing.
+    let session_alt = "670bdead-1111-2222-3333-444455556677";
+    // Seed two assistant rows — one per session. ingest_messages also
+    // seeds the `sessions` table via the pipeline-independent path we
+    // rely on for resolve_session_id's subquery.
+    let mut m1 = assistant_msg("s-d3-1", session_full, 1.0);
+    m1.cwd = Some("/tmp/d3-full".to_string());
+    let mut m2 = assistant_msg("s-d3-2", session_alt, 1.0);
+    m2.cwd = Some("/tmp/d3-alt".to_string());
+    ingest_messages(&mut conn, &[m1, m2], None).unwrap();
+
+    // Full UUID hit.
+    let full_hit = resolve_session_id(&conn, session_full).unwrap();
+    assert_eq!(full_hit.as_deref(), Some(session_full));
+
+    // Short-prefix unique hit — the 8-char prefix `670b9539` only
+    // matches `session_full`.
+    let short_hit = resolve_session_id(&conn, "670b9539").unwrap();
+    assert_eq!(short_hit.as_deref(), Some(session_full));
+
+    // Short-prefix multi-hit — `670b` matches both seeded sessions.
+    let ambig = resolve_session_id(&conn, "670b").unwrap_err();
+    let msg = format!("{ambig:#}");
+    assert!(
+        msg.contains("ambiguous session prefix"),
+        "ambiguous prefix should surface as an error, got {msg:?}",
+    );
+
+    // Short-prefix no-hit.
+    let miss = resolve_session_id(&conn, "deadbeef").unwrap();
+    assert!(
+        miss.is_none(),
+        "no-match prefix should return Ok(None), got {miss:?}",
+    );
+
+    // Empty prefix: `LIKE '' || '%'` matches every row, so both
+    // seeded sessions surface and the resolver correctly flags it as
+    // ambiguous. Worth pinning since the daemon route now passes the
+    // raw query-string value through without trimming.
+    let empty = resolve_session_id(&conn, "").unwrap_err();
+    let msg = format!("{empty:#}");
+    assert!(
+        msg.contains("ambiguous session prefix"),
+        "empty prefix must not silently return a random session, got {msg:?}",
+    );
+}

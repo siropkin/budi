@@ -1128,10 +1128,19 @@ pub struct SessionHealthParams {
 pub async fn analytics_session_health(
     Query(params): Query<SessionHealthParams>,
 ) -> Result<Json<analytics::SessionHealth>, (StatusCode, Json<serde_json::Value>)> {
+    // #496 (D-3): resolve an 8-char session prefix (or any prefix) the
+    // same way `GET /analytics/sessions/{id}` does so `budi vitals
+    // --session <short-uuid>` accepts the same id a user copied out of
+    // `budi sessions`. Pre-fix the prefix flowed through unresolved and
+    // `LEFT JOIN` matched zero rows → silent INSUFFICIENT DATA.
+    let sid = match params.session_id {
+        Some(ref s) if !s.is_empty() => Some(resolve_sid(s.clone()).await?),
+        _ => None,
+    };
     let result = tokio::task::spawn_blocking(move || {
         let db_path = analytics::db_path()?;
         let conn = analytics::open_db(&db_path)?;
-        analytics::session_health(&conn, params.session_id.as_deref())
+        analytics::session_health(&conn, sid.as_deref())
     })
     .await
     .map_err(|e| internal_error(anyhow::anyhow!("{e}")))?
