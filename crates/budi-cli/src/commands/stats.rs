@@ -619,23 +619,33 @@ fn format_summary(
         // (`3050 messages (1680 user, 1370 assistant)`). Pre-8.3.1 this
         // was assistant-only, which read as a slice of Total but actually
         // undercounted by `total_user_messages`.
+        //
+        // #494: every tokens cell carries an explicit `tok` suffix so
+        // zero-cost providers render `0 tok` instead of a bare `0`
+        // beside `159.0M` on the same column. Matches the breakdown
+        // views' `{n} tok` shape.
+        //
+        // #486: per-provider cost uses fixed-precision `$X,XXX.XX` so
+        // Claude Code's `$126.40` doesn't collapse to `$126` beside
+        // Cursor's `$0.00` on the same column. Matches the summary
+        // `Est. cost` + component sub-line precision below.
         for ps in &displayed_providers {
             let total_tokens = ps.input_tokens
                 + ps.output_tokens
                 + ps.cache_creation_tokens
                 + ps.cache_read_tokens;
-            let cost = if ps.total_cost_cents > 0.0 {
-                ps.total_cost_cents / 100.0
+            let cost_cents = if ps.total_cost_cents > 0.0 {
+                ps.total_cost_cents
             } else {
-                ps.estimated_cost
+                ps.estimated_cost * 100.0
             };
             writeln!(
                 out,
-                "    {cyan}{:<14}{reset} {:>5} msgs  {}  {yellow}{}{reset}",
+                "    {cyan}{:<14}{reset} {:>5} msgs  {} tok  {yellow}{}{reset}",
                 ps.display_name,
                 ps.total_messages,
                 format_tokens(total_tokens),
-                format_cost(cost),
+                format_cost_cents_fixed(cost_cents),
             )
             .unwrap();
         }
@@ -667,22 +677,30 @@ fn format_summary(
     .unwrap();
 
     writeln!(out).unwrap();
+    // #486: summary-block cost precision is fixed-decimal `$X,XXX.XX`
+    // so the top-line `Est. cost` never collapses cents (pre-8.3.1
+    // `$126` masked a real `$126.40` visible on the component sub-line,
+    // leaving a fresh reader unable to tell whether the top value was
+    // `$126.00` rounded or the sub-line total silently lost 40¢).
+    // `format_cost_cents_fixed` takes cents; multiply dollars by 100.
     writeln!(
         out,
         "  {bold}Est. cost{reset}    {yellow}{}{reset}",
-        format_cost(est.total_cost)
+        format_cost_cents_fixed(est.total_cost * 100.0)
     )
     .unwrap();
     // Cost-component sub-line — unconditional (#451). Reads $0.00 in
     // each cell when the window has no spend, so the shape stays
-    // identical to a populated summary.
+    // identical to a populated summary. Uses the same fixed-decimal
+    // formatter as the top-line so the four components always sum to
+    // the top-line value on the rendered screen.
     writeln!(
         out,
         "  {dim}  input {}  output {}  cache write {}  cache read {}{reset}",
-        format_cost(est.input_cost),
-        format_cost(est.output_cost),
-        format_cost(est.cache_write_cost),
-        format_cost(est.cache_read_cost),
+        format_cost_cents_fixed(est.input_cost * 100.0),
+        format_cost_cents_fixed(est.output_cost * 100.0),
+        format_cost_cents_fixed(est.cache_write_cost * 100.0),
+        format_cost_cents_fixed(est.cache_read_cost * 100.0),
     )
     .unwrap();
     // Cache-savings line — unconditional (#451). $0.00 when no cache
@@ -692,7 +710,7 @@ fn format_summary(
     writeln!(
         out,
         "  {green}  cache savings {}{reset}",
-        format_cost(est.cache_savings)
+        format_cost_cents_fixed(est.cache_savings * 100.0)
     )
     .unwrap();
 
@@ -3216,6 +3234,119 @@ mod tests {
             &palette,
         );
         assert!(!r.contains("Cursor cost data may lag"));
+    }
+
+    #[test]
+    fn summary_agents_block_tokens_cell_always_has_unit_suffix() {
+        // #494: every tokens cell in the Agents block carries an
+        // explicit `tok` suffix — the pre-8.3.1 render was `0` (bare)
+        // next to `159.0M` (with its unit baked in), leaving a fresh
+        // reader unsure which was tokens and which was a count. Both
+        // rows now render `{n} tok`.
+        let summary = fixture_summary();
+        let est = fixture_cost(0.0);
+        // Mix zero-token row (typical for Cursor) with a non-zero
+        // row (typical for Claude Code).
+        let zero_provider = analytics::ProviderStats {
+            provider: "cursor".into(),
+            display_name: "Cursor".into(),
+            assistant_messages: 12,
+            user_messages: 10,
+            total_messages: 22,
+            input_tokens: 0,
+            output_tokens: 0,
+            cache_creation_tokens: 0,
+            cache_read_tokens: 0,
+            estimated_cost: 0.0,
+            total_cost_cents: 0.0,
+        };
+        let providers = vec![
+            fixture_provider("claude_code", "Claude Code", 262, 11_400.0),
+            zero_provider,
+        ];
+        let palette = SummaryPalette::plain();
+        let rendered = format_summary(
+            StatsPeriod::Today,
+            None,
+            &summary,
+            &est,
+            &providers,
+            &palette,
+        );
+
+        // Both rows carry the explicit ` tok` suffix.
+        for line in rendered.lines() {
+            let trimmed = line.trim();
+            // Agents rows start with a provider display name after the
+            // leading spaces of the block.
+            if trimmed.starts_with("Claude Code") || trimmed.starts_with("Cursor") {
+                assert!(
+                    trimmed.contains(" tok"),
+                    "Agents-block row must include the `tok` suffix: {trimmed:?}",
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn summary_est_cost_precision_matches_component_sub_line() {
+        // #486: summary `Est. cost` precision matches the component
+        // sub-line precision (`$X,XXX.XX`). Pre-8.3.1 a top-line total
+        // above $100 collapsed to `$126` while the sub-line kept
+        // `$0.04 / $19.92 / $32.36 / $74.08` → sum `$126.40`. The
+        // fresh reader couldn't tell whether the top value was
+        // `$126.00` rounded or a sub-line total that silently lost
+        // 40¢. Both lines now use `format_cost_cents_fixed`.
+        let summary = fixture_summary();
+        let est = budi_core::cost::CostEstimate {
+            total_cost: 126.40,
+            input_cost: 0.04,
+            output_cost: 19.92,
+            cache_write_cost: 32.36,
+            cache_read_cost: 74.08,
+            cache_savings: 0.0,
+        };
+        let providers = vec![fixture_provider(
+            "claude_code",
+            "Claude Code",
+            262,
+            12_640.0,
+        )];
+        let palette = SummaryPalette::plain();
+        let rendered = format_summary(
+            StatsPeriod::Today,
+            None,
+            &summary,
+            &est,
+            &providers,
+            &palette,
+        );
+
+        // Top-line never collapses cents above $100.
+        assert!(
+            rendered.contains("Est. cost    $126.40"),
+            "Est. cost must render `$126.40`, not `$126`:\n{rendered}",
+        );
+        // Component sub-line carries matching cents precision.
+        assert!(
+            rendered.contains("input $0.04"),
+            "input component must render `$0.04`:\n{rendered}",
+        );
+        assert!(
+            rendered.contains("output $19.92"),
+            "output component must render `$19.92`:\n{rendered}",
+        );
+        // Top-line dollars never rendered with a `K` suffix in the
+        // summary block — locking this out catches any future caller
+        // that accidentally swaps in the humanized formatter.
+        for line in rendered.lines() {
+            if line.contains("Est. cost") {
+                assert!(
+                    !line.contains("K") && !line.contains("M"),
+                    "top-line `Est. cost` must not humanize: {line:?}",
+                );
+            }
+        }
     }
 
     #[test]
