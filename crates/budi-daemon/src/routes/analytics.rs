@@ -982,16 +982,51 @@ pub async fn analytics_sessions(
 }
 
 /// Resolve a session ID prefix to its full ID, returning appropriate HTTP errors.
+///
+/// Error mapping (#519):
+/// - Ambiguous prefix → **400 Bad Request** with the daemon's
+///   "ambiguous session prefix '<X>'" message surfaced verbatim. The
+///   "use more characters" text is actionable operator input-shape
+///   guidance, not internal state — safe (and more useful) to expose.
+/// - No match → 404 Not Found (`session '<X>' not found`).
+/// - Everything else (DB open failure, task panic, unexpected error
+///   kind) → 500 Internal Server Error via the generic `internal_error`
+///   wrapper.
+///
+/// Pre-8.3.2 the ambiguous path swallowed the message into a 500
+/// `internal server error`, which read as a server fault instead of
+/// a "try again with more characters" nudge. Observed during the
+/// 8.3.1 post-tag smoke when `budi vitals --session 6` surfaced the
+/// generic 500.
 async fn resolve_sid(prefix: String) -> Result<String, (StatusCode, Json<serde_json::Value>)> {
     let pfx = prefix.clone();
-    let resolved = tokio::task::spawn_blocking(move || {
+    let spawn_outcome = tokio::task::spawn_blocking(move || {
         let db_path = analytics::db_path()?;
         let conn = analytics::open_db(&db_path)?;
         analytics::resolve_session_id(&conn, &pfx)
     })
-    .await
-    .map_err(|e| internal_error(anyhow::anyhow!("{e}")))?
-    .map_err(internal_error)?;
+    .await;
+    let resolved = match spawn_outcome {
+        Ok(result) => match result {
+            Ok(ok) => ok,
+            Err(e) => {
+                // String-match on the anyhow chain rather than widening
+                // `resolve_session_id`'s return-type contract — the
+                // ambiguous-prefix anyhow is the only error variant the
+                // function produces today (see
+                // `crates/budi-core/src/analytics/sessions.rs:619`).
+                // Widening to a typed enum is tracked by #519 as a
+                // nicer long-term shape; this string-match is the
+                // minimal fix that unblocks the CLI render.
+                let chain = format!("{e:#}");
+                if chain.contains("ambiguous session prefix") {
+                    return Err(bad_request(chain));
+                }
+                return Err(internal_error(e));
+            }
+        },
+        Err(join_err) => return Err(internal_error(anyhow::anyhow!("{join_err}"))),
+    };
     match resolved {
         Some(full_id) => Ok(full_id),
         None => Err(not_found(format!("session '{prefix}' not found"))),
