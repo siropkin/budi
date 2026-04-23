@@ -136,7 +136,14 @@ fn daemon_port_conflict_hint(port: u16) -> String {
 
 /// Check if the running daemon reports the same version as this CLI binary.
 fn daemon_version_matches(config: &BudiConfig) -> bool {
-    let cli_version = env!("CARGO_PKG_VERSION");
+    daemon_version_equals(config, env!("CARGO_PKG_VERSION"))
+}
+
+/// Return true if the running daemon's `/health.version` equals `expected`.
+/// Used by the CLI-general restart path (running CLI's own version) and by
+/// `budi update`'s post-install restart (the version just installed on disk,
+/// which may differ from the currently-running CLI process's version).
+fn daemon_version_equals(config: &BudiConfig, expected: &str) -> bool {
     let Ok(client) = daemon_client_with_timeout(Duration::from_secs(HEALTH_TIMEOUT_SECS)) else {
         return false;
     };
@@ -148,10 +155,46 @@ fn daemon_version_matches(config: &BudiConfig) -> bool {
         return false;
     };
     match json.get("version").and_then(|v| v.as_str()) {
-        Some(daemon_version) => daemon_version == cli_version,
+        Some(daemon_version) => daemon_version == expected,
         // Old daemons don't report version — treat as mismatch
         None => false,
     }
+}
+
+/// #529: post-install restart used by `budi update`.
+///
+/// `ensure_daemon_running_with_binary` compares the daemon's version against
+/// the CURRENTLY-RUNNING CLI's `env!("CARGO_PKG_VERSION")`. During
+/// `budi update`, that's the PRE-install CLI — so the daemon's pre-install
+/// version matches and the respawn path is never taken, leaving `/health`
+/// reporting the old version until the next `budi init` / `budi doctor`.
+///
+/// This helper takes the just-installed `expected` version as an explicit
+/// argument so the update flow compares the daemon against the NEW binary
+/// rather than the running process. If `/health.version` doesn't match,
+/// it kills every `budi-daemon` process, waits for the port to release,
+/// and hands off to `ensure_daemon_running_with_binary` to spawn the new
+/// one.
+///
+/// No-op when the daemon already reports the expected version (the brew /
+/// launchd respawn already picked up the new binary on its own).
+pub fn restart_daemon_for_version_upgrade(
+    repo_root: Option<&Path>,
+    config: &BudiConfig,
+    daemon_bin_override: Option<&Path>,
+    expected: &str,
+) -> Result<()> {
+    if daemon_health(config) && daemon_version_equals(config, expected) {
+        return Ok(());
+    }
+    // Kill any daemon (running old version, unhealthy, or absent — `kill` is
+    // idempotent on an empty set of pids).
+    kill_all_daemons();
+    if !wait_for_port_release(config, 40, Duration::from_millis(150)) {
+        force_kill_all_daemons();
+        let _ = wait_for_port_release(config, 20, Duration::from_millis(150));
+    }
+    ensure_daemon_running_with_binary(repo_root, config, daemon_bin_override)
 }
 
 fn wait_for_daemon_health(
