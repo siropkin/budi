@@ -1,5 +1,22 @@
 # Changelog
 
+## 8.3.3 — 2026-04-23
+
+8.3.3 is a single-ticket patch release. The post-`v8.3.2` update
+smoke surfaced one post-install drift bug in `budi update`; this
+release lands that fix. No pivot, no new features, no ADR
+amendments, no proxy reintroduction, no new runtime network
+destinations.
+
+### Fixed
+
+- **`budi update` no longer leaves the daemon pinned to the pre-install version until the next `budi init`** (#529). Pre-fix `cmd_update` called `ensure_daemon_running_with_binary` at the end of its run; that helper compares `/health.version` against `env!("CARGO_PKG_VERSION")` of the CURRENTLY-RUNNING CLI process — which during `budi update` is still the PRE-install binary. The pre-install daemon matched the pre-install CLI, no restart fired, and `/health` kept reporting the old version until the next `budi init` / `budi doctor` happened to respawn it. The post-install smoke-check `verify_installed_version` correctly flagged the drift as `Expected v8.3.2, but detected version is: budi 8.3.1`, but the user had to manually nudge the daemon to catch up. New `restart_daemon_for_version_upgrade(expected)` in `crates/budi-cli/src/daemon.rs` takes the just-installed version as an explicit argument, compares `/health` against THAT (not against the running CLI), and on mismatch kills every `budi-daemon` process, waits for the port to release, and hands off to `ensure_daemon_running_with_binary` to spawn the new binary. `daemon_version_matches` now delegates to a shared `daemon_version_equals(expected)` helper so both entry points share the same health-probe logic. Bootstrap-paradox caveat: the fix only activates on updates FROM a binary that contains it, so `v8.3.2 → v8.3.3` will still hit the pre-fix drift once; every subsequent `budi update` then lands with `/health` reporting the new version immediately.
+
+### Non-blocking, carried forward
+
+- **RC-4 Part B** (#504) — Cursor Usage API auth root-cause. Part A shipped with `v8.3.1` (structured `cursor_auth_skipped` warn per reason). Part B needs maintainer credential-level probing that can't be driven from CI; re-homes to the next milestone.
+- **`siropkin/budi-cloud#37`** — fresh-eyes UX audit of `app.getbudi.dev`. 11 findings across setup-flow / account-management / data-shape clarity. Closes independently of the core repo.
+
 ## 8.3.2 — 2026-04-23
 
 8.3.2 is the second post-tag hardening train after `v8.3.1`. Every
