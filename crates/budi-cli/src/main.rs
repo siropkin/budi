@@ -131,8 +131,14 @@ Examples:
         /// Filter by provider (e.g. claude_code, cursor, codex, copilot_cli, openai). Only works with the default summary view.
         #[arg(long, conflicts_with = "view")]
         provider: Option<String>,
-        /// Show cost breakdown by tag key (e.g. --tag ticket_id, --tag activity)
-        #[arg(long)]
+        /// Break down cost by the given tag KEY (e.g. `--tag ticket_id`,
+        /// `--tag activity`, `--tag custom_key`). Unlike `--tickets`
+        /// and `--activities`, which are first-class per-dimension
+        /// views with their own ranking shape, `--tag <KEY>` is the
+        /// escape hatch for any tag key the pipeline emits — including
+        /// custom keys that the CLI doesn't hard-code a flag for. The
+        /// output ranks rows by the tag's VALUES for that key.
+        #[arg(long, value_name = "KEY")]
         tag: Option<String>,
         /// Maximum rows to show in breakdown views (`--projects`,
         /// `--branches`, `--tickets`, `--activities`, `--files`,
@@ -533,7 +539,14 @@ pub enum StatsFormat {
 
 #[derive(Debug, Clone, Copy, ValueEnum, PartialEq)]
 pub enum StatuslineFormat {
-    /// ANSI colors + OSC 8 hyperlinks (for Claude Code statusline)
+    /// ANSI colors + OSC 8 hyperlinks (for Claude Code statusline).
+    /// Accepts `text` as an alias so `--format text` matches the shared
+    /// convention the other CLI surfaces use for their default human-
+    /// readable render.
+    // The `text` alias landed in 8.3.1 as a fresh-user friction fix.
+    // Intentionally kept out of the clap `///` doc comment so the CI
+    // help-cleanliness grep guard stays green.
+    #[value(alias = "text")]
     Claude,
     /// Plain text, no ANSI (for Starship / shell prompts)
     Starship,
@@ -1294,6 +1307,45 @@ mod tests {
                 assert_eq!(activity.as_deref(), Some("bugfix"));
             }
             _ => panic!("expected sessions command"),
+        }
+    }
+
+    /// #485: `budi statusline --format text` should parse as the
+    /// default (Claude) render so a fresh user doesn't have to
+    /// remember that statusline's format vocabulary differs from
+    /// `budi stats` / `budi sessions`. Added via `#[value(alias = "text")]`
+    /// on `StatuslineFormat::Claude`.
+    #[test]
+    fn cli_statusline_accepts_text_as_claude_alias() {
+        let cli = Cli::try_parse_from(["budi", "statusline", "--format", "text"])
+            .expect("budi statusline --format text should parse");
+        match cli.command {
+            Commands::Statusline { format, .. } => {
+                assert_eq!(format, StatuslineFormat::Claude);
+            }
+            _ => panic!("expected statusline command"),
+        }
+
+        // Explicit `--format claude` still parses as Claude (no
+        // regression from the alias addition).
+        let cli = Cli::try_parse_from(["budi", "statusline", "--format", "claude"])
+            .expect("budi statusline --format claude should parse");
+        match cli.command {
+            Commands::Statusline { format, .. } => {
+                assert_eq!(format, StatuslineFormat::Claude);
+            }
+            _ => panic!("expected statusline command"),
+        }
+
+        // Other non-default formats still resolve to their own
+        // variants — alias only applies to the default.
+        let cli = Cli::try_parse_from(["budi", "statusline", "--format", "json"])
+            .expect("budi statusline --format json should parse");
+        match cli.command {
+            Commands::Statusline { format, .. } => {
+                assert_eq!(format, StatuslineFormat::Json);
+            }
+            _ => panic!("expected statusline command"),
         }
     }
 }
