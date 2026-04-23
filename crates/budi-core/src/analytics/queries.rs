@@ -458,8 +458,20 @@ pub fn paginate_breakdown<T: BreakdownRowCost>(
         };
     }
 
+    // #484: derive `other.cost_cents` from the grand total minus the
+    // kept-rows sum (computed AFTER drain, so it iterates the exact same
+    // Vec<T> the caller will see on the wire). This makes the `#448`
+    // reconciliation contract `sum(rows.cost_cents) + other.cost_cents
+    // == total_cost_cents` a definitional identity in f64 — the caller
+    // sums the same kept-Vec the daemon did, so both sides of the
+    // identity accumulate in the same order and cancel exactly. Pre-
+    // 8.3.1 `other.cost_cents` was a fresh sum over the drained tail,
+    // which differed from `total - kept` by an f64 associativity
+    // rounding error of up to a few cents on 30-day windows with
+    // fractional per-row costs (the 2026-04-22 audit's 1-22¢ drift).
     let rest: Vec<T> = all_rows.drain(limit..).collect();
-    let other_cost: f64 = rest.iter().map(BreakdownRowCost::cost_cents).sum();
+    let kept_cost: f64 = all_rows.iter().map(BreakdownRowCost::cost_cents).sum();
+    let other_cost = total_cost_cents - kept_cost;
     let other = BreakdownOther {
         row_count: rest.len(),
         cost_cents: other_cost,
