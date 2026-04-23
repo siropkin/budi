@@ -1,5 +1,28 @@
 # Changelog
 
+## 8.3.4 — 2026-04-23
+
+8.3.4 is an internal-correctness + maintainer-quality-of-life patch
+release on top of `v8.3.3`. Two fixes surfaced during the v8.3.3
+post-tag smoke: one DB-label correctness issue for anyone auditing
+`messages.pricing_source` directly, and one CI-infrastructure
+regression that was silently disabling supply-chain coverage. No
+pivot, no new features, no ADR amendments, no proxy reintroduction,
+no new runtime network destinations.
+
+### Fixed
+
+- **`pricing_source = "unpriced:no_tokens"` for zero-token rows instead of `"legacy:pre-manifest"`** (#533). Pre-fix every user-role message and every row ingested with zero tokens in every lane was landing with `pricing_source = "legacy:pre-manifest"` — the DB `DEFAULT` that [ADR-0091 §4](docs/adr/0091-model-pricing-manifest-source-of-truth.md) reserves for rows that existed BEFORE the 8.3.0 migration. `CostEnricher::enrich` in `crates/budi-core/src/pipeline/enrichers.rs` only set `msg.pricing_source` for `role == "assistant"`; non-assistant rows kept `None` and fell through to the COALESCE at `crates/budi-core/src/analytics/mod.rs:488`. On a live 8.3.3 DB this mislabeled 81,946 Claude Code and 1,516 Cursor rows, including rows timestamped today — anyone auditing `SELECT pricing_source, COUNT(*) FROM messages` saw a confusing mix of real pre-migration rows and post-migration zero-token rows. New column literal `COLUMN_VALUE_UNPRICED_NO_TOKENS = "unpriced:no_tokens"` in `crates/budi-core/src/pricing/mod.rs`, alongside the existing `"unknown"` / `"upstream:api"` sentinels. `PricingSource::parse_column` returns `None` for the new literal (same contract as the others). `CostEnricher::enrich` now tags any row with `pricing_source == None && cost_cents == None && all_token_lanes == 0` with the new sentinel. No backfill — [ADR-0091 §5 Rule C](docs/adr/0091-model-pricing-manifest-source-of-truth.md) reserves existing `"legacy:pre-manifest"` rows from automated rewrites; the fix only applies to rows ingested by 8.3.4+. Zero impact on displayed cost numbers (these rows correctly have `NULL` cost — nothing to price).
+
+### Changed (CI / maintainer)
+
+- **`supply-chain` job replaces the `EmbarkStudios/cargo-deny-action` wrapper with a direct `cargo install cargo-deny --locked` + `cargo deny --all-features check`** (#536). Pre-fix the action failed on every PR with `failed to get 'FETCH_HEAD' metadata: failed to parse ISO-8601 timestamp 'fatal: cannot change to '/home/runner/.cargo/advisory-dbs/advisory-db-<hash>': No such file or directory'` — the action's internal gix-based advisory-db cache couldn't bootstrap its directory layout on fresh runners, and v2.0.17 is the latest tag so there was no upgrade path. Direct install bypasses the wrapper entirely; cargo-deny manages its own advisory-db in `~/.cargo/advisory-db` (same path cargo-audit uses in the `rust-checks` job, which has been working reliably). RUSTSEC coverage was already intact via cargo-audit in `rust-checks`, but license / ban / duplicate checking was silently off. Job stays `continue-on-error: true` for this release cycle per the existing policy comment; a follow-up can drop that flag in 8.3.5 once the fix has been observed stable.
+
+### Non-blocking, carried forward
+
+- **RC-4 Part B** (#504) — Cursor Usage API auth root-cause. Part A shipped with `v8.3.1`; Part B needs maintainer credential-level probing that can't be driven from CI.
+- **`siropkin/budi-cloud#37`** — fresh-eyes UX audit of `app.getbudi.dev`.
+
 ## 8.3.3 — 2026-04-23
 
 8.3.3 is a single-ticket patch release. The post-`v8.3.2` update
