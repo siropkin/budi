@@ -1,5 +1,28 @@
 # Changelog
 
+## 8.3.6 — 2026-04-23
+
+8.3.6 is a first-user-feedback-driven patch release on top of
+`v8.3.5`. Two items from the maintainer's own v8.3.5 install-smoke
+got filed as bugs and shipped within the same session: the statusline
+was subtracting context info from Claude Code's default, and `budi
+init` didn't cover the historical-import step most fresh users
+expected to happen automatically. No pivot, no new pricing / ingest
+behavior, no ADR amendments.
+
+### Fixed
+
+- **`budi statusline --format claude` renders Claude-Code-default-equivalent context before the budi cost line** (#546). Pre-fix the Claude-format output was just `budi · $X 1d · $Y 7d · $Z 30d`; installing it into `statusLine.command = "budi statusline"` replaced Claude Code's built-in statusline (model / working directory / git branch) with only budi's cost display. First-user report: "user had some claude code additional info in statusline ... we removed that and replace with budi". Post-fix the line prepends `<model> · <short-cwd> · <branch>` extracted from the Claude Code stdin envelope + local git state, so installing budi ADDS cost info without losing Claude Code's context. New helpers in `crates/budi-cli/src/commands/statusline.rs`: `extract_model_name` reads `model.display_name` / falls back to `model.id`; `short_display_path` normalizes `$HOME` → `~` and keeps the last two path segments to avoid blowing out the prompt width; `render_context_prefix` drops each field individually when missing and returns `None` when all three are absent so the offline / daemon-down branch still renders legibly. The `apply_statusline` merge-append path (user already had a non-budi `statusLine.command`) is unchanged and now has a pinned regression test. Starship / Custom / JSON formats are unaffected.
+
+### Added
+
+- **`budi init` auto-imports historical transcripts** (#548). Pre-fix after `budi init` a fresh user ran `budi stats -p 30d` and saw `$0.00` because the tailer only ingests new activity — historical Claude Code / Cursor / Codex / Copilot transcripts on disk stayed invisible until a separate `budi db import` call. First-user report: "how to run history import with budi? i thought we do it with budi init" + "i would say auto import, too many initial command then". Post-fix `cmd_init` calls `cmd_import(false, false)` between `install_default_integrations` and the final banner. The existing sync path is idempotent (per-path offset table skips already-seen messages by id) so repeat inits are fast no-ops reporting "0 new messages" per provider. Skipped under `--no-daemon` since the import routes through `/sync/*` on the daemon we didn't start. Import failure is warn-only — init exit code stays 0 with a pointer to retry via `budi db import`.
+
+### Non-blocking, carried forward
+
+- **RC-4 Part B** (#504) — Cursor Usage API auth root-cause; Part A shipped with `v8.3.1`.
+- **Detached daemon log capture** — daemons respawned directly by `budi update` run as a detached child whose stdout isn't captured by launchd's `StandardOutPath`, so the first post-update daemon's startup lines (including the #540 `cloud uploader` line) don't land in `~/Library/Logs/budi-daemon.log` until the next launchctl kickstart. Observed during the v8.3.5 post-tag smoke, documented in the v8.3.5 closing evidence comment; affects observability only (the daemon IS running correctly).
+
 ## 8.3.5 — 2026-04-23
 
 8.3.5 is a cloud-quality-of-life patch release on top of `v8.3.4`. Two
