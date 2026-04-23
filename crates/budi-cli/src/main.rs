@@ -400,6 +400,17 @@ enum CloudAction {
         /// would overwrite a non-stub config.
         #[arg(long, default_value_t = false)]
         yes: bool,
+        /// Manually set `device_id` instead of auto-generating a UUID v4.
+        /// Useful for multi-machine setups where you want a stable
+        /// human-readable id, or offline installs where the auto-seed
+        /// whoami call can't reach the cloud.
+        #[arg(long, value_name = "ID")]
+        device_id: Option<String>,
+        /// Manually set `org_id` instead of fetching it via
+        /// `GET /v1/whoami`. Useful for self-hosted endpoints that
+        /// don't expose `/v1/whoami` yet, or offline installs.
+        #[arg(long, value_name = "ID")]
+        org_id: Option<String>,
     },
     /// Show cloud sync readiness and last-synced-at
     Status {
@@ -691,7 +702,9 @@ fn main() -> Result<()> {
                 api_key,
                 force,
                 yes,
-            } => commands::cloud::cmd_cloud_init(api_key, force, yes),
+                device_id,
+                org_id,
+            } => commands::cloud::cmd_cloud_init(api_key, force, yes, device_id, org_id),
             CloudAction::Status { format } => commands::cloud::cmd_cloud_status(format),
             CloudAction::Sync { format } => commands::cloud::cmd_cloud_sync(format),
         },
@@ -1109,11 +1122,15 @@ mod tests {
                         api_key,
                         force,
                         yes,
+                        device_id,
+                        org_id,
                     },
             } => {
                 assert!(api_key.is_none());
                 assert!(!force);
                 assert!(!yes);
+                assert!(device_id.is_none());
+                assert!(org_id.is_none());
             }
             _ => panic!("expected cloud init command"),
         }
@@ -1138,11 +1155,51 @@ mod tests {
                         api_key,
                         force,
                         yes,
+                        device_id,
+                        org_id,
                     },
             } => {
                 assert_eq!(api_key.as_deref(), Some("fake-test-key"));
                 assert!(force);
                 assert!(yes);
+                assert!(device_id.is_none());
+                assert!(org_id.is_none());
+            }
+            _ => panic!("expected cloud init command"),
+        }
+    }
+
+    #[test]
+    fn cli_parses_cloud_init_manual_ids() {
+        // #541: the escape hatch for offline installs / self-hosted
+        // endpoints without /v1/whoami. `--device-id` / `--org-id`
+        // bypass the whoami fetch and write the provided values
+        // verbatim into the template.
+        let cli = Cli::try_parse_from([
+            "budi",
+            "cloud",
+            "init",
+            "--api-key",
+            "fake-test-key",
+            "--device-id",
+            "my-laptop",
+            "--org-id",
+            "org_selfhost",
+        ])
+        .expect("budi cloud init with manual ids parses");
+        match cli.command {
+            Commands::Cloud {
+                action:
+                    CloudAction::Init {
+                        api_key,
+                        device_id,
+                        org_id,
+                        ..
+                    },
+            } => {
+                assert_eq!(api_key.as_deref(), Some("fake-test-key"));
+                assert_eq!(device_id.as_deref(), Some("my-laptop"));
+                assert_eq!(org_id.as_deref(), Some("org_selfhost"));
             }
             _ => panic!("expected cloud init command"),
         }

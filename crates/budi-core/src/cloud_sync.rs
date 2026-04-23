@@ -538,6 +538,81 @@ pub fn validate_https_endpoint(endpoint: &str) -> Result<()> {
     Ok(())
 }
 
+/// #541: response shape of `GET /v1/whoami` (cloud PR siropkin/budi-cloud#56).
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct WhoamiResponse {
+    pub org_id: String,
+}
+
+/// #541: outcome of a `whoami` call — distinguishes the fatal cases the
+/// CLI wants to surface (bad key) from the benign "cloud doesn't expose
+/// this yet" case the CLI wants to fall through on. A fresh 8.3.x CLI
+/// pointed at an old self-hosted cloud without `/v1/whoami` keeps the
+/// pre-#541 behavior (template with commented `device_id` / `org_id`
+/// lines) rather than hard-failing `budi cloud init`.
+#[derive(Debug, Clone)]
+pub enum WhoamiOutcome {
+    /// Cloud authenticated the key and returned `org_id`.
+    Ok(WhoamiResponse),
+    /// 401 — the key is revoked, malformed, or doesn't belong to any
+    /// user. The CLI should NOT write `enabled = true` on this path.
+    Unauthorized,
+    /// 404 / 405 — endpoint doesn't exist on this cloud (old or
+    /// self-hosted). The CLI should fall back to the pre-#541 template
+    /// shape. The tuple carries the status code for logging.
+    EndpointAbsent(u16),
+    /// 5xx, network error, timeout, malformed body, etc. Treated as
+    /// "try again later" — the CLI falls back to the pre-#541 template
+    /// shape so `budi cloud init` doesn't block on transient cloud
+    /// downtime.
+    TransientError(String),
+}
+
+/// #541: `GET /v1/whoami` — identifies the bearer of the api_key.
+/// Used by `budi cloud init --api-key KEY` to auto-seed `org_id`
+/// without making the user hand-copy it out of the dashboard.
+///
+/// Returns a structured [`WhoamiOutcome`] so the caller can distinguish
+/// "key is bad, don't enable cloud" from "cloud doesn't expose this
+/// endpoint yet, fall back". Blocking — `ureq` under the hood; call
+/// from a sync context (`cmd_cloud_init` is already sync).
+pub fn whoami(endpoint: &str, api_key: &str) -> WhoamiOutcome {
+    if let Err(e) = validate_https_endpoint(endpoint) {
+        return WhoamiOutcome::TransientError(e.to_string());
+    }
+
+    let url = format!("{endpoint}/v1/whoami");
+
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .timeout_global(Some(Duration::from_secs(10)))
+        .build()
+        .into();
+
+    let result = agent
+        .get(&url)
+        .header("Authorization", &format!("Bearer {api_key}"))
+        .call();
+
+    match result {
+        Ok(mut response) => match response.body_mut().read_json::<WhoamiResponse>() {
+            Ok(resp) => WhoamiOutcome::Ok(resp),
+            Err(e) => {
+                WhoamiOutcome::TransientError(format!("failed to parse whoami response: {e}"))
+            }
+        },
+        Err(ureq::Error::StatusCode(401)) => WhoamiOutcome::Unauthorized,
+        // 404 = route not wired, 405 = route exists at a different verb.
+        // Either way, treat as "endpoint not available on this cloud".
+        Err(ureq::Error::StatusCode(status)) if status == 404 || status == 405 => {
+            WhoamiOutcome::EndpointAbsent(status)
+        }
+        Err(ureq::Error::StatusCode(status)) => {
+            WhoamiOutcome::TransientError(format!("whoami returned {status}"))
+        }
+        Err(e) => WhoamiOutcome::TransientError(format!("whoami network error: {e}")),
+    }
+}
+
 /// Send the sync envelope to the cloud ingest API.
 /// Uses `ureq` (blocking) — call from `spawn_blocking`.
 pub fn send_sync_envelope(endpoint: &str, api_key: &str, envelope: &SyncEnvelope) -> SyncResult {
