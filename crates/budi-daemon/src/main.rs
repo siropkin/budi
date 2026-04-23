@@ -330,25 +330,34 @@ async fn main() -> Result<()> {
     }
 
     // --- Start cloud sync worker if configured ---
+    //
+    // #540: always emit exactly one INFO line from this block at boot
+    // so operators can grep `daemon.log` for `cloud uploader` and see
+    // current state regardless of whether the uploader is running.
+    // When disabled for any reason, the `reason=...` field matches the
+    // taxonomy in `CloudConfig::disabled_reason`.
     {
         let cloud_config = budi_core::config::load_cloud_config();
-        if cloud_config.is_ready() {
-            if let Ok(db_path) = analytics::db_path() {
-                tracing::info!(
-                    endpoint = %cloud_config.effective_endpoint(),
-                    interval_s = cloud_config.sync.interval_seconds,
-                    "Starting cloud sync worker"
-                );
-                tokio::spawn(workers::cloud_sync::run(
-                    db_path,
-                    cloud_config,
-                    cloud_syncing.clone(),
-                ));
+        match cloud_config.disabled_reason() {
+            None => {
+                if let Ok(db_path) = analytics::db_path() {
+                    tracing::info!(
+                        endpoint = %cloud_config.effective_endpoint(),
+                        device_id = %log_id_prefix(cloud_config.device_id.as_deref()),
+                        org_id = %log_id_prefix(cloud_config.org_id.as_deref()),
+                        interval_s = cloud_config.sync.interval_seconds,
+                        "cloud uploader configured"
+                    );
+                    tokio::spawn(workers::cloud_sync::run(
+                        db_path,
+                        cloud_config,
+                        cloud_syncing.clone(),
+                    ));
+                }
             }
-        } else if cloud_config.effective_enabled() {
-            tracing::warn!(
-                "Cloud sync enabled but not fully configured (missing api_key, device_id, or org_id)"
-            );
+            Some(reason) => {
+                tracing::info!(reason, "cloud uploader disabled");
+            }
         }
     }
 
@@ -404,6 +413,28 @@ const SHUTDOWN_DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_se
 /// here — `std::process::exit(0)` below ends it along with the rest of
 /// the runtime. If we want to drain in-flight HTTP requests on the same
 /// signal, that is a larger refactor tracked outside this ticket.
+/// #540: abbreviate a `device_id` / `org_id` for the daemon startup log
+/// line. Full values are stored in `cloud.toml` and aren't secret, but
+/// long opaque UUIDs / org slugs clutter the log. Prints the first 8
+/// chars followed by `…` when the value is longer than that; returns
+/// `"(missing)"` for `None` (shouldn't appear for a ready config, but
+/// defensive so the log line never blows up).
+fn log_id_prefix(value: Option<&str>) -> String {
+    match value {
+        None => "(missing)".to_string(),
+        Some(v) => {
+            // Unicode-safe truncation: step 8 chars, not 8 bytes.
+            let mut it = v.chars();
+            let head: String = (&mut it).take(8).collect();
+            if it.next().is_some() {
+                format!("{head}…")
+            } else {
+                head
+            }
+        }
+    }
+}
+
 fn install_shutdown_listener(
     tailer_shutdown: std::sync::Arc<std::sync::atomic::AtomicBool>,
     tailer_handle: Option<tokio::task::JoinHandle<()>>,
@@ -621,6 +652,30 @@ mod tests {
             cloud_syncing: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             sync_progress: std::sync::Arc::new(std::sync::Mutex::new(None)),
         })
+    }
+
+    #[test]
+    fn log_id_prefix_abbreviates_long_ids_and_preserves_short_ones() {
+        // #540: the daemon startup log prints device_id / org_id
+        // abbreviated so operators can eyeball "am I on the right
+        // device?" without full opaque UUIDs cluttering the log.
+        assert_eq!(
+            log_id_prefix(Some("7b322df1-3bcd-4e72-9e2a-0b2f3c4d5e6f")),
+            "7b322df1…"
+        );
+        // Short values (shorter than the 8-char abbreviation
+        // threshold) render intact — no trailing ellipsis.
+        assert_eq!(log_id_prefix(Some("short")), "short");
+        // Exactly-8-char values don't grow an ellipsis — there's
+        // nothing hidden.
+        assert_eq!(log_id_prefix(Some("exactly8")), "exactly8");
+        // None → explicit "(missing)" sentinel. Should not fire in
+        // production (the configured branch only runs for
+        // `is_ready` configs), but keeps the log line stable if it
+        // ever does.
+        assert_eq!(log_id_prefix(None), "(missing)");
+        // Unicode: the truncation is char-boundary-safe.
+        assert_eq!(log_id_prefix(Some("✨org_aaabbbccc")), "✨org_aaa…");
     }
 
     #[tokio::test]

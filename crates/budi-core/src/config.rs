@@ -550,6 +550,33 @@ impl CloudConfig {
     pub fn is_api_key_stub(&self) -> bool {
         self.api_key.as_deref() == Some(CLOUD_API_KEY_STUB)
     }
+
+    /// #540: short, stable snake_case reason tag for the "uploader
+    /// disabled" daemon startup log line. Returns `None` when the
+    /// config IS ready to run (caller should log the "configured" line
+    /// instead). Precedence mirrors `budi cloud status`: the
+    /// `enabled` flag is the coarsest gate, then api_key presence /
+    /// staleness, then the identity pair. This string is logged
+    /// verbatim as a structured field — do not change wording without
+    /// updating any external log grep consumers.
+    pub fn disabled_reason(&self) -> Option<&'static str> {
+        if !self.effective_enabled() {
+            return Some("cloud.enabled=false");
+        }
+        if self.effective_api_key().is_none() {
+            return Some("missing api_key");
+        }
+        if self.is_api_key_stub() {
+            return Some("api_key is placeholder");
+        }
+        if self.device_id.is_none() {
+            return Some("missing device_id");
+        }
+        if self.org_id.is_none() {
+            return Some("missing org_id");
+        }
+        None
+    }
 }
 
 /// Path to the cloud config file.
@@ -1117,6 +1144,37 @@ retry_max_seconds = 120
             !config.is_api_key_stub(),
             "stub detection is exact-match so accidental padding surfaces as a real (broken) key"
         );
+    }
+
+    #[test]
+    fn cloud_config_disabled_reason_walks_precedence() {
+        // #540: reason tag taxonomy — same order `budi cloud status`
+        // surfaces missing fields, so the daemon startup log and the
+        // CLI status command agree on "what's blocking cloud sync".
+        let mut config = CloudConfig::default();
+        // Default (enabled=false, everything None): coarsest gate fires first.
+        assert_eq!(config.disabled_reason(), Some("cloud.enabled=false"));
+
+        config.enabled = true;
+        // Enabled but no api_key at all.
+        assert_eq!(config.disabled_reason(), Some("missing api_key"));
+
+        config.api_key = Some(CLOUD_API_KEY_STUB.to_string());
+        // Placeholder distinguished from truly-missing.
+        assert_eq!(config.disabled_reason(), Some("api_key is placeholder"));
+
+        config.api_key = Some("budi_real".to_string());
+        // Real key, but no device_id.
+        assert_eq!(config.disabled_reason(), Some("missing device_id"));
+
+        config.device_id = Some("dev_test".to_string());
+        // device_id set, but no org_id.
+        assert_eq!(config.disabled_reason(), Some("missing org_id"));
+
+        config.org_id = Some("org_test".to_string());
+        // Everything populated: no disabled reason — caller should log "configured".
+        assert_eq!(config.disabled_reason(), None);
+        assert!(config.is_ready());
     }
 
     #[test]
