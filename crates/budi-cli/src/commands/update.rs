@@ -11,7 +11,7 @@ use reqwest::blocking::Client;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
-use crate::daemon::{ensure_daemon_running, ensure_daemon_running_with_binary};
+use crate::daemon::{ensure_daemon_running, restart_daemon_for_version_upgrade};
 
 const RELEASES_LATEST_URL: &str = "https://api.github.com/repos/siropkin/budi/releases/latest";
 const RELEASE_DOWNLOAD_BASE: &str = "https://github.com/siropkin/budi/releases/download";
@@ -178,7 +178,16 @@ pub fn cmd_update(yes: bool, version: Option<String>) -> Result<()> {
         None
     };
     println!("Restarting daemon...");
-    let _ = ensure_daemon_running_with_binary(repo_root.as_deref(), &config, daemon_override);
+    // #529: use the version-aware restart path so the daemon is
+    // explicitly killed + respawned when `/health.version` doesn't
+    // match the version we just installed. The generic
+    // `ensure_daemon_running_with_binary` compares against
+    // `env!("CARGO_PKG_VERSION")` of the running CLI — which during
+    // `budi update` is still the PRE-install process, so a pre-
+    // install daemon matches and no restart fires. `latest` is the
+    // version we just put on disk; that's the true respawn target.
+    let _ =
+        restart_daemon_for_version_upgrade(repo_root.as_deref(), &config, daemon_override, &latest);
 
     // Verify installed version.
     let verification_bin = prepared.as_ref().map(|p| p.budi_dst.as_path());
