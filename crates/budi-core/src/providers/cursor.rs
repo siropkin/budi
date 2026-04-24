@@ -25,6 +25,33 @@ use crate::analytics;
 use crate::jsonl::ParsedMessage;
 use crate::provider::{DiscoveredFile, Provider};
 
+/// Model id we substitute for Cursor "Auto" mode bubble rows whose
+/// `modelInfo.modelName` is empty or the literal `"default"`.
+///
+/// Cursor's public stance is that Auto mode prices at Sonnet rates
+/// (see [#553] scope-update and the CodeBurn reference implementation's
+/// `CURSOR_DEFAULT_MODEL`). Without this substitution the bubble would
+/// look up as an unknown model and land with `pricing_source = "unknown"`
+/// plus $0 cost, which defeats the whole point of the bubbles path.
+/// The constant is kept single-sourced so a future "Auto ≠ Sonnet" pivot
+/// lands as a one-line change with a visible blame trail.
+///
+/// [#553]: https://github.com/siropkin/budi/issues/553
+const CURSOR_AUTO_MODEL_FALLBACK: &str = "claude-sonnet-4-5";
+
+/// `sync_state` watermark key for the `cursorDiskKV` bubbles path.
+///
+/// Intentionally distinct from [`CURSOR_USAGE_API_WATERMARK_KEY`] so the
+/// two Cursor data paths advance independently: a bubble ingest tick does
+/// not acknowledge Usage API events, and vice versa. Dedup between the
+/// two paths is handled at the row-id level (bubble UUIDs vs usage-event
+/// UUIDs collide deterministically only when they describe the same
+/// activity; the first-seen row wins per `ingest_messages`).
+const CURSOR_BUBBLES_WATERMARK_KEY: &str = "cursor-bubbles";
+
+/// `sync_state` watermark key for the Cursor Usage API path.
+const CURSOR_USAGE_API_WATERMARK_KEY: &str = "cursor-api-usage";
+
 /// The Cursor provider.
 pub struct CursorProvider;
 
@@ -86,8 +113,15 @@ impl Provider for CursorProvider {
         pipeline: &mut crate::pipeline::Pipeline,
         max_age_days: Option<u64>,
     ) -> Option<Result<(usize, usize, Vec<String>)>> {
-        // Sync from Cursor Usage API (exact per-request tokens and cost)
-        sync_from_usage_api(conn, pipeline, max_age_days)
+        // #553: prefer the local `cursorDiskKV` bubble rows — they carry
+        // real per-message tokens and model without any network call,
+        // and the whole subscription consumption (not just overage)
+        // shows up there. The Usage API path still runs afterwards as a
+        // supplementary signal for overage attribution during the
+        // validation window documented in ADR-0090.
+        let bubbles = sync_from_bubbles(conn, pipeline);
+        let api = sync_from_usage_api(conn, pipeline, max_age_days);
+        combine_cursor_sync_results(bubbles, api)
     }
 
     fn watch_roots(&self) -> Vec<PathBuf> {
@@ -1056,7 +1090,7 @@ fn sync_from_usage_api(
         }
     };
 
-    let watermark_key = "cursor-api-usage";
+    let watermark_key = CURSOR_USAGE_API_WATERMARK_KEY;
     let watermark = analytics::get_sync_offset(conn, watermark_key)
         .ok()
         .and_then(|v| {
@@ -1113,6 +1147,425 @@ fn sync_from_usage_api(
     }
 
     Some(Ok((api_calls, count, warnings)))
+}
+
+// ---------------------------------------------------------------------------
+// `cursorDiskKV` bubbles — local per-message tokens/model (#553)
+// ---------------------------------------------------------------------------
+
+/// One decoded `bubbleId:*` row from `cursorDiskKV`.
+///
+/// Field ordering mirrors the SQL column order in [`read_cursor_bubbles`]
+/// so the `query_map` closure stays obviously in sync with the SELECT.
+#[derive(Debug)]
+struct BubbleRow {
+    input_tokens: u64,
+    output_tokens: u64,
+    model: Option<String>,
+    /// Raw `$.createdAt` JSON value, rendered as TEXT by the SQL CAST.
+    /// Cursor has shipped this as either an ISO-8601 string or epoch ms;
+    /// [`parse_bubble_created_at`] handles both shapes.
+    created_at: Option<String>,
+    conversation_id: Option<String>,
+    /// Cursor's internal type code. `1` = user message, other values =
+    /// assistant. Matches the CodeBurn reference implementation's
+    /// convention, cross-verified against live rows.
+    type_code: Option<i64>,
+}
+
+/// Parse Cursor's `$.createdAt` field in either of the two shapes we have
+/// observed: an ISO-8601 string, or an epoch-millis integer (rendered as
+/// a decimal string by the SQL CAST).
+///
+/// Returns `None` when the input can't be parsed as either shape —
+/// callers skip rows whose timestamp is unreadable rather than pinning
+/// them to "now".
+fn parse_bubble_created_at(raw: &str) -> Option<i64> {
+    let s = raw.trim();
+    if s.is_empty() {
+        return None;
+    }
+    if let Ok(ms) = s.parse::<i64>() {
+        // Guard against degenerate zero/negative values; valid epoch-ms
+        // timestamps for the Cursor-era are well past 10^12.
+        if ms > 0 {
+            return Some(ms);
+        }
+    }
+    if let Ok(dt) = DateTime::parse_from_rfc3339(s) {
+        return Some(dt.timestamp_millis());
+    }
+    if let Ok(dt) = s.parse::<DateTime<Utc>>() {
+        return Some(dt.timestamp_millis());
+    }
+    None
+}
+
+/// Emit a one-time `cursor_bubble_schema_unrecognized` warn, deduplicated
+/// for the life of the process. Mirrors [`warn_auth_once`] in spirit but
+/// keyed on "we've warned at least once" rather than on a reason enum —
+/// there is exactly one schema-missing signal to surface here.
+fn warn_bubble_schema_once() {
+    use std::sync::{Mutex, OnceLock};
+    static FIRED: OnceLock<Mutex<bool>> = OnceLock::new();
+    let mutex = FIRED.get_or_init(|| Mutex::new(false));
+    let mut guard = match mutex.lock() {
+        Ok(g) => g,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    if *guard {
+        return;
+    }
+    *guard = true;
+    tracing::warn!(
+        target: "budi_core::providers::cursor",
+        event = "cursor_bubble_schema_unrecognized",
+        "Cursor state.vscdb cursorDiskKV bubble rows not found — schema may have changed \
+         or the DB is empty. Falling back to the Usage API path for Cursor pricing.",
+    );
+}
+
+/// Read Cursor per-message usage rows from the `cursorDiskKV` table in
+/// `state.vscdb`.
+///
+/// Cursor stores per-bubble JSON under keys shaped `bubbleId:<uuid>`,
+/// carrying `tokenCount.inputTokens`, `tokenCount.outputTokens`,
+/// `modelInfo.modelName`, `createdAt`, `conversationId`, and `type`.
+/// Reading them directly gives exact per-message tokens and model
+/// without any network call, which is what #553 wants so that Cursor's
+/// subscription-included traffic stops reading as $0 in `budi stats`.
+///
+/// - `db_path` points at the `globalStorage/state.vscdb` we already
+///   probed in `all_state_vscdb_paths`.
+/// - `since_ms` is an optional watermark in epoch-millis; rows whose
+///   `createdAt` parses to `<= since_ms` are skipped.
+///
+/// When the `cursorDiskKV` table is missing (schema drift, empty DB, or
+/// we're pointed at a non-Cursor sqlite), returns `Ok(vec![])` after
+/// emitting a one-time schema-unrecognized warn. The Usage API path
+/// still runs in the same sync tick so the provider degrades gracefully.
+///
+/// See [ADR-0090 §2026-04-XX](../../../../docs/adr/0090-cursor-usage-api-contract.md)
+/// for the dual-path policy during the #553 validation window.
+pub(crate) fn read_cursor_bubbles(
+    db_path: &Path,
+    since_ms: Option<i64>,
+) -> Result<Vec<ParsedMessage>> {
+    let vscdb = Connection::open_with_flags(
+        db_path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .with_context(|| format!("open {} read-only", db_path.display()))?;
+
+    let has_table: i64 = vscdb
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master
+             WHERE type = 'table' AND name = 'cursorDiskKV'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or(0);
+    if has_table == 0 {
+        warn_bubble_schema_once();
+        return Ok(Vec::new());
+    }
+
+    // CAST `$.createdAt` AS TEXT so numeric timestamps (epoch ms) and
+    // string timestamps (ISO 8601) both deserialize into the same
+    // `Option<String>` — `parse_bubble_created_at` handles the split.
+    let mut stmt = match vscdb.prepare(
+        "SELECT
+            COALESCE(json_extract(value, '$.tokenCount.inputTokens'), 0)  AS input_tokens,
+            COALESCE(json_extract(value, '$.tokenCount.outputTokens'), 0) AS output_tokens,
+            json_extract(value, '$.modelInfo.modelName')                  AS model,
+            CAST(json_extract(value, '$.createdAt') AS TEXT)              AS created_at,
+            json_extract(value, '$.conversationId')                       AS conversation_id,
+            json_extract(value, '$.type')                                 AS type_code
+         FROM cursorDiskKV
+         WHERE key LIKE 'bubbleId:%'
+           AND (
+             json_extract(value, '$.tokenCount.inputTokens') > 0
+             OR json_extract(value, '$.type') = 1
+           )",
+    ) {
+        Ok(s) => s,
+        Err(e) => {
+            warn_bubble_schema_once();
+            tracing::debug!("cursorDiskKV prepare failed: {e:#}");
+            return Ok(Vec::new());
+        }
+    };
+
+    let rows = stmt.query_map([], |row| {
+        let input_raw: i64 = row.get::<_, Option<i64>>(0)?.unwrap_or(0);
+        let output_raw: i64 = row.get::<_, Option<i64>>(1)?.unwrap_or(0);
+        Ok(BubbleRow {
+            input_tokens: input_raw.max(0) as u64,
+            output_tokens: output_raw.max(0) as u64,
+            model: row.get::<_, Option<String>>(2)?,
+            created_at: row.get::<_, Option<String>>(3)?,
+            conversation_id: row.get::<_, Option<String>>(4)?,
+            type_code: row.get::<_, Option<i64>>(5)?,
+        })
+    })?;
+
+    let mut parsed: Vec<ParsedMessage> = Vec::new();
+    for row_r in rows {
+        let row = match row_r {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::debug!("cursorDiskKV row decode failed: {e:#}");
+                continue;
+            }
+        };
+        if let Some(msg) = bubble_to_parsed_message(row, since_ms) {
+            parsed.push(msg);
+        }
+    }
+
+    Ok(parsed)
+}
+
+/// Translate one decoded `BubbleRow` into a `ParsedMessage` ready for
+/// the pipeline. Returns `None` when the row is unreadable (missing
+/// timestamp/conversationId, or filtered by `since_ms`).
+fn bubble_to_parsed_message(row: BubbleRow, since_ms: Option<i64>) -> Option<ParsedMessage> {
+    let created_raw = row.created_at.as_deref()?;
+    let created_ms = parse_bubble_created_at(created_raw)?;
+    if let Some(w) = since_ms
+        && created_ms <= w
+    {
+        return None;
+    }
+
+    let conversation_id = row.conversation_id.as_deref().unwrap_or("").trim();
+    if conversation_id.is_empty() {
+        return None;
+    }
+
+    let timestamp = DateTime::from_timestamp_millis(created_ms).unwrap_or_else(Utc::now);
+    let is_user = row.type_code == Some(1);
+
+    // Mirrors the CodeBurn shape so bubbles that later appear on the
+    // Usage API dedup deterministically when uuids collide. User rows
+    // have zero tokens by construction; bake that into the id rather
+    // than trusting the (sometimes non-zero, sometimes absent) raw
+    // fields.
+    let (input_for_id, output_for_id) = if is_user {
+        (0u64, 0u64)
+    } else {
+        (row.input_tokens, row.output_tokens)
+    };
+    let uuid = format!(
+        "cursor:bubble:{}:{}:{}:{}",
+        conversation_id, created_ms, input_for_id, output_for_id
+    );
+
+    let session_id = Some(crate::identity::normalize_session_id(conversation_id));
+
+    if is_user {
+        // #533 keeps user rows at zero tokens / no cost; `CostEnricher`
+        // will tag them `unpriced:no_tokens` on its pass. Flowing them
+        // through the pipeline keeps prompt-category classification
+        // and tool-outcome retention consistent with other providers.
+        Some(ParsedMessage {
+            uuid,
+            session_id,
+            timestamp,
+            cwd: None,
+            role: "user".to_string(),
+            model: None,
+            input_tokens: 0,
+            output_tokens: 0,
+            cache_creation_tokens: 0,
+            cache_read_tokens: 0,
+            git_branch: None,
+            repo_id: None,
+            provider: "cursor".to_string(),
+            cost_cents: None,
+            session_title: None,
+            parent_uuid: None,
+            user_name: None,
+            machine_name: None,
+            cost_confidence: "n/a".to_string(),
+            pricing_source: None,
+            request_id: None,
+            speed: None,
+            cache_creation_1h_tokens: 0,
+            web_search_requests: 0,
+            prompt_category: None,
+            prompt_category_source: None,
+            prompt_category_confidence: None,
+            tool_names: Vec::new(),
+            tool_use_ids: Vec::new(),
+            tool_files: Vec::new(),
+            tool_outcomes: Vec::new(),
+        })
+    } else {
+        let resolved_model = match row.model.as_deref().map(str::trim) {
+            None | Some("") | Some("default") => CURSOR_AUTO_MODEL_FALLBACK.to_string(),
+            Some(other) => other.to_string(),
+        };
+        Some(ParsedMessage {
+            uuid,
+            session_id,
+            timestamp,
+            cwd: None,
+            role: "assistant".to_string(),
+            model: Some(resolved_model),
+            input_tokens: row.input_tokens,
+            output_tokens: row.output_tokens,
+            // Cursor's bubble schema exposes tokenCount.{input,output}Tokens
+            // only; cache tiers are not visible from the local DB. Leaving
+            // them at zero undercounts cache-read savings slightly for
+            // Cursor vs reality — documented caveat in the ADR amendment.
+            cache_creation_tokens: 0,
+            cache_read_tokens: 0,
+            git_branch: None,
+            repo_id: None,
+            provider: "cursor".to_string(),
+            cost_cents: None,
+            session_title: None,
+            parent_uuid: None,
+            user_name: None,
+            machine_name: None,
+            // Empty string → `CostEnricher` sets it to "estimated" when
+            // it prices the row via the manifest. If the model is
+            // unknown (manifest miss), the enricher falls back to
+            // "estimated_unknown_model" — both paths end up with a
+            // non-empty value.
+            cost_confidence: String::new(),
+            pricing_source: None,
+            request_id: None,
+            speed: None,
+            cache_creation_1h_tokens: 0,
+            web_search_requests: 0,
+            prompt_category: None,
+            prompt_category_source: None,
+            prompt_category_confidence: None,
+            tool_names: Vec::new(),
+            tool_use_ids: Vec::new(),
+            tool_files: Vec::new(),
+            tool_outcomes: Vec::new(),
+        })
+    }
+}
+
+/// Fill missing `cwd` / `repo_id` / `git_branch` on freshly-read bubble
+/// messages from session context. Bubble rows only carry
+/// `conversationId`, not workspace metadata; we look each one up against
+/// the session contexts we already compute for the Usage API path so
+/// downstream attribution tags match.
+fn attach_session_context_to_bubbles(msgs: &mut [ParsedMessage], sessions: &[SessionContext]) {
+    if sessions.is_empty() {
+        return;
+    }
+    for m in msgs {
+        let ts_ms = m.timestamp.timestamp_millis();
+        let direct = m
+            .session_id
+            .as_deref()
+            .and_then(|sid| sessions.iter().find(|s| s.session_id == sid));
+        let matched = direct.or_else(|| find_matching_session(ts_ms, sessions));
+        let Some(s) = matched else {
+            continue;
+        };
+        if m.cwd.is_none() {
+            m.cwd = s.workspace_root.clone();
+        }
+        if m.repo_id.is_none() {
+            m.repo_id = s.repo_id.clone();
+        }
+        if m.git_branch.is_none() {
+            m.git_branch = s.git_branch.clone();
+        }
+    }
+}
+
+/// Sync Cursor per-message usage from local `cursorDiskKV` bubble rows.
+///
+/// Returns the same `(api_calls, message_count, warnings)` tuple shape as
+/// [`sync_from_usage_api`] so it can share the `combine_cursor_sync_results`
+/// merger. `api_calls` is always 0 here — the bubbles path makes no
+/// network calls. `None` when no state.vscdb path is discoverable on
+/// this machine, so the Usage API path alone drives the sync tick.
+fn sync_from_bubbles(
+    conn: &mut Connection,
+    pipeline: &mut crate::pipeline::Pipeline,
+) -> Option<Result<(usize, usize, Vec<String>)>> {
+    let global_path = all_state_vscdb_paths()
+        .into_iter()
+        .find(|p| p.to_string_lossy().contains("globalStorage"))?;
+
+    let watermark_key = CURSOR_BUBBLES_WATERMARK_KEY;
+    let watermark = analytics::get_sync_offset(conn, watermark_key)
+        .ok()
+        .and_then(|v| {
+            let ts = v as i64;
+            if ts > 0 { Some(ts) } else { None }
+        });
+
+    let mut messages = match read_cursor_bubbles(&global_path, watermark) {
+        Ok(m) => m,
+        Err(e) => {
+            tracing::warn!("Cursor bubbles read failed: {e:#}; Usage API path will still run");
+            return None;
+        }
+    };
+
+    if messages.is_empty() {
+        return Some(Ok((0, 0, Vec::new())));
+    }
+
+    // Session repair/backfill is only needed when new Cursor data arrives,
+    // and the bubbles path is often the first path to notice a new
+    // composer. Running this before `load_session_contexts` means the
+    // composer-header merge picks up repo/branch for freshly-seen sessions.
+    run_cursor_repairs(conn);
+
+    let sessions = load_session_contexts(conn);
+    attach_session_context_to_bubbles(&mut messages, &sessions);
+
+    let newest_ts_ms = messages
+        .iter()
+        .map(|m| m.timestamp.timestamp_millis())
+        .max()
+        .unwrap_or(0);
+
+    let tags = pipeline.process(&mut messages);
+    let count = match analytics::ingest_messages(conn, &messages, Some(&tags)) {
+        Ok(c) => c,
+        Err(e) => return Some(Err(e)),
+    };
+
+    if newest_ts_ms > 0
+        && let Err(e) = analytics::set_sync_offset(conn, watermark_key, newest_ts_ms as usize)
+    {
+        return Some(Err(e));
+    }
+
+    Some(Ok((0, count, Vec::new())))
+}
+
+/// Merge the results of the two Cursor sync paths (bubbles + Usage API)
+/// into the single `(api_calls, message_count, warnings)` tuple the
+/// provider trait expects. Returning `None` here leaves the JSONL
+/// fallback free to run for the tick, same as before #553.
+fn combine_cursor_sync_results(
+    bubbles: Option<Result<(usize, usize, Vec<String>)>>,
+    api: Option<Result<(usize, usize, Vec<String>)>>,
+) -> Option<Result<(usize, usize, Vec<String>)>> {
+    match (bubbles, api) {
+        (None, None) => None,
+        (Some(Err(e)), _) => Some(Err(e)),
+        (_, Some(Err(e))) => Some(Err(e)),
+        (Some(Ok(b)), None) => Some(Ok(b)),
+        (None, Some(Ok(a))) => Some(Ok(a)),
+        (Some(Ok((ba, bc, mut bw))), Some(Ok((aa, ac, aw)))) => {
+            bw.extend(aw);
+            Some(Ok((ba + aa, bc + ac, bw)))
+        }
+    }
 }
 
 /// Session repair and backfill for Cursor data.
@@ -2220,6 +2673,193 @@ mod tests {
         assert!(roots.is_empty(), "expected empty roots, got {roots:?}");
 
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    // --- cursorDiskKV bubble path (#553) ---
+
+    /// Populate a brand-new `state.vscdb`-shaped SQLite file with a
+    /// `cursorDiskKV` table and the given rows. `(key, value_json)`
+    /// tuples are inserted verbatim.
+    fn seed_bubble_db(path: &Path, rows: &[(&str, &str)]) {
+        let conn = Connection::open(path).expect("open fixture db");
+        conn.execute_batch("CREATE TABLE cursorDiskKV (key TEXT PRIMARY KEY, value TEXT);")
+            .unwrap();
+        for (key, value) in rows {
+            conn.execute(
+                "INSERT INTO cursorDiskKV (key, value) VALUES (?1, ?2)",
+                params![key, value],
+            )
+            .unwrap();
+        }
+    }
+
+    #[test]
+    fn read_cursor_bubbles_returns_parsed_messages_from_fixture_db() {
+        let dir = make_test_dir("cursor-bubbles-fixture");
+        let db = dir.join("state.vscdb");
+        let rows = [
+            (
+                "bubbleId:conv-1:assistant-1",
+                r#"{"tokenCount":{"inputTokens":5000,"outputTokens":1200},"modelInfo":{"modelName":"claude-sonnet-4-6"},"createdAt":"2026-04-22T10:00:00.000Z","conversationId":"conv-1","type":2}"#,
+            ),
+            (
+                "bubbleId:conv-1:user-1",
+                r#"{"tokenCount":{"inputTokens":0,"outputTokens":0},"modelInfo":{"modelName":""},"createdAt":"2026-04-22T10:00:05.000Z","conversationId":"conv-1","type":1}"#,
+            ),
+            (
+                "bubbleId:conv-2:assistant-1",
+                r#"{"tokenCount":{"inputTokens":10000,"outputTokens":500},"modelInfo":{"modelName":"gpt-5"},"createdAt":1774555000000,"conversationId":"conv-2","type":2}"#,
+            ),
+            // Noise: zero tokens + non-user type — must be filtered out.
+            (
+                "bubbleId:conv-3:noise",
+                r#"{"tokenCount":{"inputTokens":0,"outputTokens":0},"createdAt":"2026-04-22T10:00:10.000Z","conversationId":"conv-3","type":2}"#,
+            ),
+        ];
+        seed_bubble_db(&db, &rows);
+
+        let parsed = read_cursor_bubbles(&db, None).expect("read bubbles ok");
+
+        // Assistant rows + the single user row survive; the zero-token
+        // non-user noise row is filtered at the SQL WHERE.
+        assert_eq!(parsed.len(), 3, "got: {parsed:?}");
+
+        let assistant_sonnet = parsed
+            .iter()
+            .find(|m| m.model.as_deref() == Some("claude-sonnet-4-6"))
+            .expect("sonnet row present");
+        assert_eq!(assistant_sonnet.input_tokens, 5000);
+        assert_eq!(assistant_sonnet.output_tokens, 1200);
+        assert_eq!(assistant_sonnet.role, "assistant");
+        assert_eq!(assistant_sonnet.session_id.as_deref(), Some("conv-1"));
+        assert_eq!(assistant_sonnet.provider, "cursor");
+        assert!(assistant_sonnet.cost_cents.is_none());
+        assert!(
+            assistant_sonnet.uuid.starts_with("cursor:bubble:conv-1:"),
+            "unexpected uuid shape: {}",
+            assistant_sonnet.uuid,
+        );
+
+        // Numeric epoch-ms createdAt is accepted too.
+        let gpt = parsed
+            .iter()
+            .find(|m| m.model.as_deref() == Some("gpt-5"))
+            .expect("gpt-5 row present");
+        assert_eq!(gpt.input_tokens, 10000);
+        assert_eq!(gpt.session_id.as_deref(), Some("conv-2"));
+
+        // The user row rides through as role=user with zero tokens; id
+        // bakes zeros in so a later tokens-bearing assistant reply can't
+        // collide with it.
+        let user_row = parsed
+            .iter()
+            .find(|m| m.role == "user")
+            .expect("user row present");
+        assert_eq!(user_row.session_id.as_deref(), Some("conv-1"));
+        assert_eq!(user_row.input_tokens, 0);
+        assert_eq!(user_row.output_tokens, 0);
+        assert!(user_row.uuid.ends_with(":0:0"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn auto_mode_falls_back_to_claude_sonnet_4_5() {
+        let dir = make_test_dir("cursor-bubbles-auto");
+        let db = dir.join("state.vscdb");
+        let rows = [
+            (
+                "bubbleId:auto-empty:assistant",
+                r#"{"tokenCount":{"inputTokens":100,"outputTokens":50},"modelInfo":{"modelName":""},"createdAt":"2026-04-22T10:00:00.000Z","conversationId":"auto-empty","type":2}"#,
+            ),
+            (
+                "bubbleId:auto-default:assistant",
+                r#"{"tokenCount":{"inputTokens":200,"outputTokens":80},"modelInfo":{"modelName":"default"},"createdAt":"2026-04-22T10:01:00.000Z","conversationId":"auto-default","type":2}"#,
+            ),
+            (
+                "bubbleId:auto-missing:assistant",
+                r#"{"tokenCount":{"inputTokens":300,"outputTokens":120},"createdAt":"2026-04-22T10:02:00.000Z","conversationId":"auto-missing","type":2}"#,
+            ),
+        ];
+        seed_bubble_db(&db, &rows);
+
+        let parsed = read_cursor_bubbles(&db, None).expect("read bubbles ok");
+        assert_eq!(parsed.len(), 3);
+        for msg in &parsed {
+            assert_eq!(
+                msg.model.as_deref(),
+                Some(CURSOR_AUTO_MODEL_FALLBACK),
+                "Auto-mode bubble did not fall back to Sonnet: {msg:?}",
+            );
+            assert_eq!(msg.role, "assistant");
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn schema_missing_returns_empty_not_panic() {
+        let dir = make_test_dir("cursor-bubbles-no-schema");
+        let db = dir.join("state.vscdb");
+        // Plausible, non-Cursor DB: has an ItemTable but no cursorDiskKV.
+        // Mirrors the failure mode where a user points us at an sqlite
+        // file that isn't (or is no longer) a Cursor state.vscdb.
+        let conn = Connection::open(&db).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE ItemTable (key TEXT PRIMARY KEY, value TEXT);
+             INSERT INTO ItemTable (key, value) VALUES ('cursorAuth/accessToken', '');",
+        )
+        .unwrap();
+        drop(conn);
+
+        let parsed = read_cursor_bubbles(&db, None).expect("Ok even when schema is missing");
+        assert!(
+            parsed.is_empty(),
+            "expected empty vec when cursorDiskKV is missing, got {parsed:?}",
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn ingest_roundtrip_writes_embedded_or_manifest_source() {
+        use crate::pipeline::Pipeline;
+
+        let dir = make_test_dir("cursor-bubbles-ingest");
+        let db = dir.join("state.vscdb");
+        let rows = [(
+            "bubbleId:ingest-1:assistant",
+            r#"{"tokenCount":{"inputTokens":1000000,"outputTokens":100000},"modelInfo":{"modelName":"claude-sonnet-4-6"},"createdAt":"2026-04-22T10:00:00.000Z","conversationId":"ingest-1","type":2}"#,
+        )];
+        seed_bubble_db(&db, &rows);
+
+        let mut messages = read_cursor_bubbles(&db, None).expect("read ok");
+        assert_eq!(messages.len(), 1);
+
+        let mut pipeline = Pipeline::default_pipeline(None);
+        let tags = pipeline.process(&mut messages);
+        assert_eq!(tags.len(), messages.len());
+
+        let msg = &messages[0];
+        let src = msg
+            .pricing_source
+            .as_deref()
+            .expect("CostEnricher sets pricing_source for priced rows");
+        assert!(
+            src.starts_with("embedded:v") || src.starts_with("manifest:v"),
+            "unexpected pricing_source: {src}",
+        );
+        let cost = msg.cost_cents.expect("cost_cents populated");
+        assert!(cost > 0.0, "expected non-zero cost_cents, got {cost}");
+
+        // Ingest round-trips into an in-memory analytics DB without panicking.
+        let mut analytics_conn = Connection::open_in_memory().unwrap();
+        crate::migration::migrate(&analytics_conn).unwrap();
+        let inserted =
+            analytics::ingest_messages(&mut analytics_conn, &messages, Some(&tags)).unwrap();
+        assert_eq!(inserted, 1);
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
