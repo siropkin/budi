@@ -1,5 +1,29 @@
 # Changelog
 
+## 8.3.7 — 2026-04-23
+
+8.3.7 is a second dogfood-driven patch release on top of `v8.3.6`. The
+v8.3.6 post-tag dogfood surfaced one high-signal correctness bug
+(Cursor pricing was an order of magnitude low because the only path
+that priced rows was the Usage API, which returns overage-only
+events) and one cloud-UX gap (the Devices page had nothing
+human-friendly to render). Both ship here. No pivot, no new pricing
+primitive, no ADR supersede.
+
+### Fixed
+
+- **Cursor subscription-included traffic is now priced locally instead of reading as $0** (#553). Pre-fix `budi stats -p today` showed Claude Code at $254 and Cursor at $16 after a day of comparable keyboard time across both tools — Cursor's JSONL shipped neither tokens nor model, and its dashboard Usage API at `/api/dashboard/get-filtered-usage-events` (documented in ADR-0090 §1) returns only billable overage events, so every subscription-included request read as $0. New local path reads `state.vscdb::cursorDiskKV` rows keyed `bubbleId:*` directly: Cursor persists real `tokenCount.inputTokens` / `tokenCount.outputTokens` / `modelInfo.modelName` / `createdAt` / `conversationId` per message, and the `json_extract`-powered SELECT in `crates/budi-core/src/providers/cursor.rs` surfaces each bubble as a `ParsedMessage` that flows through the existing pipeline. `CostEnricher` prices them via the standard manifest, so `pricing_source` lands as `embedded:v*` / `manifest:v*` — no Cursor-specific pricing code. Auto-mode bubbles (`modelInfo.modelName` empty or the literal `"default"`) rewrite to `claude-sonnet-4-5` via the new `CURSOR_AUTO_MODEL_FALLBACK` constant, matching Cursor's public "Auto ≈ Sonnet rates" statement and the [CodeBurn](https://github.com/getagentseal/codeburn/blob/main/src/providers/cursor.ts) reference implementation's convention. Deterministic row id `cursor:bubble:<conversationId>:<createdAt>:<inputTokens>:<outputTokens>` dedups bubbles against Usage API events describing the same activity; `INSERT OR IGNORE` keeps first-seen. Schema defense: missing `cursorDiskKV` table → one-time `cursor_bubble_schema_unrecognized` warn + `Ok(vec![])` so the sync tick still proceeds to the Usage API fallback. Dual-path coexistence during the validation window: the bubbles path advances a NEW watermark key `cursor-bubbles`, the existing Usage API path keeps its `cursor-api-usage` watermark; both run in the same `sync_direct` tick and advance independently. Semantic note now documented in the ADR-0090 amendment: the resulting Cursor number is list-price consumption, not a literal Cursor bill — same framing every other Budi provider surfaces, so cross-provider stats stay comparable. ADR-0090 gets a dated amendment pointing at the bubbles-first path; no supersede until one release cycle of live validation.
+
+### Added
+
+- **Cloud ingest envelope now includes a human-friendly `label` field** (#552). Pre-fix the budi-cloud dashboard's Devices page (siropkin/budi-cloud#58) had nothing readable to render per row and fell back to a truncated `dev_<id>` — the ingest envelope never carried anything device-level beyond the opaque id. Post-fix `SyncEnvelope` gains a `label: String` field populated on every ingest tick via `CloudConfig::effective_label`, sourced from `~/.config/budi/cloud.toml [cloud] label`. Precedence: key missing → local OS hostname via `pipeline::enrichers::get_hostname` (now `pub(crate)`; same resolver already used for message-level identity tags, so hostname renames propagate consistently across callers); key present including `label = ""` → value sent verbatim. Empty string is the documented opt-out — raw hostnames can be PII (ADR-0083), and the opt-out has to be edit-one-line simple. `budi cloud init` template gains a commented-out `label = "ivan-mbp"` hint so users discover the option without grepping the source. Paired cloud-side ticket siropkin/budi-cloud#60 persists the label on auto-register + subsequent ingests and renders it on `/dashboard/devices`.
+
+### Non-blocking, carried forward
+
+- **RC-4 Part B** (#504) — Cursor Usage API auth root-cause; Part A shipped with `v8.3.1`.
+- **ADR-0090 supersede** — pending one release cycle of live validation on the `cursorDiskKV` bubbles path before the Usage API §1 surface can be retired; ADR-0090's 2026-04-23 amendment documents the dual-path policy in the meantime.
+- **Detached daemon log capture** — daemons respawned directly by `budi update` run as a detached child whose stdout isn't captured by launchd's `StandardOutPath`, so the first post-update daemon's startup lines don't land in `~/Library/Logs/budi-daemon.log` until the next launchctl kickstart. Observability-only; carried from v8.3.6.
+
 ## 8.3.6 — 2026-04-23
 
 8.3.6 is a first-user-feedback-driven patch release on top of
