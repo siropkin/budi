@@ -1157,16 +1157,37 @@ fn sync_from_usage_api(
 ///
 /// Field ordering mirrors the SQL column order in [`read_cursor_bubbles`]
 /// so the `query_map` closure stays obviously in sync with the SELECT.
+///
+/// Schema lessons from the v8.3.7 live-smoke (#553 follow-up):
+/// - `$.conversationId` is never written by Cursor — the conversation id
+///   is embedded in the **row key** (`bubbleId:<conv-uuid>:<bubble-uuid>`),
+///   so we parse it out of `substr(key, 10, 36)` rather than
+///   `json_extract`.
+/// - `$.createdAt` is optional. On a live maintainer DB, 131 of 1,565
+///   token-bearing bubbles had no `createdAt`, and every `type=1` user
+///   bubble was missing it too. Those rows still need to ship tokens +
+///   model, so the reader falls back to the composer header's
+///   `createdAt` / `lastUpdatedAt` for a conversation-level timestamp,
+///   and dedup ids include the unique per-row `bubble_id` from the key.
 #[derive(Debug)]
 struct BubbleRow {
     input_tokens: u64,
     output_tokens: u64,
     model: Option<String>,
     /// Raw `$.createdAt` JSON value, rendered as TEXT by the SQL CAST.
-    /// Cursor has shipped this as either an ISO-8601 string or epoch ms;
-    /// [`parse_bubble_created_at`] handles both shapes.
+    /// Cursor has shipped this as either an ISO-8601 string, epoch ms,
+    /// or absent entirely; [`parse_bubble_created_at`] + the composer
+    /// fallback handle all three shapes.
     created_at: Option<String>,
+    /// Conversation id parsed from the row key, not the JSON value.
+    /// Every key observed in the wild is exactly 82 chars shaped
+    /// `bubbleId:<36-char conv-uuid>:<36-char bubble-uuid>`; shorter keys
+    /// degrade to `None` and the row is dropped.
     conversation_id: Option<String>,
+    /// Bubble id parsed from the same key. Used in the dedup uuid so
+    /// every distinct bubble gets a unique row even when `created_at`
+    /// is missing and tokens collide within a conversation.
+    bubble_id: Option<String>,
     /// Cursor's internal type code. `1` = user message, other values =
     /// assistant. Matches the CodeBurn reference implementation's
     /// convention, cross-verified against live rows.
@@ -1225,27 +1246,78 @@ fn warn_bubble_schema_once() {
     );
 }
 
+/// Fallback timestamps for bubble rows whose `$.createdAt` is missing,
+/// keyed on `conversation_id`. Populated once per call from
+/// `composer.composerHeaders` in `ItemTable`.
+type ComposerTsMap = std::collections::HashMap<String, i64>;
+
+/// Read `composer.composerHeaders` from the same `state.vscdb` and build
+/// a `conversation_id -> fallback_timestamp_ms` map. The fallback prefers
+/// `lastUpdatedAt` (latest conversation activity) because bubbles without
+/// an explicit `createdAt` in the JSON are the newest ones Cursor writes;
+/// if that's missing too, fall back to `createdAt`.
+///
+/// Errors are treated as "no fallback available" — the caller will drop
+/// bubbles without an explicit timestamp rather than pretending they
+/// landed at epoch zero.
+fn load_bubble_timestamp_fallbacks(vscdb: &Connection) -> ComposerTsMap {
+    let raw: String = match vscdb.query_row(
+        "SELECT value FROM ItemTable WHERE key = 'composer.composerHeaders'",
+        [],
+        |row| row.get(0),
+    ) {
+        Ok(v) => v,
+        Err(_) => return ComposerTsMap::new(),
+    };
+
+    let payload: ComposerHeadersPayload = match serde_json::from_str(&raw) {
+        Ok(p) => p,
+        Err(_) => return ComposerTsMap::new(),
+    };
+
+    let mut out = ComposerTsMap::new();
+    for composer in payload.all_composers {
+        if composer.composer_id.trim().is_empty() {
+            continue;
+        }
+        let ts = composer
+            .last_updated_at
+            .filter(|v| *v > 0)
+            .unwrap_or(composer.created_at);
+        if ts > 0 {
+            out.insert(composer.composer_id, ts);
+        }
+    }
+    out
+}
+
 /// Read Cursor per-message usage rows from the `cursorDiskKV` table in
 /// `state.vscdb`.
 ///
-/// Cursor stores per-bubble JSON under keys shaped `bubbleId:<uuid>`,
-/// carrying `tokenCount.inputTokens`, `tokenCount.outputTokens`,
-/// `modelInfo.modelName`, `createdAt`, `conversationId`, and `type`.
-/// Reading them directly gives exact per-message tokens and model
-/// without any network call, which is what #553 wants so that Cursor's
-/// subscription-included traffic stops reading as $0 in `budi stats`.
+/// Cursor stores per-bubble JSON under keys shaped
+/// `bubbleId:<conv-uuid>:<bubble-uuid>` (every observed key is exactly
+/// 82 chars). The JSON value carries `tokenCount.inputTokens`,
+/// `tokenCount.outputTokens`, `modelInfo.modelName`, and `type`.
+/// `createdAt` is optional and `conversationId` is never present — the
+/// schema-fix follow-up to #553 discovered both on the v8.3.7
+/// live-smoke, where the CodeBurn-derived assumption pointed at the
+/// wrong JSON paths.
+///
+/// Reading these rows directly gives exact per-message tokens and model
+/// without any network call, which is the whole point of #553 so
+/// Cursor's subscription-included traffic stops reading as $0.
 ///
 /// - `db_path` points at the `globalStorage/state.vscdb` we already
 ///   probed in `all_state_vscdb_paths`.
 /// - `since_ms` is an optional watermark in epoch-millis; rows whose
-///   `createdAt` parses to `<= since_ms` are skipped.
+///   effective timestamp parses to `<= since_ms` are skipped.
 ///
 /// When the `cursorDiskKV` table is missing (schema drift, empty DB, or
 /// we're pointed at a non-Cursor sqlite), returns `Ok(vec![])` after
 /// emitting a one-time schema-unrecognized warn. The Usage API path
 /// still runs in the same sync tick so the provider degrades gracefully.
 ///
-/// See [ADR-0090 §2026-04-XX](../../../../docs/adr/0090-cursor-usage-api-contract.md)
+/// See [ADR-0090 §2026-04-23](../../../../docs/adr/0090-cursor-usage-api-contract.md)
 /// for the dual-path policy during the #553 validation window.
 pub(crate) fn read_cursor_bubbles(
     db_path: &Path,
@@ -1270,6 +1342,13 @@ pub(crate) fn read_cursor_bubbles(
         return Ok(Vec::new());
     }
 
+    let fallbacks = load_bubble_timestamp_fallbacks(&vscdb);
+
+    // Key layout: `bubbleId:<conv-uuid>:<bubble-uuid>`. SQLite `substr`
+    // is 1-indexed, so `substr(key, 10, 36)` extracts the 36-char
+    // conversation uuid and `substr(key, 47, 36)` extracts the 36-char
+    // bubble uuid. `length(key) = 82` guards against malformed keys.
+    //
     // CAST `$.createdAt` AS TEXT so numeric timestamps (epoch ms) and
     // string timestamps (ISO 8601) both deserialize into the same
     // `Option<String>` — `parse_bubble_created_at` handles the split.
@@ -1279,10 +1358,12 @@ pub(crate) fn read_cursor_bubbles(
             COALESCE(json_extract(value, '$.tokenCount.outputTokens'), 0) AS output_tokens,
             json_extract(value, '$.modelInfo.modelName')                  AS model,
             CAST(json_extract(value, '$.createdAt') AS TEXT)              AS created_at,
-            json_extract(value, '$.conversationId')                       AS conversation_id,
+            substr(key, 10, 36)                                           AS conversation_id,
+            substr(key, 47, 36)                                           AS bubble_id,
             json_extract(value, '$.type')                                 AS type_code
          FROM cursorDiskKV
          WHERE key LIKE 'bubbleId:%'
+           AND length(key) = 82
            AND (
              json_extract(value, '$.tokenCount.inputTokens') > 0
              OR json_extract(value, '$.type') = 1
@@ -1305,7 +1386,8 @@ pub(crate) fn read_cursor_bubbles(
             model: row.get::<_, Option<String>>(2)?,
             created_at: row.get::<_, Option<String>>(3)?,
             conversation_id: row.get::<_, Option<String>>(4)?,
-            type_code: row.get::<_, Option<i64>>(5)?,
+            bubble_id: row.get::<_, Option<String>>(5)?,
+            type_code: row.get::<_, Option<i64>>(6)?,
         })
     })?;
 
@@ -1318,7 +1400,7 @@ pub(crate) fn read_cursor_bubbles(
                 continue;
             }
         };
-        if let Some(msg) = bubble_to_parsed_message(row, since_ms) {
+        if let Some(msg) = bubble_to_parsed_message(row, since_ms, &fallbacks) {
             parsed.push(msg);
         }
     }
@@ -1327,39 +1409,49 @@ pub(crate) fn read_cursor_bubbles(
 }
 
 /// Translate one decoded `BubbleRow` into a `ParsedMessage` ready for
-/// the pipeline. Returns `None` when the row is unreadable (missing
-/// timestamp/conversationId, or filtered by `since_ms`).
-fn bubble_to_parsed_message(row: BubbleRow, since_ms: Option<i64>) -> Option<ParsedMessage> {
-    let created_raw = row.created_at.as_deref()?;
-    let created_ms = parse_bubble_created_at(created_raw)?;
+/// the pipeline. Returns `None` when the row is unreadable (malformed
+/// key, or filtered by `since_ms` after resolving a timestamp).
+fn bubble_to_parsed_message(
+    row: BubbleRow,
+    since_ms: Option<i64>,
+    fallbacks: &ComposerTsMap,
+) -> Option<ParsedMessage> {
+    let conversation_id = row.conversation_id.as_deref().unwrap_or("").trim();
+    if conversation_id.is_empty() {
+        return None;
+    }
+    let bubble_id = row.bubble_id.as_deref().unwrap_or("").trim();
+    if bubble_id.is_empty() {
+        return None;
+    }
+
+    // Prefer the bubble's own `createdAt`; fall back to the composer
+    // header's `lastUpdatedAt` / `createdAt` (ms) when absent. The
+    // fallback buckets bubbles by conversation-level activity — a few
+    // ms off the true per-bubble time, but enough to keep date-buckets
+    // correct and the cost surface non-zero.
+    let created_ms = row
+        .created_at
+        .as_deref()
+        .and_then(parse_bubble_created_at)
+        .or_else(|| fallbacks.get(conversation_id).copied());
+    let created_ms = created_ms?;
     if let Some(w) = since_ms
         && created_ms <= w
     {
         return None;
     }
 
-    let conversation_id = row.conversation_id.as_deref().unwrap_or("").trim();
-    if conversation_id.is_empty() {
-        return None;
-    }
-
     let timestamp = DateTime::from_timestamp_millis(created_ms).unwrap_or_else(Utc::now);
     let is_user = row.type_code == Some(1);
 
-    // Mirrors the CodeBurn shape so bubbles that later appear on the
-    // Usage API dedup deterministically when uuids collide. User rows
-    // have zero tokens by construction; bake that into the id rather
-    // than trusting the (sometimes non-zero, sometimes absent) raw
-    // fields.
-    let (input_for_id, output_for_id) = if is_user {
-        (0u64, 0u64)
-    } else {
-        (row.input_tokens, row.output_tokens)
-    };
-    let uuid = format!(
-        "cursor:bubble:{}:{}:{}:{}",
-        conversation_id, created_ms, input_for_id, output_for_id
-    );
+    // Dedup id: `cursor:bubble:<conv-uuid>:<bubble-uuid>`. The
+    // bubble-uuid from the key is globally unique, so two distinct
+    // bubbles can't collide even when they share a conversation and
+    // identical token counts. Bubbles that later appear on the Usage
+    // API keep the deterministic `cursor-api-usage` uuid shape and
+    // live in a disjoint id namespace.
+    let uuid = format!("cursor:bubble:{conversation_id}:{bubble_id}");
 
     let session_id = Some(crate::identity::normalize_session_id(conversation_id));
 
@@ -2678,12 +2770,18 @@ mod tests {
     // --- cursorDiskKV bubble path (#553) ---
 
     /// Populate a brand-new `state.vscdb`-shaped SQLite file with a
-    /// `cursorDiskKV` table and the given rows. `(key, value_json)`
-    /// tuples are inserted verbatim.
+    /// `cursorDiskKV` + `ItemTable` fixture shaped like a real Cursor
+    /// `state.vscdb`. `bubble_rows` use the production key layout
+    /// (`bubbleId:<36-char conv>:<36-char bubble>`); `composer_ids` plants
+    /// a matching `composer.composerHeaders` row so the fallback
+    /// timestamp path has data to read.
     fn seed_bubble_db(path: &Path, rows: &[(&str, &str)]) {
         let conn = Connection::open(path).expect("open fixture db");
-        conn.execute_batch("CREATE TABLE cursorDiskKV (key TEXT PRIMARY KEY, value TEXT);")
-            .unwrap();
+        conn.execute_batch(
+            "CREATE TABLE cursorDiskKV (key TEXT PRIMARY KEY, value TEXT);
+             CREATE TABLE ItemTable (key TEXT PRIMARY KEY, value TEXT);",
+        )
+        .unwrap();
         for (key, value) in rows {
             conn.execute(
                 "INSERT INTO cursorDiskKV (key, value) VALUES (?1, ?2)",
@@ -2693,30 +2791,70 @@ mod tests {
         }
     }
 
+    /// Insert a `composer.composerHeaders` row covering the given
+    /// (composer_id, created_ms, last_updated_ms) triples so the
+    /// fallback-timestamp path has data to read.
+    fn seed_composer_headers(path: &Path, composers: &[(&str, i64, i64)]) {
+        let payload = serde_json::json!({
+            "allComposers": composers
+                .iter()
+                .map(|(id, c, u)| serde_json::json!({
+                    "composerId": id,
+                    "createdAt": c,
+                    "lastUpdatedAt": u,
+                }))
+                .collect::<Vec<_>>(),
+        });
+        let conn = Connection::open(path).expect("reopen fixture db");
+        conn.execute(
+            "INSERT INTO ItemTable (key, value) VALUES ('composer.composerHeaders', ?1)",
+            params![payload.to_string()],
+        )
+        .unwrap();
+    }
+
+    /// Pin the exact key layout every real `state.vscdb` on the
+    /// maintainer machine has — 82 chars, two 36-char UUIDs joined by
+    /// `bubbleId:` and a single colon. Tests use names like
+    /// `"00000000-0000-0000-0000-000000000001"` so the keys still read.
+    fn bubble_key(conv: &str, bubble: &str) -> String {
+        let k = format!("bubbleId:{conv}:{bubble}");
+        assert_eq!(k.len(), 82, "test key not 82 chars: {k}");
+        k
+    }
+
+    const FIXTURE_CONV_1: &str = "11111111-1111-1111-1111-111111111111";
+    const FIXTURE_CONV_2: &str = "22222222-2222-2222-2222-222222222222";
+    const FIXTURE_CONV_3: &str = "33333333-3333-3333-3333-333333333333";
+    const FIXTURE_BUBBLE_A: &str = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
+    const FIXTURE_BUBBLE_B: &str = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb";
+
     #[test]
     fn read_cursor_bubbles_returns_parsed_messages_from_fixture_db() {
         let dir = make_test_dir("cursor-bubbles-fixture");
         let db = dir.join("state.vscdb");
         let rows = [
             (
-                "bubbleId:conv-1:assistant-1",
-                r#"{"tokenCount":{"inputTokens":5000,"outputTokens":1200},"modelInfo":{"modelName":"claude-sonnet-4-6"},"createdAt":"2026-04-22T10:00:00.000Z","conversationId":"conv-1","type":2}"#,
+                bubble_key(FIXTURE_CONV_1, FIXTURE_BUBBLE_A),
+                r#"{"tokenCount":{"inputTokens":5000,"outputTokens":1200},"modelInfo":{"modelName":"claude-sonnet-4-6"},"createdAt":"2026-04-22T10:00:00.000Z","type":2}"#.to_string(),
             ),
             (
-                "bubbleId:conv-1:user-1",
-                r#"{"tokenCount":{"inputTokens":0,"outputTokens":0},"modelInfo":{"modelName":""},"createdAt":"2026-04-22T10:00:05.000Z","conversationId":"conv-1","type":1}"#,
+                bubble_key(FIXTURE_CONV_1, FIXTURE_BUBBLE_B),
+                r#"{"tokenCount":{"inputTokens":0,"outputTokens":0},"modelInfo":{"modelName":""},"createdAt":"2026-04-22T10:00:05.000Z","type":1}"#.to_string(),
             ),
             (
-                "bubbleId:conv-2:assistant-1",
-                r#"{"tokenCount":{"inputTokens":10000,"outputTokens":500},"modelInfo":{"modelName":"gpt-5"},"createdAt":1774555000000,"conversationId":"conv-2","type":2}"#,
+                bubble_key(FIXTURE_CONV_2, FIXTURE_BUBBLE_A),
+                r#"{"tokenCount":{"inputTokens":10000,"outputTokens":500},"modelInfo":{"modelName":"gpt-5"},"createdAt":1774555000000,"type":2}"#.to_string(),
             ),
-            // Noise: zero tokens + non-user type — must be filtered out.
+            // Noise: zero tokens + non-user type — filtered at the SQL WHERE.
             (
-                "bubbleId:conv-3:noise",
-                r#"{"tokenCount":{"inputTokens":0,"outputTokens":0},"createdAt":"2026-04-22T10:00:10.000Z","conversationId":"conv-3","type":2}"#,
+                bubble_key(FIXTURE_CONV_3, FIXTURE_BUBBLE_A),
+                r#"{"tokenCount":{"inputTokens":0,"outputTokens":0},"createdAt":"2026-04-22T10:00:10.000Z","type":2}"#.to_string(),
             ),
         ];
-        seed_bubble_db(&db, &rows);
+        let row_refs: Vec<(&str, &str)> =
+            rows.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+        seed_bubble_db(&db, &row_refs);
 
         let parsed = read_cursor_bubbles(&db, None).expect("read bubbles ok");
 
@@ -2731,13 +2869,13 @@ mod tests {
         assert_eq!(assistant_sonnet.input_tokens, 5000);
         assert_eq!(assistant_sonnet.output_tokens, 1200);
         assert_eq!(assistant_sonnet.role, "assistant");
-        assert_eq!(assistant_sonnet.session_id.as_deref(), Some("conv-1"));
+        assert_eq!(assistant_sonnet.session_id.as_deref(), Some(FIXTURE_CONV_1));
         assert_eq!(assistant_sonnet.provider, "cursor");
         assert!(assistant_sonnet.cost_cents.is_none());
-        assert!(
-            assistant_sonnet.uuid.starts_with("cursor:bubble:conv-1:"),
-            "unexpected uuid shape: {}",
-            assistant_sonnet.uuid,
+        let expected_uuid = format!("cursor:bubble:{FIXTURE_CONV_1}:{FIXTURE_BUBBLE_A}");
+        assert_eq!(
+            assistant_sonnet.uuid, expected_uuid,
+            "uuid must carry conv+bubble ids from the row key",
         );
 
         // Numeric epoch-ms createdAt is accepted too.
@@ -2746,19 +2884,20 @@ mod tests {
             .find(|m| m.model.as_deref() == Some("gpt-5"))
             .expect("gpt-5 row present");
         assert_eq!(gpt.input_tokens, 10000);
-        assert_eq!(gpt.session_id.as_deref(), Some("conv-2"));
+        assert_eq!(gpt.session_id.as_deref(), Some(FIXTURE_CONV_2));
 
-        // The user row rides through as role=user with zero tokens; id
-        // bakes zeros in so a later tokens-bearing assistant reply can't
-        // collide with it.
+        // User row: role=user, zero tokens. Uuid embeds its own bubble id
+        // so a tokens-bearing assistant reply in the same conversation
+        // cannot collide with it.
         let user_row = parsed
             .iter()
             .find(|m| m.role == "user")
             .expect("user row present");
-        assert_eq!(user_row.session_id.as_deref(), Some("conv-1"));
+        assert_eq!(user_row.session_id.as_deref(), Some(FIXTURE_CONV_1));
         assert_eq!(user_row.input_tokens, 0);
         assert_eq!(user_row.output_tokens, 0);
-        assert!(user_row.uuid.ends_with(":0:0"));
+        let expected_user_uuid = format!("cursor:bubble:{FIXTURE_CONV_1}:{FIXTURE_BUBBLE_B}");
+        assert_eq!(user_row.uuid, expected_user_uuid);
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -2769,19 +2908,21 @@ mod tests {
         let db = dir.join("state.vscdb");
         let rows = [
             (
-                "bubbleId:auto-empty:assistant",
-                r#"{"tokenCount":{"inputTokens":100,"outputTokens":50},"modelInfo":{"modelName":""},"createdAt":"2026-04-22T10:00:00.000Z","conversationId":"auto-empty","type":2}"#,
+                bubble_key(FIXTURE_CONV_1, FIXTURE_BUBBLE_A),
+                r#"{"tokenCount":{"inputTokens":100,"outputTokens":50},"modelInfo":{"modelName":""},"createdAt":"2026-04-22T10:00:00.000Z","type":2}"#.to_string(),
             ),
             (
-                "bubbleId:auto-default:assistant",
-                r#"{"tokenCount":{"inputTokens":200,"outputTokens":80},"modelInfo":{"modelName":"default"},"createdAt":"2026-04-22T10:01:00.000Z","conversationId":"auto-default","type":2}"#,
+                bubble_key(FIXTURE_CONV_2, FIXTURE_BUBBLE_A),
+                r#"{"tokenCount":{"inputTokens":200,"outputTokens":80},"modelInfo":{"modelName":"default"},"createdAt":"2026-04-22T10:01:00.000Z","type":2}"#.to_string(),
             ),
             (
-                "bubbleId:auto-missing:assistant",
-                r#"{"tokenCount":{"inputTokens":300,"outputTokens":120},"createdAt":"2026-04-22T10:02:00.000Z","conversationId":"auto-missing","type":2}"#,
+                bubble_key(FIXTURE_CONV_3, FIXTURE_BUBBLE_A),
+                r#"{"tokenCount":{"inputTokens":300,"outputTokens":120},"createdAt":"2026-04-22T10:02:00.000Z","type":2}"#.to_string(),
             ),
         ];
-        seed_bubble_db(&db, &rows);
+        let row_refs: Vec<(&str, &str)> =
+            rows.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+        seed_bubble_db(&db, &row_refs);
 
         let parsed = read_cursor_bubbles(&db, None).expect("read bubbles ok");
         assert_eq!(parsed.len(), 3);
@@ -2793,6 +2934,96 @@ mod tests {
             );
             assert_eq!(msg.role, "assistant");
         }
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Regression test for the v8.3.7 live-smoke finding: bubbles with
+    /// no `$.createdAt` in the JSON value must still ingest, using the
+    /// composer header's `lastUpdatedAt` as the conversation-level
+    /// fallback timestamp. Pre-fix these rows returned `None` and the
+    /// bulk of real-world traffic dropped silently.
+    #[test]
+    fn bubbles_without_created_at_fall_back_to_composer_timestamp() {
+        let dir = make_test_dir("cursor-bubbles-composer-fallback");
+        let db = dir.join("state.vscdb");
+        let rows = [(
+            bubble_key(FIXTURE_CONV_1, FIXTURE_BUBBLE_A),
+            r#"{"tokenCount":{"inputTokens":500,"outputTokens":200},"modelInfo":{"modelName":"claude-sonnet-4-6"},"type":2}"#.to_string(),
+        )];
+        let row_refs: Vec<(&str, &str)> =
+            rows.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+        seed_bubble_db(&db, &row_refs);
+        seed_composer_headers(
+            &db,
+            &[(FIXTURE_CONV_1, 1_774_000_000_000, 1_774_555_000_000)],
+        );
+
+        let parsed = read_cursor_bubbles(&db, None).expect("read bubbles ok");
+        assert_eq!(
+            parsed.len(),
+            1,
+            "composer fallback must cover missing createdAt"
+        );
+        let msg = &parsed[0];
+        assert_eq!(msg.input_tokens, 500);
+        assert_eq!(
+            msg.timestamp.timestamp_millis(),
+            1_774_555_000_000,
+            "fallback must use composer.lastUpdatedAt",
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Bubbles with neither `$.createdAt` nor a composer-header match
+    /// drop on the floor — pre-fix they'd land at `Utc::now()` and
+    /// pollute today's totals.
+    #[test]
+    fn bubbles_without_any_timestamp_are_dropped() {
+        let dir = make_test_dir("cursor-bubbles-no-ts");
+        let db = dir.join("state.vscdb");
+        let rows = [(
+            bubble_key(FIXTURE_CONV_1, FIXTURE_BUBBLE_A),
+            r#"{"tokenCount":{"inputTokens":500,"outputTokens":200},"type":2}"#.to_string(),
+        )];
+        let row_refs: Vec<(&str, &str)> =
+            rows.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+        seed_bubble_db(&db, &row_refs);
+        // No composer headers seeded → no fallback available.
+
+        let parsed = read_cursor_bubbles(&db, None).expect("read bubbles ok");
+        assert!(
+            parsed.is_empty(),
+            "rows without any timestamp source must not be invented",
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Malformed keys (not the 82-char `bubbleId:<conv>:<bubble>` shape)
+    /// never reach `bubble_to_parsed_message` — the SQL guard drops them.
+    #[test]
+    fn malformed_bubble_keys_are_filtered_at_sql() {
+        let dir = make_test_dir("cursor-bubbles-malformed-key");
+        let db = dir.join("state.vscdb");
+        let rows = [
+            (
+                "bubbleId:too-short".to_string(),
+                r#"{"tokenCount":{"inputTokens":1,"outputTokens":1},"createdAt":"2026-04-22T10:00:00.000Z","type":2}"#.to_string(),
+            ),
+            (
+                bubble_key(FIXTURE_CONV_1, FIXTURE_BUBBLE_A),
+                r#"{"tokenCount":{"inputTokens":1,"outputTokens":1},"createdAt":"2026-04-22T10:00:00.000Z","type":2}"#.to_string(),
+            ),
+        ];
+        let row_refs: Vec<(&str, &str)> =
+            rows.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+        seed_bubble_db(&db, &row_refs);
+
+        let parsed = read_cursor_bubbles(&db, None).expect("read bubbles ok");
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].session_id.as_deref(), Some(FIXTURE_CONV_1));
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -2828,10 +3059,12 @@ mod tests {
         let dir = make_test_dir("cursor-bubbles-ingest");
         let db = dir.join("state.vscdb");
         let rows = [(
-            "bubbleId:ingest-1:assistant",
-            r#"{"tokenCount":{"inputTokens":1000000,"outputTokens":100000},"modelInfo":{"modelName":"claude-sonnet-4-6"},"createdAt":"2026-04-22T10:00:00.000Z","conversationId":"ingest-1","type":2}"#,
+            bubble_key(FIXTURE_CONV_1, FIXTURE_BUBBLE_A),
+            r#"{"tokenCount":{"inputTokens":1000000,"outputTokens":100000},"modelInfo":{"modelName":"claude-sonnet-4-6"},"createdAt":"2026-04-22T10:00:00.000Z","type":2}"#.to_string(),
         )];
-        seed_bubble_db(&db, &rows);
+        let row_refs: Vec<(&str, &str)> =
+            rows.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+        seed_bubble_db(&db, &row_refs);
 
         let mut messages = read_cursor_bubbles(&db, None).expect("read ok");
         assert_eq!(messages.len(), 1);
