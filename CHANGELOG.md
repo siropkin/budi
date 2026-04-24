@@ -1,5 +1,27 @@
 # Changelog
 
+## 8.3.8 — 2026-04-23
+
+8.3.8 is a same-day follow-up on `v8.3.7` that lands the real fix for
+#553. The v8.3.7 post-tag live-smoke on the maintainer machine showed
+that the `cursorDiskKV` bubble reader lined up against the schema the
+[CodeBurn reference](https://github.com/getagentseal/codeburn/blob/main/src/providers/cursor.ts)
+documented, which turns out to diverge from what Cursor actually
+writes on disk: only 7 of 1,565 token-bearing bubble rows parsed, so
+`budi stats` still read like the pre-fix symptom the release was
+supposed to eliminate. No pivot, no new pricing primitive, no ADR
+supersede.
+
+### Fixed
+
+- **Cursor bubble reader now matches the real `state.vscdb` schema** (#553 follow-up / PR #557). Pre-fix v8.3.7's `read_cursor_bubbles` dropped bubble rows on two guards that read against the wrong JSON paths: (a) it filtered on `json_extract(value, '$.conversationId') != ''`, but Cursor never writes `$.conversationId` into the value — the conversation id is embedded in the row KEY, shaped `bubbleId:<36-char conv-uuid>:<36-char bubble-uuid>` (every key observed on the maintainer DB is exactly 82 chars); (b) it required `$.createdAt` to be present, but 131 of 1,565 token-bearing bubbles carry no `createdAt` and every `type=1` user-role bubble is missing it too. Post-fix the SQL parses `conversation_id` from `substr(key, 10, 36)` and `bubble_id` from `substr(key, 47, 36)` directly, gated on `length(key) = 82` so malformed keys are rejected before reaching the Rust decoder. New `load_bubble_timestamp_fallbacks` reads `ItemTable.composer.composerHeaders` once per call and builds a `conversation_id -> last_updated_at_ms` map so bubbles without `$.createdAt` fall back to the composer-level timestamp (day-bucket attribution stays correct, sub-minute ordering within a conversation may not match Cursor's UI). Bubbles with neither an explicit `createdAt` nor a composer-header match are dropped rather than invented at `Utc::now()` so they don't pollute today's totals. Dedup uuid shape changed from `cursor:bubble:<conv>:<created_ms>:<input>:<output>` to `cursor:bubble:<conv>:<bubble>` — uniqueness now comes from the row key itself, so two assistant bubbles with identical token counts in the same conversation can't collide. `budi db import --force` is the expected recovery path after `budi update` so v8.3.7-era bubbles re-ingest under the new uuid shape.
+
+### Non-blocking, carried forward
+
+- **RC-4 Part B** (#504) — Cursor Usage API auth root-cause; Part A shipped with `v8.3.1`.
+- **ADR-0090 supersede** — pending one release cycle of live validation on the now-working `cursorDiskKV` bubbles path before the Usage API §1 surface can be retired.
+- **Detached daemon log capture** — first post-`budi update` daemon's startup lines don't land in `~/Library/Logs/budi-daemon.log` until the next launchctl kickstart. Observability-only; carried from v8.3.6 / v8.3.7.
+
 ## 8.3.7 — 2026-04-23
 
 8.3.7 is a second dogfood-driven patch release on top of `v8.3.6`. The
