@@ -128,3 +128,19 @@ This ADR pins the **contract** (endpoints, auth, response shape, caveats). The *
 - **Historical pre-billing-period attribution.** The API does not expose it; Budi recovers what it can from composer headers and accepts the rest as unattributed (surfaced as `(model not yet attributed)` per [#443](https://github.com/siropkin/budi/issues/443)).
 - **Rewriting the `state.vscdb` schema read path.** That is a Cursor-provider implementation detail tracked separately.
 - **Adding a second outbound endpoint.** Any new Cursor-API endpoint Budi reads in the future requires amending this ADR before landing.
+
+## 2026-04-23 — `cursorDiskKV` bubbles become primary data source ([#553](https://github.com/siropkin/budi/issues/553))
+
+Per-message pricing now reads `state.vscdb::cursorDiskKV` bubble rows directly. Per-request tokens and model live in that table under keys shaped `bubbleId:<uuid>`, with JSON values exposing `tokenCount.inputTokens`, `tokenCount.outputTokens`, `modelInfo.modelName`, `createdAt`, `conversationId`, and `type` — every field needed to price the row without any network call. This is the data source the v8.3.5 post-tag dogfood smoke was missing: the Usage API path from §1 only returns the user's billable overage events, so the whole subscription-included consumption (the bulk of real Cursor use) read as $0 in `budi stats`.
+
+Implementation: `read_cursor_bubbles` in `crates/budi-core/src/providers/cursor.rs` opens the DB with `SQLITE_OPEN_READ_ONLY` and runs a single `json_extract`-powered SELECT against `cursorDiskKV`. `type = 1` rows map to `role = "user"` (zero tokens, `CostEnricher` tags them `unpriced:no_tokens` per #533); other rows map to `role = "assistant"`. When `modelInfo.modelName` is empty or the literal `"default"`, we rewrite to the `CURSOR_AUTO_MODEL_FALLBACK` constant (`claude-sonnet-4-5`), matching Cursor's public stance that Auto pricing tracks Sonnet. Deterministic row ids (`cursor:bubble:<conversationId>:<createdAt>:<inputTokens>:<outputTokens>`) dedup against Usage API events that describe the same activity.
+
+The `/api/dashboard/get-filtered-usage-events` path from §1 stays operational as a supplementary overage-attribution signal; both paths run in the same sync tick and advance independent watermark keys (`cursor-bubbles` vs `cursor-api-usage`). A future train will supersede this ADR wholesale once the bubbles path has been validated on live data for one release cycle.
+
+**Semantic note** — the resulting cost number is what the equivalent consumption would cost at direct-upstream rates (Anthropic / OpenAI). Cursor is a proxy with a flat subscription + overage, so this number is NOT a Cursor bill — it's the consumption value at list price, the same framing every other Budi provider surfaces. Cache-read savings read slightly low for Cursor because Cursor's backend-managed cache tiers are not exposed in the bubble schema.
+
+**Schema risk** — Cursor owns `cursorDiskKV`'s shape and can change field names / types in any point release. Mitigations: every `json_extract` path sits in a single SQL query, `createdAt` is cast to TEXT to tolerate both ISO-8601 and epoch-ms shapes, and a missing `cursorDiskKV` table emits one `cursor_bubble_schema_unrecognized` warn per process and falls through to the Usage API path so the provider degrades gracefully.
+
+**Supersede status** — not yet. The Usage API path, `extract_cursor_auth`, `CursorAuthIssue`, and the warn-once infrastructure all stay in place during the validation window. A later train removes them as a block once the bubbles path has been observed reliable on live data.
+
+Reference implementation: [`getagentseal/codeburn`](https://github.com/getagentseal/codeburn/blob/main/src/providers/cursor.ts) does the same `cursorDiskKV` parse in TypeScript. The SQL query shape and the Auto → Sonnet fallback are direct adaptations; everything else is Budi-native.
