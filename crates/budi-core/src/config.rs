@@ -472,6 +472,22 @@ pub struct CloudConfig {
     pub org_id: Option<String>,
     pub endpoint: String,
     pub sync: CloudSyncConfig,
+    /// Human-friendly device label included in every ingest envelope.
+    /// Rendered on the cloud dashboard's Devices page instead of the
+    /// truncated `dev_<id>` we ship by default.
+    ///
+    /// - `None` (TOML key absent) → default to the local OS hostname
+    ///   when the envelope is built.
+    /// - `Some("")` (TOML `label = ""`) → explicit opt-out; the cloud
+    ///   receives an empty label and falls back to whatever it renders
+    ///   for a missing value. Raw hostnames can be PII, so the opt-out
+    ///   path is deliberately surface-level simple (edit one line).
+    /// - `Some("ivan-mbp")` → sent verbatim on every ingest, so a
+    ///   rename propagates without re-linking the device.
+    ///
+    /// See [#552](https://github.com/siropkin/budi/issues/552) for the
+    /// full UX decision and the paired cloud-side persistence ticket.
+    pub label: Option<String>,
 }
 
 impl Default for CloudConfig {
@@ -483,6 +499,7 @@ impl Default for CloudConfig {
             org_id: None,
             endpoint: DEFAULT_CLOUD_ENDPOINT.to_string(),
             sync: CloudSyncConfig::default(),
+            label: None,
         }
     }
 }
@@ -532,6 +549,25 @@ impl CloudConfig {
             }
         }
         self.endpoint.clone()
+    }
+
+    /// Resolve the device label sent with each ingest envelope (#552).
+    ///
+    /// Precedence:
+    /// 1. `label` key present in `cloud.toml` → returned verbatim,
+    ///    including `""` (explicit opt-out — the user chose to share
+    ///    nothing human-readable).
+    /// 2. `label` key absent → the local OS hostname from
+    ///    [`crate::pipeline::enrichers::get_hostname`].
+    ///
+    /// An empty hostname still produces an empty string rather than a
+    /// panic; the cloud dashboard treats empty labels as "fall back to
+    /// whatever default label the server would render otherwise".
+    pub fn effective_label(&self) -> String {
+        if let Some(explicit) = self.label.as_ref() {
+            return explicit.clone();
+        }
+        crate::pipeline::enrichers::get_hostname()
     }
 
     /// Returns true only if cloud sync is configured enough to run:

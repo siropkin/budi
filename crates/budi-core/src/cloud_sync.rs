@@ -26,6 +26,12 @@ pub struct SyncEnvelope {
     pub schema_version: u32,
     pub device_id: String,
     pub org_id: String,
+    /// Human-friendly device label (#552). Populated from
+    /// [`CloudConfig::effective_label`] on every ingest, so a local
+    /// rename propagates without the user having to re-link. Always
+    /// serialized; an empty string is the explicit opt-out contract
+    /// documented on `CloudConfig::label`.
+    pub label: String,
     pub synced_at: String,
     pub payload: SyncPayload,
 }
@@ -502,6 +508,7 @@ pub fn build_sync_envelope(conn: &Connection, config: &CloudConfig) -> Result<Sy
         schema_version: 1,
         device_id,
         org_id,
+        label: config.effective_label(),
         synced_at: chrono::Utc::now().to_rfc3339(),
         payload: SyncPayload {
             daily_rollups,
@@ -837,6 +844,7 @@ mod tests {
                 schema_version: 1,
                 device_id: "dev_test".into(),
                 org_id: "org_test".into(),
+                label: "test-host".into(),
                 synced_at: "2026-04-12T00:00:00Z".into(),
                 payload: SyncPayload {
                     daily_rollups: vec![],
@@ -1069,6 +1077,7 @@ mod tests {
             schema_version: 1,
             device_id: "dev_test".into(),
             org_id: "org_test".into(),
+            label: "ivan-mbp".into(),
             synced_at: "2026-04-12T00:00:00Z".into(),
             payload: SyncPayload {
                 daily_rollups: vec![DailyRollupRecord {
@@ -1094,6 +1103,9 @@ mod tests {
         let json = serde_json::to_value(&envelope).unwrap();
         assert_eq!(json["schema_version"], 1);
         assert_eq!(json["device_id"], "dev_test");
+        // #552: label travels alongside device_id / org_id / synced_at
+        // on the envelope root.
+        assert_eq!(json["label"], "ivan-mbp");
         assert_eq!(
             json["payload"]["daily_rollups"][0]["bucket_day"],
             "2026-04-10"
@@ -1106,6 +1118,68 @@ mod tests {
                 .get("ticket_source")
                 .is_none()
         );
+    }
+
+    /// #552: when `cloud.toml` omits `label`, `effective_label()` falls
+    /// back to the local OS hostname. We don't pin the exact value —
+    /// the test host's hostname is whatever the CI image decided — but
+    /// it must match `get_hostname()` (same source of truth) so a
+    /// hostname change propagates consistently across callers.
+    #[test]
+    fn effective_label_defaults_to_hostname_when_unset() {
+        let config = CloudConfig::default();
+        assert!(config.label.is_none());
+        assert_eq!(
+            config.effective_label(),
+            crate::pipeline::enrichers::get_hostname(),
+        );
+    }
+
+    /// #552: explicit TOML value is sent verbatim, including an empty
+    /// string (documented as the opt-out contract on `CloudConfig::label`).
+    #[test]
+    fn effective_label_sends_explicit_value_verbatim() {
+        let explicit = CloudConfig {
+            label: Some("ivan-mbp".into()),
+            ..CloudConfig::default()
+        };
+        assert_eq!(explicit.effective_label(), "ivan-mbp");
+
+        let opt_out = CloudConfig {
+            label: Some(String::new()),
+            ..CloudConfig::default()
+        };
+        assert_eq!(
+            opt_out.effective_label(),
+            "",
+            "opt-out must send empty label rather than silently \
+             falling back to hostname — otherwise the user can't \
+             actually hide their hostname",
+        );
+    }
+
+    /// Round-trip through `build_sync_envelope` to confirm the label
+    /// lands on the envelope with the same precedence.
+    #[test]
+    fn build_envelope_populates_label_from_config() {
+        let dir = std::env::temp_dir().join("budi-cloud-sync-label-envelope");
+        std::fs::create_dir_all(&dir).ok();
+        let db_path = dir.join("test.db");
+        let _ = std::fs::remove_file(&db_path);
+
+        let conn = crate::analytics::open_db_with_migration(&db_path).unwrap();
+        let config = CloudConfig {
+            enabled: true,
+            api_key: Some("budi_test".into()),
+            device_id: Some("dev_test".into()),
+            org_id: Some("org_test".into()),
+            label: Some("ivan-mbp".into()),
+            ..CloudConfig::default()
+        };
+        let envelope = build_sync_envelope(&conn, &config).unwrap();
+        assert_eq!(envelope.label, "ivan-mbp");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     // Regression for #333: cloud_sync must produce the same ticket_id as the
