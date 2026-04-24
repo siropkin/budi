@@ -294,6 +294,12 @@ endpoint = \"https://app.getbudi.dev\"
 {device_id_line}
 {org_id_line}
 
+# Optional human-friendly label shown on the cloud Devices page (#552).
+# When commented out, budi defaults to this machine's OS hostname.
+# Uncomment and set a custom string to override. Set `label = \"\"` if you
+# want to opt out of sharing a readable label entirely.
+# label = \"ivan-mbp\"
+
 [cloud.sync]
 # Background sync interval in seconds. Defaults to 300 (5 minutes).
 interval_seconds = 300

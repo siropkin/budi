@@ -228,7 +228,7 @@ impl IdentityEnricher {
     }
 }
 
-fn get_hostname() -> String {
+pub(crate) fn get_hostname() -> String {
     // Fast paths that avoid spawning a subprocess
     if let Ok(h) = std::env::var("HOSTNAME")
         && !h.is_empty()
