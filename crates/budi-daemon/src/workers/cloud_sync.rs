@@ -19,27 +19,53 @@ use budi_core::config::CloudConfig;
 /// concurrently. If the flag is already set when the interval fires, the
 /// worker skips that tick — the manual invocation will advance the
 /// watermarks.
-pub async fn run(db_path: PathBuf, config: CloudConfig, cloud_syncing: Arc<AtomicBool>) {
-    let interval = Duration::from_secs(config.sync.interval_seconds);
-    let retry_max = config.sync.retry_max_seconds;
+///
+/// `initial_config` is only used for the very first tick's interval; from
+/// the second tick onward the worker re-reads `cloud.toml` at the top of
+/// every iteration so an api_key rotation (`budi cloud init --force`,
+/// cross-org switch per #559, manager-driven rotation) lands on the next
+/// sync without a daemon restart (#560).
+pub async fn run(db_path: PathBuf, initial_config: CloudConfig, cloud_syncing: Arc<AtomicBool>) {
+    let mut config = initial_config;
     let mut consecutive_failures: u32 = 0;
     let mut auth_failed = false;
     let mut schema_mismatch = false;
 
     loop {
+        // #560: re-read cloud.toml every tick so a rewritten api_key /
+        // endpoint / org_id / device_id propagates without a daemon
+        // restart. The on-disk read is a small TOML parse — cheap at the
+        // default 5-minute interval. The previous behaviour cloned the
+        // config captured at daemon startup, so a key rotation produced
+        // 401s indefinitely until the user `launchctl kickstart`'d the
+        // daemon manually.
+        let prev_api_key = config.effective_api_key();
+        let prev_endpoint = config.effective_endpoint();
+        config = budi_core::config::load_cloud_config();
+        let interval = Duration::from_secs(config.sync.interval_seconds);
+        let retry_max = config.sync.retry_max_seconds;
+
+        // If we were in auth-failed state and the api_key (or endpoint —
+        // self-hosted users may swap clouds) actually changed on disk,
+        // surface that so the recovery line correlates with the user's
+        // edit instead of firing every retry whether or not anything
+        // changed (the pre-#560 misleading "Cloud config refreshed,
+        // resuming sync" log).
+        if auth_failed && credentials_changed(prev_api_key.as_deref(), &prev_endpoint, &config) {
+            auth_failed = false;
+            tracing::info!("Cloud credentials changed on disk; resuming sync");
+        }
+
         // If auth failed, stop syncing (ADR-0083 §4: "stop syncing and prompt re-auth")
         if auth_failed {
             tracing::warn!(
                 "Cloud sync stopped: authentication failed. \
                  Check api_key in ~/.config/budi/cloud.toml."
             );
-            // Sleep long and re-check config in case user re-authenticates
+            // Sleep long; the next iteration re-reads cloud.toml and the
+            // `credentials_changed` check above will clear auth_failed if
+            // the user has rotated their key.
             tokio::time::sleep(Duration::from_secs(retry_max)).await;
-            let fresh_config = budi_core::config::load_cloud_config();
-            if fresh_config.is_ready() {
-                auth_failed = false;
-                tracing::info!("Cloud config refreshed, resuming sync");
-            }
             continue;
         }
 
@@ -135,6 +161,35 @@ pub async fn run(db_path: PathBuf, config: CloudConfig, cloud_syncing: Arc<Atomi
     }
 }
 
+/// #560: detect whether the credentials a sync tick would use just
+/// changed on disk. Used by the worker loop to decide whether a fresh
+/// `cloud.toml` read should clear an in-flight auth-failed state.
+///
+/// Returns `true` when the api_key the next tick would send differs
+/// from what the previous tick sent, OR when the endpoint changed
+/// (a rare but real path: self-hosted users swapping clouds). Returns
+/// `false` if the previous tick had no api_key — in that case there's
+/// no "rotation" to celebrate, the worker was simply waiting for a key
+/// to be added, and the regular `auth_failed` clear-on-success path
+/// will surface the recovery once a tick succeeds.
+fn credentials_changed(
+    prev_api_key: Option<&str>,
+    prev_endpoint: &str,
+    fresh: &CloudConfig,
+) -> bool {
+    let Some(prev_key) = prev_api_key else {
+        return false;
+    };
+    let fresh_key = match fresh.effective_api_key() {
+        Some(k) => k,
+        None => return false,
+    };
+    if fresh_key != prev_key {
+        return true;
+    }
+    fresh.effective_endpoint() != prev_endpoint
+}
+
 /// RAII guard that clears the `cloud_syncing` busy flag on drop.
 ///
 /// Shared between the background worker and the manual `POST /cloud/sync`
@@ -187,5 +242,84 @@ mod tests {
             !flag.load(Ordering::SeqCst),
             "guard must reset the cloud_syncing flag even on panic"
         );
+    }
+
+    fn cfg_with(api_key: &str, endpoint: &str) -> CloudConfig {
+        CloudConfig {
+            api_key: Some(api_key.to_string()),
+            endpoint: endpoint.to_string(),
+            ..CloudConfig::default()
+        }
+    }
+
+    #[test]
+    fn credentials_changed_detects_rotated_api_key() {
+        // #560 happy path: user ran `budi cloud init --force` with a new
+        // key. The worker must spot that and clear auth_failed instead
+        // of looping on the stale captured key forever.
+        let fresh = cfg_with("budi_NEW", "https://app.getbudi.dev");
+        assert!(credentials_changed(
+            Some("budi_OLD"),
+            "https://app.getbudi.dev",
+            &fresh
+        ));
+    }
+
+    #[test]
+    fn credentials_changed_detects_swapped_endpoint() {
+        // Self-hosted users sometimes swap which cloud the daemon talks
+        // to without rotating the api_key. Treat that as a credential
+        // change too — the auth-failed state was tied to the previous
+        // (endpoint, api_key) pair.
+        let fresh = cfg_with("budi_KEY", "https://cloud.example.com");
+        assert!(credentials_changed(
+            Some("budi_KEY"),
+            "https://app.getbudi.dev",
+            &fresh
+        ));
+    }
+
+    #[test]
+    fn credentials_changed_returns_false_when_unchanged() {
+        // Most common path: cloud.toml wasn't touched between ticks.
+        // Don't fire a "credentials changed" log every retry.
+        let fresh = cfg_with("budi_KEY", "https://app.getbudi.dev");
+        assert!(!credentials_changed(
+            Some("budi_KEY"),
+            "https://app.getbudi.dev",
+            &fresh
+        ));
+    }
+
+    #[test]
+    fn credentials_changed_returns_false_when_no_previous_key() {
+        // First-tick / cold-start path: the worker had no key to send
+        // yet, so a new key showing up on disk isn't a "rotation"
+        // recovery — the normal sync path will pick it up and clear any
+        // auth-failed state on its own.
+        let fresh = cfg_with("budi_KEY", "https://app.getbudi.dev");
+        assert!(!credentials_changed(
+            None,
+            "https://app.getbudi.dev",
+            &fresh
+        ));
+    }
+
+    #[test]
+    fn credentials_changed_returns_false_when_fresh_key_missing() {
+        // User edited cloud.toml mid-flight and removed the api_key
+        // (or commented it out). That's a config-degradation, not a
+        // recovery — the next sync tick will just AuthFailure and we
+        // re-enter the auth-failed loop with the same warning.
+        let fresh = CloudConfig {
+            endpoint: "https://app.getbudi.dev".to_string(),
+            ..CloudConfig::default()
+        };
+        assert!(fresh.api_key.is_none());
+        assert!(!credentials_changed(
+            Some("budi_KEY"),
+            "https://app.getbudi.dev",
+            &fresh
+        ));
     }
 }
