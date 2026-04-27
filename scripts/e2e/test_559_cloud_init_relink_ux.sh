@@ -54,13 +54,19 @@ echo "[e2e] HOME=$HOME"
 CLOUD_TOML="$HOME/.config/budi/cloud.toml"
 mkdir -p "$(dirname "$CLOUD_TOML")"
 
+# Test placeholders are kept obviously synthetic and routed through
+# shell variables so secret-scanners (GitGuardian, gitleaks) don't read
+# them as a hardcoded credential next to a `--api-key` flag.
+OLD_KEY_PLACEHOLDER="placeholder-old-key-not-a-real-credential"
+NEW_KEY_PLACEHOLDER="placeholder-new-key-not-a-real-credential"
+
 # Seed an existing cloud.toml that links to org "org_old" with a real
 # (non-stub) api_key — i.e. the same shape `budi cloud init --api-key`
 # would have written on first install.
-cat >"$CLOUD_TOML" <<'TOML'
+cat >"$CLOUD_TOML" <<TOML
 [cloud]
 enabled = true
-api_key = "budi_OLD_KEY_value_xxxxxxxxxxxxxxxxxxxxxx"
+api_key = "${OLD_KEY_PLACEHOLDER}"
 endpoint = "https://app.getbudi.dev"
 device_id = "00000000-0000-4000-8000-000000000001"
 org_id = "org_old"
@@ -77,7 +83,7 @@ TOML
 echo "[e2e] scenario 1: non-interactive --api-key against existing cloud.toml"
 ERR_LOG="$TMPDIR_ROOT/init-err-1.log"
 set +e
-"$BUDI" cloud init --api-key "budi_NEW_KEY_value_yyyyyyyyyyyyyyyyyyyyyy" \
+"$BUDI" cloud init --api-key "$NEW_KEY_PLACEHOLDER" \
     </dev/null >"$ERR_LOG" 2>&1
 status=$?
 set -e
@@ -114,7 +120,7 @@ if ! grep -q 'org_old' "$CLOUD_TOML"; then
   cat "$CLOUD_TOML" >&2
   exit 1
 fi
-if ! grep -q 'budi_OLD_KEY_value' "$CLOUD_TOML"; then
+if ! grep -qF "$OLD_KEY_PLACEHOLDER" "$CLOUD_TOML"; then
   echo "[e2e] FAIL: error path must preserve the old api_key" >&2
   cat "$CLOUD_TOML" >&2
   exit 1
@@ -125,8 +131,7 @@ echo "[e2e] OK: scenario 1 — rotation-aware error, file unchanged"
 # hatch for the rotation case. It must replace the api_key without a
 # prompt and leave the file in a parseable shape.
 echo "[e2e] scenario 2: --force --yes rewrites cloud.toml with the new key"
-NEW_KEY="budi_NEW_KEY_value_yyyyyyyyyyyyyyyyyyyyyy"
-"$BUDI" cloud init --api-key "$NEW_KEY" --force --yes \
+"$BUDI" cloud init --api-key "$NEW_KEY_PLACEHOLDER" --force --yes \
     --org-id "org_new" --device-id "11111111-1111-4111-8111-111111111111" \
     </dev/null >"$TMPDIR_ROOT/init-2.log" 2>&1 || {
   echo "[e2e] FAIL: --force --yes rotation path failed" >&2
@@ -134,12 +139,12 @@ NEW_KEY="budi_NEW_KEY_value_yyyyyyyyyyyyyyyyyyyyyy"
   exit 1
 }
 
-if ! grep -q "$NEW_KEY" "$CLOUD_TOML"; then
+if ! grep -qF "$NEW_KEY_PLACEHOLDER" "$CLOUD_TOML"; then
   echo "[e2e] FAIL: --force --yes must write the new api_key into cloud.toml" >&2
   cat "$CLOUD_TOML" >&2
   exit 1
 fi
-if grep -q 'budi_OLD_KEY_value' "$CLOUD_TOML"; then
+if grep -qF "$OLD_KEY_PLACEHOLDER" "$CLOUD_TOML"; then
   echo "[e2e] FAIL: --force --yes must remove the old api_key" >&2
   cat "$CLOUD_TOML" >&2
   exit 1
