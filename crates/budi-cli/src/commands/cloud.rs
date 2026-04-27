@@ -15,10 +15,11 @@
 
 use std::fs;
 use std::io::{self, IsTerminal, Write};
+use std::path::Path;
 
 use anyhow::{Context, Result, anyhow};
 use budi_core::cloud_sync::{WhoamiOutcome, whoami};
-use budi_core::config::{CLOUD_API_KEY_STUB, cloud_config_path, load_cloud_config};
+use budi_core::config::{CLOUD_API_KEY_STUB, CloudConfig, cloud_config_path, load_cloud_config};
 use serde_json::Value;
 
 use crate::StatsFormat;
@@ -42,6 +43,13 @@ const DEFAULT_CLOUD_ENDPOINT: &str = "https://app.getbudi.dev";
 /// error), the CLI falls back to the pre-#541 commented-placeholder
 /// template so a transient cloud outage never blocks a user from
 /// writing a config file.
+///
+/// 8.3.9 (#559) makes the relink path (org switch / API key rotation)
+/// seamless: when `--api-key KEY` is supplied interactively against an
+/// existing `cloud.toml`, the CLI prompts to overwrite instead of
+/// hard-erroring. Non-TTY callers still need `--force` as the explicit
+/// escape hatch; the error copy now names the existing org so the user
+/// recognizes what they're about to replace.
 pub fn cmd_cloud_init(
     api_key: Option<String>,
     force: bool,
@@ -53,23 +61,39 @@ pub fn cmd_cloud_init(
 
     let existed = path.exists();
     if existed {
-        if !force {
-            return Err(anyhow!(
-                "{} already exists. Pass --force to overwrite (existing settings will be replaced).",
-                path.display()
-            ));
-        }
-        // `--force` overwrite: if the current api_key looks real, require
-        // --yes or an interactive confirmation so a stray invocation doesn't
-        // silently clobber a working config. Stub keys / no keys overwrite
-        // freely because the prior install was never going to sync.
         let existing = load_cloud_config();
         let has_real_key = existing
             .api_key
             .as_deref()
             .map(|k| !k.is_empty() && k != CLOUD_API_KEY_STUB)
             .unwrap_or(false);
-        if has_real_key && !yes && !confirm_overwrite(&path)? {
+        let user_supplied_new_key = api_key
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .is_some();
+
+        if !force {
+            // #559: `--api-key KEY` against an existing file reads as
+            // "I'm relinking" (org switch / API key rotation). In a TTY
+            // we prompt and let the user accept the overwrite without
+            // having to learn about `--force`. Non-TTY callers (CI,
+            // scripts) still hit the error path so an automated run can
+            // never silently clobber a working config.
+            if user_supplied_new_key && io::stdin().is_terminal() {
+                if !confirm_relink(&path, &existing)? {
+                    println!("Aborted. {} left unchanged.", path.display());
+                    return Ok(());
+                }
+                // Confirmed — fall through to the write path.
+            } else {
+                return Err(rotation_aware_already_exists_error(&path, &existing));
+            }
+        } else if has_real_key && !yes && !confirm_overwrite(&path)? {
+            // `--force` overwrite: if the current api_key looks real, require
+            // --yes or an interactive confirmation so a stray invocation doesn't
+            // silently clobber a working config. Stub keys / no keys overwrite
+            // freely because the prior install was never going to sync.
             println!("Aborted. {} left unchanged.", path.display());
             return Ok(());
         }
@@ -309,7 +333,7 @@ retry_max_seconds = 300
     )
 }
 
-fn confirm_overwrite(path: &std::path::Path) -> Result<bool> {
+fn confirm_overwrite(path: &Path) -> Result<bool> {
     // We print to stdout rather than stderr so piped consumers that
     // dropped stdin still see the prompt line alongside the aborted
     // message. If stdin is not a TTY, treat the answer as "no" so an
@@ -331,6 +355,55 @@ fn confirm_overwrite(path: &std::path::Path) -> Result<bool> {
         answer.trim().to_ascii_lowercase().as_str(),
         "y" | "yes"
     ))
+}
+
+/// #559: TTY prompt fired when `budi cloud init --api-key KEY` runs
+/// against an existing `cloud.toml`. Names the org currently linked so
+/// the user can sanity-check what they're about to replace before
+/// confirming. Non-TTY callers never reach this — they take the
+/// rotation-aware error path and have to opt in via `--force`.
+fn confirm_relink(path: &Path, existing: &CloudConfig) -> Result<bool> {
+    if !io::stdin().is_terminal() {
+        return Ok(false);
+    }
+    print!(
+        "{} {}. Replace with the key you just supplied? [y/N] ",
+        path.display(),
+        describe_existing_link(existing),
+    );
+    io::stdout().flush().ok();
+    let mut answer = String::new();
+    if io::stdin().read_line(&mut answer).is_err() {
+        return Ok(false);
+    }
+    Ok(matches!(
+        answer.trim().to_ascii_lowercase().as_str(),
+        "y" | "yes"
+    ))
+}
+
+/// #559: rotation-aware replacement for the bare "file exists" error.
+/// Names the existing org and points at `--force` as the right escape
+/// hatch for the org-switch / key-rotation case. Used when the user
+/// hits the non-interactive path (no `--api-key`, or stdin not a TTY).
+fn rotation_aware_already_exists_error(path: &Path, existing: &CloudConfig) -> anyhow::Error {
+    anyhow!(
+        "{} {}. If you're switching orgs or rotating your API key, re-run with --force to replace it with the key you just supplied (existing settings will be overwritten).",
+        path.display(),
+        describe_existing_link(existing),
+    )
+}
+
+/// One-liner describing what `cloud.toml` is currently linked to,
+/// suitable for embedding in a prompt or error message. Falls back to
+/// a generic phrase when the file is malformed or `org_id` is absent
+/// (e.g. a partially edited template) so we never print a quoted empty
+/// string.
+fn describe_existing_link(existing: &CloudConfig) -> String {
+    match existing.org_id.as_deref() {
+        Some(id) if !id.is_empty() => format!("already points to org \"{id}\""),
+        _ => "already exists".to_string(),
+    }
 }
 
 fn render_init_text(path: &std::path::Path, existed: bool, enabled: bool, seed: &SeedOutcome) {
@@ -793,5 +866,71 @@ mod tests {
         let got = seeded.seeded_ids().unwrap();
         assert_eq!(got.org_id.as_deref(), Some("org_x"));
         assert_eq!(got.org_id_source, Some(IdentitySource::Whoami));
+    }
+
+    fn config_with_org(org_id: Option<&str>) -> CloudConfig {
+        CloudConfig {
+            org_id: org_id.map(|s| s.to_string()),
+            ..CloudConfig::default()
+        }
+    }
+
+    #[test]
+    fn describe_existing_link_names_org_when_present() {
+        // #559: prompts and error messages should name the linked org so
+        // the user can sanity-check what they're about to overwrite.
+        let cfg = config_with_org(Some("org_xEvtA"));
+        assert_eq!(
+            describe_existing_link(&cfg),
+            "already points to org \"org_xEvtA\"",
+        );
+    }
+
+    #[test]
+    fn describe_existing_link_falls_back_when_org_id_missing() {
+        // #559: a partially edited template (no org_id) shouldn't print
+        // a quoted empty string. Fall back to the generic phrase.
+        let cfg = config_with_org(None);
+        assert_eq!(describe_existing_link(&cfg), "already exists");
+
+        let empty = config_with_org(Some(""));
+        assert_eq!(
+            describe_existing_link(&empty),
+            "already exists",
+            "empty org_id should not produce \"\" in the message",
+        );
+    }
+
+    #[test]
+    fn rotation_aware_error_names_org_and_points_at_force() {
+        // #559: bare "already exists" was confusing in the rotation
+        // path. The new copy should name the org and explain when
+        // --force is the right escape hatch.
+        let path = std::path::PathBuf::from("/tmp/cloud.toml");
+        let cfg = config_with_org(Some("org_old"));
+        let err = rotation_aware_already_exists_error(&path, &cfg).to_string();
+        assert!(
+            err.contains("org \"org_old\""),
+            "error must name the existing org: {err}",
+        );
+        assert!(
+            err.contains("--force"),
+            "error must point at --force as the escape hatch: {err}",
+        );
+        assert!(
+            err.contains("switching orgs") || err.contains("rotating"),
+            "error must call out the rotation/switch case: {err}",
+        );
+    }
+
+    #[test]
+    fn rotation_aware_error_falls_back_when_org_id_missing() {
+        // Partial config (no org_id) still gets a useful error — just
+        // without the org name.
+        let path = std::path::PathBuf::from("/tmp/cloud.toml");
+        let cfg = config_with_org(None);
+        let err = rotation_aware_already_exists_error(&path, &cfg).to_string();
+        assert!(err.contains("--force"));
+        assert!(!err.contains("org \"\""));
     }
 }
