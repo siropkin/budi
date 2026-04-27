@@ -1,5 +1,29 @@
 # Changelog
 
+## 8.3.9 — 2026-04-27
+
+8.3.9 is a cloud-rotation-correctness patch release on top of `v8.3.8`.
+Two paired tickets shipped together: the user-facing `budi cloud init`
+UX for re-linking after an API key rotation, and the daemon-side bug
+that kept the rotation from actually working without a process
+restart. Both surfaced from a single dogfood session immediately after
+the cross-org switch flow shipped in `budi-cloud` PR #73 — the cloud
+side worked, but the local CLI told users they "did something wrong"
+and the daemon kept POSTing the stale Bearer token until restart. No
+pivot, no new pricing / ingest behavior, no ADR amendments.
+
+### Fixed
+
+- **`budi cloud sync` now picks up a rotated `api_key` on the next tick instead of 401-ing indefinitely until daemon restart** (#560 / PR #562). Pre-fix the cloud sync worker captured `CloudConfig` at daemon startup and reused that clone for every tick — `let cfg = config.clone()` in `crates/budi-daemon/src/workers/cloud_sync.rs` always rebuilt the `Authorization: Bearer …` header from the value cached at boot. The auth-failed recovery branch *did* re-load `cloud.toml` via `load_cloud_config()`, but only to flip its own `auth_failed` flag — the next `sync_tick` still ran against the captured-at-startup config, so a key rotation produced 401s every 5 minutes indefinitely. Real evidence from a dogfood session today: daemon up at 22:33:57 PDT on 2026-04-23, last successful sync at 10:10:41 PDT, `cloud.toml` rewritten by `cloud init --force` at 10:15:42, first 401 at 10:15:41, 401 every interval thereafter for hours. Post-fix the worker re-reads `cloud.toml` at the top of every loop iteration so a rewritten `api_key` / `endpoint` / `org_id` / `device_id` propagates without a daemon restart; the on-disk read is a small TOML parse — cheap at the default 5-minute interval. The previous "Cloud config refreshed, resuming sync" log (which fired every retry whether or not anything changed) gets replaced with a credential-diff'd `"Cloud credentials changed on disk; resuming sync"` line that only emits when the `api_key` or `endpoint` actually changed on disk, gated by a new `credentials_changed(prev_api_key, prev_endpoint, fresh)` helper covered by 5 unit tests (rotation, endpoint swap, no-op retry, cold start, key removed). `initial_config` is now documented as "first-tick interval only" so the captured-at-startup confusion doesn't recur.
+
+- **`budi cloud init` re-link path no longer reads as "you did something wrong"** (#559 / PR #561). Pre-fix re-running `budi cloud init --api-key NEW_KEY` against an existing `cloud.toml` (org switch via the cross-org flow shipped in `budi-cloud` PR #73, manager-driven key rotation, lost-device re-provision) bailed with the bare *"already exists. Pass --force to overwrite (existing settings will be replaced)"* error — a path that's now expected enough to deserve real ergonomics. Post-fix the CLI prompts in a TTY and surfaces a rotation-aware error in non-TTY: when `--api-key KEY` is supplied interactively against an existing `cloud.toml`, the new `confirm_relink` prompt names the org currently linked (`"~/.config/budi/cloud.toml already points to org \"org_xEvtA\". Replace with the key you just supplied? [y/N]"`) so the user can sanity-check what they're about to overwrite before confirming. CI / scripted callers (no TTY) hit a new `rotation_aware_already_exists_error` that names the existing org and explicitly mentions `--force` as the right escape hatch for the org-switch / key-rotation case, instead of the bare "Pass --force to overwrite" wording that pre-#559 users read as a blame line. `--force` keeps working unchanged as the non-interactive escape hatch for CI / scripted callers, with the existing `--yes` requirement to silence the overwrite confirmation when a real (non-stub) key is being replaced. Pinned by 4 new unit tests on `describe_existing_link` / `rotation_aware_already_exists_error` plus a new e2e regression `scripts/e2e/test_559_cloud_init_relink_ux.sh` that asserts the rotation-aware error wording, points at `--force`, and confirms `--force --yes` still rotates cleanly.
+
+### Non-blocking, carried forward
+
+- **RC-4 Part B** (#504) — Cursor Usage API auth root-cause; Part A shipped with `v8.3.1`.
+- **ADR-0090 supersede** — pending one release cycle of live validation on the now-working `cursorDiskKV` bubbles path before the Usage API §1 surface can be retired.
+- **Detached daemon log capture** — first post-`budi update` daemon's startup lines don't land in `~/Library/Logs/budi-daemon.log` until the next launchctl kickstart. Observability-only; carried from v8.3.6 / v8.3.7.
+
 ## 8.3.8 — 2026-04-23
 
 8.3.8 is a same-day follow-up on `v8.3.7` that lands the real fix for
