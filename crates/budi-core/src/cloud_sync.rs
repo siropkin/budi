@@ -167,6 +167,29 @@ pub fn set_session_watermark(conn: &Connection, timestamp: &str) -> Result<()> {
     Ok(())
 }
 
+/// #564: drop the three cloud-sync sentinel rows so the next push falls
+/// into the no-watermark path of `fetch_daily_rollups` /
+/// `fetch_session_summaries` and re-uploads everything from
+/// `message_rollups_daily` + `sessions`. Used by `budi cloud reset` after
+/// the cloud loses historical rows (org switch, device_id rotation,
+/// cloud-side wipe). Cloud-side dedup (ADR-0083 §6) makes the re-upload
+/// safe even when records overlap with what the cloud already has.
+///
+/// Returns the number of sentinel rows that were removed (0..=3) so the
+/// caller can decide whether to print "watermarks reset" vs "no watermarks
+/// to reset".
+pub fn reset_cloud_watermarks(conn: &Connection) -> Result<usize> {
+    let removed = conn.execute(
+        "DELETE FROM sync_state WHERE file_path IN (?1, ?2, ?3)",
+        params![
+            CLOUD_SYNC_WATERMARK_KEY,
+            format!("{CLOUD_SYNC_WATERMARK_KEY}_value"),
+            CLOUD_SYNC_SESSION_WATERMARK_KEY,
+        ],
+    )?;
+    Ok(removed)
+}
+
 /// Snapshot of the cloud sync state for reporting via `budi cloud status`.
 ///
 /// Captures configuration readiness, the last successful sync watermarks, and
@@ -879,6 +902,71 @@ mod tests {
         assert_eq!(
             get_session_watermark(&conn).unwrap().as_deref(),
             Some("2026-04-10T10:00:00Z")
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn reset_cloud_watermarks_drops_sentinel_rows() {
+        // #564: dropping the three sentinel rows must move the daemon
+        // back to the no-watermark path so the next sync re-sends every
+        // local rollup + session summary. After reset, getters return
+        // None — the same shape a fresh install reports.
+        let dir = std::env::temp_dir().join("budi-cloud-sync-test-reset");
+        std::fs::create_dir_all(&dir).ok();
+        let db_path = dir.join("test.db");
+        let _ = std::fs::remove_file(&db_path);
+
+        let conn = crate::analytics::open_db_with_migration(&db_path).unwrap();
+        set_cloud_watermark(&conn, "2026-04-10").unwrap();
+        set_session_watermark(&conn, "2026-04-10T10:00:00Z").unwrap();
+
+        let removed = reset_cloud_watermarks(&conn).unwrap();
+        assert_eq!(
+            removed, 3,
+            "all three sentinels (rollup-completed, rollup-value, session) must be removed",
+        );
+        assert!(get_cloud_watermark_value(&conn).unwrap().is_none());
+        assert!(get_session_watermark(&conn).unwrap().is_none());
+
+        // Idempotent: a second reset is a no-op (returns 0 rows
+        // removed). Lets the CLI render the right "nothing to reset"
+        // line without an extra existence check.
+        let removed_again = reset_cloud_watermarks(&conn).unwrap();
+        assert_eq!(removed_again, 0);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn reset_cloud_watermarks_leaves_unrelated_rows_alone() {
+        // The DELETE must be scoped to the cloud sentinels — never
+        // touch ingestion offsets / tail offsets / completion markers
+        // that share `sync_state`. A regression here would silently
+        // re-import every JSONL transcript on the next tick.
+        let dir = std::env::temp_dir().join("budi-cloud-sync-test-reset-scope");
+        std::fs::create_dir_all(&dir).ok();
+        let db_path = dir.join("test.db");
+        let _ = std::fs::remove_file(&db_path);
+
+        let conn = crate::analytics::open_db_with_migration(&db_path).unwrap();
+        crate::analytics::set_sync_offset(&conn, "/tmp/transcript.jsonl", 4096).unwrap();
+        crate::analytics::mark_sync_completed(&conn).unwrap();
+        set_cloud_watermark(&conn, "2026-04-10").unwrap();
+
+        reset_cloud_watermarks(&conn).unwrap();
+
+        // Ingestion offset survives.
+        assert_eq!(
+            crate::analytics::get_sync_offset(&conn, "/tmp/transcript.jsonl").unwrap(),
+            4096,
+        );
+        // Sync-completion marker survives.
+        assert!(
+            crate::analytics::last_sync_completed_at(&conn)
+                .unwrap()
+                .is_some(),
         );
 
         let _ = std::fs::remove_dir_all(&dir);

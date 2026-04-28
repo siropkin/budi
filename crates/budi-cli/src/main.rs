@@ -325,7 +325,9 @@ Examples:
   budi cloud init --api-key KEY  Write the key and enable sync in one step
   budi cloud status              Show cloud sync readiness and last sync
   budi cloud sync                Push queued local data to the cloud now
-  budi cloud sync --format json  JSON output (exit code 2 on failure)")]
+  budi cloud sync --format json  JSON output (exit code 2 on failure)
+  budi cloud reset               Reset watermarks so next sync re-uploads all
+  budi cloud reset --yes         Same, non-interactive (CI / scripts)")]
     Cloud {
         #[command(subcommand)]
         action: CloudAction,
@@ -423,6 +425,20 @@ enum CloudAction {
         /// Output format: text (default) or json
         #[arg(short, long, value_enum, default_value_t = StatsFormat::Text)]
         format: StatsFormat,
+    },
+    /// Drop the cloud sync watermarks so the next sync re-uploads everything
+    ///
+    /// Useful after switching orgs, rotating an api_key, or recovering from a
+    /// cloud-side data wipe — the daemon's local watermark is org-blind and
+    /// keeps the cloud "ahead" of where it actually is until the watermark is
+    /// reset (#564). Cloud-side dedup means the re-upload is safe even if some
+    /// records overlap with rows the cloud already has.
+    Reset {
+        /// Skip the interactive confirmation. Required for non-TTY callers
+        /// (CI, scripts) — otherwise the prompt aborts to avoid a silent
+        /// re-upload on a stray invocation.
+        #[arg(long, default_value_t = false)]
+        yes: bool,
     },
 }
 
@@ -707,6 +723,7 @@ fn main() -> Result<()> {
             } => commands::cloud::cmd_cloud_init(api_key, force, yes, device_id, org_id),
             CloudAction::Status { format } => commands::cloud::cmd_cloud_status(format),
             CloudAction::Sync { format } => commands::cloud::cmd_cloud_sync(format),
+            CloudAction::Reset { yes } => commands::cloud::cmd_cloud_reset(yes),
         },
         Commands::Pricing { action } => match action {
             PricingAction::Status { format, refresh } => {
@@ -1109,6 +1126,30 @@ mod tests {
                 action: CloudAction::Status { format },
             } => assert!(matches!(format, StatsFormat::Json)),
             _ => panic!("expected cloud status command"),
+        }
+    }
+
+    #[test]
+    fn cli_parses_cloud_reset() {
+        // #564: bare `budi cloud reset` parses and defaults to
+        // interactive (yes=false). `--yes` is the non-interactive
+        // escape hatch CI / scripts need so the prompt isn't a
+        // hard block.
+        let cli = Cli::try_parse_from(["budi", "cloud", "reset"]).expect("budi cloud reset parses");
+        match cli.command {
+            Commands::Cloud {
+                action: CloudAction::Reset { yes },
+            } => assert!(!yes, "default invocation must be interactive"),
+            _ => panic!("expected cloud reset command"),
+        }
+
+        let cli = Cli::try_parse_from(["budi", "cloud", "reset", "--yes"])
+            .expect("budi cloud reset --yes parses");
+        match cli.command {
+            Commands::Cloud {
+                action: CloudAction::Reset { yes },
+            } => assert!(yes, "--yes must skip the confirmation"),
+            _ => panic!("expected cloud reset --yes command"),
         }
     }
 

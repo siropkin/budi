@@ -536,6 +536,99 @@ pub fn cmd_cloud_status(format: StatsFormat) -> Result<()> {
     Ok(())
 }
 
+/// #564: `budi cloud reset` — drop the local cloud-sync watermarks so the
+/// next sync re-uploads every rollup + session summary in
+/// `message_rollups_daily` / `sessions`. The user-visible escape hatch
+/// after the cloud loses historical rows (org switch, device_id rotation,
+/// cloud-side wipe). Cloud-side dedup (ADR-0083 §6) keeps the re-upload
+/// safe even when records overlap with what the cloud already has.
+///
+/// Routes through the daemon's `POST /cloud/reset` so SQLite stays
+/// daemon-owned and the reset takes the same `cloud_syncing` busy flag a
+/// background tick would — that way a manual reset can never race a
+/// concurrent envelope build that already read the about-to-be-deleted
+/// watermark.
+pub fn cmd_cloud_reset(yes: bool) -> Result<()> {
+    let cfg = load_cloud_config();
+    if !confirm_reset(&cfg, yes)? {
+        println!("Aborted. Watermarks left unchanged.");
+        return Ok(());
+    }
+
+    let client = DaemonClient::connect()?;
+    let body = client
+        .cloud_reset()
+        .context("failed to reset cloud sync watermarks via the daemon")?;
+
+    let removed = body.get("removed").and_then(Value::as_u64).unwrap_or(0) as usize;
+    render_reset_text(&cfg, removed);
+    Ok(())
+}
+
+fn confirm_reset(cfg: &CloudConfig, yes: bool) -> Result<bool> {
+    if yes {
+        return Ok(true);
+    }
+    if !io::stdin().is_terminal() {
+        return Err(anyhow!(
+            "`budi cloud reset` requires confirmation. Re-run with --yes to skip the prompt (required for non-interactive shells)."
+        ));
+    }
+    print!(
+        "This will reset the cloud sync watermarks for {}.\nThe next `budi cloud sync` will re-upload all local rollups and session summaries to the cloud.\nContinue? [y/N] ",
+        describe_reset_target(cfg),
+    );
+    io::stdout().flush().ok();
+    let mut answer = String::new();
+    if io::stdin().read_line(&mut answer).is_err() {
+        return Ok(false);
+    }
+    Ok(matches!(
+        answer.trim().to_ascii_lowercase().as_str(),
+        "y" | "yes"
+    ))
+}
+
+/// Phrase the prompt + post-reset line so the user sees which org they
+/// are about to re-upload to. Falls back to a generic phrase when
+/// `cloud.toml` is missing or partial — `budi cloud reset` still works
+/// in those cases (the watermarks live in SQLite, independent of the
+/// TOML), but we don't want to print `org ""`.
+fn describe_reset_target(cfg: &CloudConfig) -> String {
+    match cfg.org_id.as_deref() {
+        Some(id) if !id.is_empty() => format!("org \"{id}\""),
+        _ => "the configured cloud endpoint".to_string(),
+    }
+}
+
+fn render_reset_text(cfg: &CloudConfig, removed: usize) {
+    let green = ansi("\x1b[32m");
+    let yellow = ansi("\x1b[33m");
+    let dim = ansi("\x1b[90m");
+    let bold = ansi("\x1b[1m");
+    let reset = ansi("\x1b[0m");
+
+    println!();
+    if removed == 0 {
+        println!(
+            "  {yellow}!{reset} {bold}No cloud sync watermarks were set.{reset} The next `budi cloud sync` already starts from scratch."
+        );
+    } else {
+        println!(
+            "  {green}✓{reset} {bold}Cloud sync watermarks reset for {}.{reset}",
+            describe_reset_target(cfg),
+        );
+        println!(
+            "    {dim}removed{reset}    {removed} sentinel row{}",
+            if removed == 1 { "" } else { "s" },
+        );
+    }
+    println!(
+        "    {dim}next step{reset}  run {bold}budi cloud sync{reset} to push everything now, or wait for the next interval tick"
+    );
+    println!();
+}
+
 fn render_sync_text(body: &Value) {
     let green = ansi("\x1b[32m");
     let red = ansi("\x1b[31m");
@@ -932,5 +1025,31 @@ mod tests {
         let err = rotation_aware_already_exists_error(&path, &cfg).to_string();
         assert!(err.contains("--force"));
         assert!(!err.contains("org \"\""));
+    }
+
+    #[test]
+    fn describe_reset_target_names_org_when_present() {
+        // #564: the reset prompt and post-reset line both name the
+        // currently-linked org so the user can sanity-check what
+        // they are about to re-upload to.
+        let cfg = config_with_org(Some("org_xEvtA"));
+        assert_eq!(describe_reset_target(&cfg), "org \"org_xEvtA\"");
+    }
+
+    #[test]
+    fn describe_reset_target_falls_back_when_org_id_missing() {
+        // #564: a partial / malformed `cloud.toml` shouldn't print a
+        // quoted empty string. The reset path still works (watermarks
+        // live in SQLite, independent of the TOML), so we just print a
+        // generic phrase.
+        let cfg = config_with_org(None);
+        assert_eq!(describe_reset_target(&cfg), "the configured cloud endpoint",);
+
+        let empty = config_with_org(Some(""));
+        assert_eq!(
+            describe_reset_target(&empty),
+            "the configured cloud endpoint",
+            "empty org_id should not produce \"\" in the message",
+        );
     }
 }

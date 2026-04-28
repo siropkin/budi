@@ -69,6 +69,7 @@ fn build_router(app_state: AppState) -> Router {
         .route("/sync/all", post(h::analytics_history))
         .route("/sync/reset", post(h::analytics_sync_reset))
         .route("/cloud/sync", post(c::cloud_sync))
+        .route("/cloud/reset", post(c::cloud_reset))
         .route("/pricing/refresh", post(p::pricing_refresh))
         .route("/admin/providers", get(a::analytics_registered_providers))
         .route("/admin/schema", get(a::analytics_schema_version))

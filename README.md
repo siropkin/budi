@@ -306,6 +306,7 @@ budi cloud init                    # generate ~/.config/budi/cloud.toml from a c
 budi cloud init --api-key KEY      # write the key + enable sync in one step
 budi cloud status                  # cloud sync readiness + last-synced-at + queued records
 budi cloud sync                    # push queued local rollups to the cloud now
+budi cloud reset                   # reset watermarks so the next sync re-uploads everything (org switch / data wipe)
 budi autostart status              # check daemon autostart service
 budi autostart install             # install the autostart service
 budi autostart uninstall           # remove the autostart service
