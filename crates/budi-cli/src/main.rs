@@ -1135,8 +1135,7 @@ mod tests {
         // interactive (yes=false). `--yes` is the non-interactive
         // escape hatch CI / scripts need so the prompt isn't a
         // hard block.
-        let cli =
-            Cli::try_parse_from(["budi", "cloud", "reset"]).expect("budi cloud reset parses");
+        let cli = Cli::try_parse_from(["budi", "cloud", "reset"]).expect("budi cloud reset parses");
         match cli.command {
             Commands::Cloud {
                 action: CloudAction::Reset { yes },

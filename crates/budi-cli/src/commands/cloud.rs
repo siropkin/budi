@@ -560,10 +560,7 @@ pub fn cmd_cloud_reset(yes: bool) -> Result<()> {
         .cloud_reset()
         .context("failed to reset cloud sync watermarks via the daemon")?;
 
-    let removed = body
-        .get("removed")
-        .and_then(Value::as_u64)
-        .unwrap_or(0) as usize;
+    let removed = body.get("removed").and_then(Value::as_u64).unwrap_or(0) as usize;
     render_reset_text(&cfg, removed);
     Ok(())
 }
@@ -1046,10 +1043,7 @@ mod tests {
         // live in SQLite, independent of the TOML), so we just print a
         // generic phrase.
         let cfg = config_with_org(None);
-        assert_eq!(
-            describe_reset_target(&cfg),
-            "the configured cloud endpoint",
-        );
+        assert_eq!(describe_reset_target(&cfg), "the configured cloud endpoint",);
 
         let empty = config_with_org(Some(""));
         assert_eq!(
