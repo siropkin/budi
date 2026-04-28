@@ -1,5 +1,31 @@
 # Changelog
 
+## 8.3.10 — 2026-04-28
+
+8.3.10 closes out the "after an org switch on the cloud, my daemon is
+in a weird state" arc that started with #559 / #560 in `v8.3.9`. Those
+two patches fixed the *future-tick* case (rotated key now propagates,
+re-link UX is sane); this release adds the *past-history* recovery
+hatch — once the cloud has lost the rows the daemon already pushed,
+the local watermark needs to be reset so the next sync re-uploads
+everything. Independently reproduced by Stacy on a fresh `v8.3.9`
+install the day this was filed. No new ingest / pricing behavior, no
+ADR amendments.
+
+### Fixed
+
+- **`budi cloud reset` re-uploads every local rollup + session summary after the cloud loses them** (#564 / PR #567, with #566 closed as a duplicate). Pre-fix the daemon's cloud sync was watermark-incremental and the watermark was org-blind: after an org switch (or device_id rotation, or cloud-side data wipe) the cloud no longer had the rows the watermark *implied* it had, but the next `sync_tick` still queried for `bucket_day > local_watermark` and only sent today's bucket. Real evidence from the dogfood session that surfaced this: 1,856 local rollups spanning 2025-08-27 → today, cloud `/v1/ingest/status` reporting `total_rollup_records: 26`, cloud Ivan-row at `$55.01` for `days=7` while local `-p 7d` showed `$1,913.82`. Post-fix `budi cloud reset` drops the three sentinel rows in `sync_state` (`__budi_cloud_sync__`, `__budi_cloud_sync___value`, `__budi_cloud_sync_sessions__`) so the next `budi cloud sync` falls into the no-watermark path of `fetch_daily_rollups` / `fetch_session_summaries` and re-uploads everything; cloud-side dedup (ADR-0083 §6) keeps the re-upload safe even when records overlap with rows the cloud already has. Routes through the daemon's new `POST /cloud/reset` (loopback-protected, takes the same `cloud_syncing` busy flag as `/cloud/sync` so a manual reset can never race a concurrent envelope build that already read the about-to-be-deleted watermark). The CLI prompts in a TTY and names the linked org so the user can sanity-check the target before re-uploading; non-TTY callers (CI, scripts) need `--yes` so a stray invocation can never silently re-upload. Pinned by 5 new unit tests covering the watermark-drop helper (idempotent + scoped — ingestion offsets / `__budi_sync_completed__` survive, regression guard against accidentally re-importing every transcript), the clap-level subcommand parse, and the prompt-copy fallbacks for missing / empty `org_id`.
+
+### Docs
+
+- **README rework** (#565). Tighter structure with prominent ecosystem links to `siropkin/budi-cloud` and `siropkin/budi-cursor`. No CLI / wire / data-shape changes — pure docs.
+
+### Non-blocking, carried forward
+
+- **RC-4 Part B** (#504) — Cursor Usage API auth root-cause; Part A shipped with `v8.3.1`.
+- **ADR-0090 supersede** — pending one release cycle of live validation on the now-working `cursorDiskKV` bubbles path before the Usage API §1 surface can be retired.
+- **Detached daemon log capture** — first post-`budi update` daemon's startup lines don't land in `~/Library/Logs/budi-daemon.log` until the next launchctl kickstart. Observability-only; carried from v8.3.6 / v8.3.7.
+
 ## 8.3.9 — 2026-04-27
 
 8.3.9 is a cloud-rotation-correctness patch release on top of `v8.3.8`.
