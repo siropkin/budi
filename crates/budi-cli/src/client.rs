@@ -376,6 +376,22 @@ impl DaemonClient {
         Ok(resp.json()?)
     }
 
+    /// `POST /cloud/reset` — drop the cloud-sync watermarks so the next
+    /// sync re-uploads every local rollup + session summary (#564).
+    ///
+    /// Returns the same `{ok, result, removed, message}` shape on success
+    /// and a 409 `busy` error when the worker / a manual sync are mid-flight.
+    pub fn cloud_reset(&self) -> Result<Value> {
+        let resp = self
+            .client
+            .post(format!("{}/cloud/reset", self.base_url))
+            .timeout(std::time::Duration::from_secs(30))
+            .send()
+            .map_err(describe_send_error)?;
+        let resp = check_response(resp)?;
+        Ok(resp.json()?)
+    }
+
     /// `GET /cloud/status` — read cloud sync readiness and watermarks.
     /// Never blocks on the network; the daemon only reads local state.
     pub fn cloud_status(&self) -> Result<Value> {

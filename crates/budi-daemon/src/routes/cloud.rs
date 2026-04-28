@@ -112,6 +112,69 @@ pub async fn cloud_sync(
     Ok(Json(report_to_json(report)))
 }
 
+/// `POST /cloud/reset` — drop the cloud-sync watermarks so the next
+/// sync re-uploads every local rollup + session summary (#564).
+///
+/// User-driven escape hatch for org switches, device_id rotations, and
+/// cloud-side data wipes that leave the daemon's incremental watermark
+/// "ahead" of where the cloud actually is. Cloud-side dedup
+/// (ADR-0083 §6) keeps the re-upload safe even when records overlap
+/// with rows the cloud already has.
+///
+/// This route is loopback-protected (see `build_router` in `main.rs`)
+/// because it mutates `sync_state`. We grab the same `cloud_syncing`
+/// busy flag as `/cloud/sync` so a manual reset can never race a
+/// background tick that already built an envelope against the
+/// soon-to-be-deleted watermark — that would push under the old
+/// watermark, then the reset would land, then the next tick would
+/// re-push everything anyway. Holding the flag keeps the sequencing
+/// honest. Returns 409 when the worker (or another `cloud sync`) is
+/// already running so the operator can re-run after it finishes.
+pub async fn cloud_reset(
+    State(state): State<AppState>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    if state
+        .cloud_syncing
+        .compare_exchange(
+            false,
+            true,
+            std::sync::atomic::Ordering::SeqCst,
+            std::sync::atomic::Ordering::SeqCst,
+        )
+        .is_err()
+    {
+        return Err((
+            StatusCode::CONFLICT,
+            Json(json!({
+                "ok": false,
+                "error": "cloud sync already running — wait for it to finish, then re-run `budi cloud reset`",
+                "result": "busy"
+            })),
+        ));
+    }
+
+    let flag = state.cloud_syncing.clone();
+    let removed = tokio::task::spawn_blocking(move || -> anyhow::Result<usize> {
+        let _guard = CloudBusyFlagGuard::new(flag);
+        let db_path = analytics::db_path()?;
+        let conn = analytics::open_db(&db_path)?;
+        cloud_sync::reset_cloud_watermarks(&conn)
+    })
+    .await
+    .map_err(|e| super::internal_error(anyhow::anyhow!("cloud reset task panicked: {e}")))?
+    .map_err(super::internal_error)?;
+
+    let cfg = config::load_cloud_config();
+    Ok(Json(json!({
+        "ok": true,
+        "result": "reset",
+        "endpoint": cfg.effective_endpoint(),
+        "org_id": cfg.org_id,
+        "removed": removed,
+        "message": "Cloud sync watermarks reset. Run `budi cloud sync` to push everything now, or wait for the next interval tick.",
+    })))
+}
+
 fn not_ready_body(result: &str, cfg: &CloudConfig, message: &str) -> Value {
     json!({
         "ok": false,
