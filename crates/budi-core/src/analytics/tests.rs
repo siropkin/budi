@@ -6172,8 +6172,7 @@ fn migration_backfills_session_timestamps_from_messages() {
     )
     .unwrap();
 
-    let healed =
-        crate::migration::backfill_session_timestamps_from_messages(&conn).unwrap();
+    let healed = crate::migration::backfill_session_timestamps_from_messages(&conn).unwrap();
     assert_eq!(healed, 2);
 
     let (cc_start, cc_end): (Option<String>, Option<String>) = conn
@@ -6197,8 +6196,7 @@ fn migration_backfills_session_timestamps_from_messages() {
     assert_eq!(cx_end.as_deref(), Some("2026-04-29T12:00:00+00:00"));
 
     // Idempotent: subsequent run touches nothing.
-    let again =
-        crate::migration::backfill_session_timestamps_from_messages(&conn).unwrap();
+    let again = crate::migration::backfill_session_timestamps_from_messages(&conn).unwrap();
     assert_eq!(again, 0);
 }
 
@@ -6225,8 +6223,7 @@ fn backfill_does_not_overwrite_existing_session_timestamps() {
     )
     .unwrap();
 
-    let healed =
-        crate::migration::backfill_session_timestamps_from_messages(&conn).unwrap();
+    let healed = crate::migration::backfill_session_timestamps_from_messages(&conn).unwrap();
     assert_eq!(healed, 0);
 
     let (start, end): (Option<String>, Option<String>) = conn
