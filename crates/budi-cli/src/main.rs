@@ -426,9 +426,9 @@ enum CloudAction {
     ///
     /// `--full` drops the local cloud-sync watermarks before the push so the
     /// next sync re-uploads every rollup + session summary. Equivalent to
-    /// running `budi cloud reset && budi cloud sync` in one step (#583). The
-    /// re-upload is safe — cloud-side dedup (ADR-0083 §6) collapses any
-    /// records that overlap with what the cloud already has.
+    /// running `budi cloud reset && budi cloud sync` in one step. The
+    /// re-upload is safe — cloud-side dedup collapses any records that
+    /// overlap with what the cloud already has.
     Sync {
         /// Output format: text (default) or json
         #[arg(short, long, value_enum, default_value_t = StatsFormat::Text)]
