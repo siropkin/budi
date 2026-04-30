@@ -1,5 +1,32 @@
 # Changelog
 
+## 8.3.13 — 2026-04-29
+
+8.3.13 is a same-day follow-up on `v8.3.12` that closes out two
+parallel bugs in the `sessions` heal pass that #569 / PR #570
+introduced. Both surfaced during v8.3.12 release validation against
+the cloud Sessions page after a fresh `budi cloud reset && budi cloud
+sync` re-uploaded everything: claude_code and codex sessions reached
+the cloud, but every row rendered as `Repo = (unknown) / Branch = -`
+and every active session showed `Duration = <1m`. No new ingest /
+pricing behavior, no ADR amendments, no wire / data-shape changes —
+the wire and the cloud already accept everything we now send; the heal
+just wasn't filling enough columns and was freezing one of them too
+early.
+
+### Fixed
+
+- **`sessions.repo_id` / `sessions.git_branch` now populated for claude_code & codex** (#577 / PR #579). Pre-fix the heal pass added in PR #570 only filled `started_at` / `ended_at`. Every claude_code (992/992) and codex (67/67) session row stayed with `repo_id IS NULL AND git_branch IS NULL` even though the underlying `messages` rows carried both for ~99% of rows (149,324 messages with repo_id, 151,083 with git_branch on the maintainer DB). `cloud_sync::fetch_session_summaries` SELECTs `s.repo_id, s.git_branch` straight off `sessions`, so cloud `/dashboard/sessions` rendered every row as `(unknown) / -`. Post-fix the heal pass in `analytics::sync` (per-batch) and `migration::backfill_session_timestamps_from_messages` (post-tick + boot) backfills both columns from the matching session's most-recent message — latest-known wins for branch so a mid-session branch switch is reflected; `COALESCE(NULLIF(…, ''), …)` preserves any authoritative session-row value already set. Pinned by 2 new unit tests covering claude_code + codex hydration with a mid-session branch switch and the preserve-already-populated invariant.
+
+- **`sessions.ended_at` now advances as new messages arrive for in-flight sessions** (#578 / PR #579). Pre-fix `ended_at = COALESCE(ended_at, MAX(messages.timestamp))` froze the column at the first ingest tick's MAX. Active sessions still streaming new messages stayed at the timestamp of message #3 (~1.85 s after start) forever, and the WHERE-guard `(started_at IS NULL OR ended_at IS NULL)` made every subsequent heal-pass run skip the row. Real evidence from the maintainer DB the day this was filed: session `ba1e53ac-…` had `ended_at = 02:37:08` while `messages` for the session spanned 02:37:07 → 03:11:44 (270 rows over 34 minutes). Cloud Sessions rendered every recent claude_code row as `Duration = <1m` while older sessions (whose first heal-pass tick happened to land late in their lifetime) showed plausible durations. Post-fix the heal always recomputes `MAX(messages.timestamp)` for any session whose stored `ended_at` lags. `started_at` keeps `COALESCE` since it's immutable. The WHERE clause is tightened so the heal stays idempotent on a stable DB — repo / branch holes are only counted when the matching messages actually carry repo / branch. Pinned by an explicit regression-guard unit test that pre-populates a session row with `started_at = X, ended_at = X+1s`, ingests messages spanning 30 minutes, and asserts `ended_at` advances to the new MAX (pre-fix asserted it stayed frozen at `X+1s`).
+
+### Non-blocking, carried forward
+
+- **Cloud Overview cost / token totals diverge from local CLI** — cloud Overview "All time" reads $2,322 / 118.9 M tokens / 40.2 K messages while local `budi stats -p all` reads $11,267 / 1.07 B in+out / 169.6 K messages. Sessions counts roughly match (cloud 2.4 K vs local 2,356). Likely cloud aggregates differ from local `cost_cents` (e.g. excludes cache costs from the totals) and cloud `Messages` is summed off `session_summaries.message_count` which is `COUNT(role='assistant')`, not all-roles. Tracked in #10 ; not blocking 8.3.13 since it's a presentation-layer concern, not data loss.
+- **RC-4 Part B** (#504) — Cursor Usage API auth root-cause; Part A shipped with `v8.3.1`.
+- **ADR-0090 supersede** — pending one release cycle of live validation on the now-working `cursorDiskKV` bubbles path before the Usage API §1 surface can be retired.
+- **Detached daemon log capture** — first post-`budi update` daemon's startup lines don't land in `~/Library/Logs/budi-daemon.log` until the next launchctl kickstart. Observability-only; carried from v8.3.6 / v8.3.7.
+
 ## 8.3.12 — 2026-04-29
 
 8.3.12 is a same-day follow-up to `v8.3.11`. Verifying the
