@@ -239,9 +239,18 @@ fn report_to_json(report: SyncTickReport) -> Value {
         envelope_sessions,
         server_records_upserted,
         server_watermark,
+        chunks_total,
+        chunks_succeeded,
     } = report;
 
     let (ok, result_tag, message) = match &result {
+        SyncResult::Success(_) if chunks_total > 0 && chunks_succeeded < chunks_total => (
+            true,
+            RESULT_SUCCESS,
+            format!(
+                "Cloud sync partially complete: {chunks_succeeded}/{chunks_total} chunks confirmed. Re-run `budi cloud sync` to push the rest."
+            ),
+        ),
         SyncResult::Success(_) => (
             true,
             RESULT_SUCCESS,
@@ -258,11 +267,27 @@ fn report_to_json(report: SyncTickReport) -> Value {
             "Authentication failed (401). Check `api_key` in ~/.config/budi/cloud.toml."
                 .to_string(),
         ),
+        SyncResult::SchemaMismatch(msg) if chunks_succeeded > 0 => (
+            false,
+            RESULT_SCHEMA_MISMATCH,
+            format!(
+                "Server rejected chunk {} of {chunks_total} as schema-incompatible (422) after confirming {chunks_succeeded}. Update budi to resume syncing. Detail: {msg}",
+                chunks_succeeded + 1,
+            ),
+        ),
         SyncResult::SchemaMismatch(msg) => (
             false,
             RESULT_SCHEMA_MISMATCH,
             format!(
                 "Server rejected the payload as schema-incompatible (422). Update budi to resume syncing. Detail: {msg}"
+            ),
+        ),
+        SyncResult::TransientError(msg) if chunks_succeeded > 0 => (
+            false,
+            RESULT_TRANSIENT_ERROR,
+            format!(
+                "Cloud sync hit a transient error on chunk {} of {chunks_total} after confirming {chunks_succeeded}: {msg}",
+                chunks_succeeded + 1,
             ),
         ),
         SyncResult::TransientError(msg) => (
@@ -281,6 +306,8 @@ fn report_to_json(report: SyncTickReport) -> Value {
         "rollups_attempted": envelope_rollups,
         "sessions_attempted": envelope_sessions,
         "watermark": server_watermark,
+        "chunks_total": chunks_total,
+        "chunks_succeeded": chunks_succeeded,
     })
 }
 
@@ -312,12 +339,16 @@ mod tests {
             envelope_sessions: 0,
             server_records_upserted: Some(5),
             server_watermark: Some("2026-04-17".into()),
+            chunks_total: 1,
+            chunks_succeeded: 1,
         };
         let body = report_to_json(report);
         assert_eq!(body["ok"], true);
         assert_eq!(body["result"], RESULT_SUCCESS);
         assert_eq!(body["records_upserted"], 5);
         assert_eq!(body["watermark"], "2026-04-17");
+        assert_eq!(body["chunks_total"], 1);
+        assert_eq!(body["chunks_succeeded"], 1);
     }
 
     #[test]
@@ -329,6 +360,8 @@ mod tests {
             envelope_sessions: 0,
             server_records_upserted: None,
             server_watermark: None,
+            chunks_total: 0,
+            chunks_succeeded: 0,
         };
         let body = report_to_json(report);
         assert_eq!(body["ok"], true);
@@ -344,11 +377,37 @@ mod tests {
             envelope_sessions: 4,
             server_records_upserted: None,
             server_watermark: None,
+            chunks_total: 1,
+            chunks_succeeded: 0,
         };
         let body = report_to_json(report);
         assert_eq!(body["ok"], false);
         assert_eq!(body["result"], RESULT_AUTH_FAILURE);
         assert_eq!(body["rollups_attempted"], 3);
         assert_eq!(body["sessions_attempted"], 4);
+    }
+
+    #[test]
+    fn report_to_json_transient_after_partial_success_includes_progress() {
+        // #572: partial-success message must tell the operator how
+        // many chunks landed so re-run is obviously the next step.
+        let report = SyncTickReport {
+            result: SyncResult::TransientError("Server returned 413".into()),
+            endpoint: "https://app.getbudi.dev".into(),
+            envelope_rollups: 1500,
+            envelope_sessions: 800,
+            server_records_upserted: Some(1000),
+            server_watermark: Some("2026-04-15".into()),
+            chunks_total: 5,
+            chunks_succeeded: 2,
+        };
+        let body = report_to_json(report);
+        assert_eq!(body["ok"], false);
+        assert_eq!(body["result"], RESULT_TRANSIENT_ERROR);
+        assert_eq!(body["chunks_total"], 5);
+        assert_eq!(body["chunks_succeeded"], 2);
+        let msg = body["message"].as_str().unwrap();
+        assert!(msg.contains("chunk 3 of 5"), "got: {msg}");
+        assert!(msg.contains("after confirming 2"), "got: {msg}");
     }
 }
