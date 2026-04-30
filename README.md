@@ -147,11 +147,11 @@ budi db import
 ```bash
 budi status                  # daemon health + today's cost
 budi stats                   # cost and token summary
-budi stats --projects        # repos ranked by cost
-budi stats --branches        # branches ranked by cost
-budi stats --tickets         # tickets ranked by cost
-budi stats --models          # model breakdown
-budi stats --files           # files ranked by cost
+budi stats projects          # repos ranked by cost
+budi stats branches          # branches ranked by cost
+budi stats tickets           # tickets ranked by cost
+budi stats models            # model breakdown
+budi stats files             # files ranked by cost
 budi sessions                # recent sessions with cost and health
 budi sessions <id>           # session detail: cost, models, health, tags
 budi vitals                  # session health for the latest session
@@ -271,21 +271,21 @@ budi db import --format json       # JSON output with per-agent file/message bre
 ```bash
 budi status                        # quick overview: daemon and today's cost
 budi stats                         # usage summary with cost breakdown
-budi stats --models                # model usage breakdown
-budi stats --projects              # repos ranked by cost
-budi stats --projects --include-non-repo  # also show per-folder detail for non-repo work
-budi stats --branches              # branches ranked by cost
-budi stats --branch <name>         # cost for a specific branch
-budi stats --tickets               # tickets ranked by cost
-budi stats --ticket <id>           # cost for a specific ticket, with per-branch breakdown
-budi stats --activities            # activities ranked by cost (bugfix, refactor, …)
-budi stats --activity <name>       # cost for a specific activity, with per-branch breakdown
-budi stats --files                 # files ranked by cost (repo-relative paths only)
-budi stats --file <path>           # cost for a specific file, with per-branch + per-ticket breakdown
+budi stats models                  # model usage breakdown
+budi stats projects                # repos ranked by cost
+budi stats projects --include-non-repo  # also show per-folder detail for non-repo work
+budi stats branches                # branches ranked by cost
+budi stats branch <name>           # cost for a specific branch
+budi stats tickets                 # tickets ranked by cost
+budi stats ticket <id>             # cost for a specific ticket, with per-branch breakdown
+budi stats activities              # activities ranked by cost (bugfix, refactor, …)
+budi stats activity <name>         # cost for a specific activity, with per-branch breakdown
+budi stats files                   # files ranked by cost (repo-relative paths only)
+budi stats file <path>             # cost for a specific file, with per-branch + per-ticket breakdown
 budi stats --provider codex        # filter stats to a single provider
-budi stats --tag ticket_id         # cost per ticket value (raw tag view)
-budi stats --tag ticket_prefix     # cost per team prefix
-budi stats --files --limit 0       # show every row (default limit is 30)
+budi stats tag ticket_id           # cost per ticket value (raw tag view)
+budi stats tag ticket_prefix       # cost per team prefix
+budi stats files --limit 0         # show every row (default limit is 30)
 budi sessions                      # list recent sessions with cost and health
 budi sessions --ticket <id>        # sessions tagged with a ticket
 budi sessions --activity <name>    # sessions tagged with an activity

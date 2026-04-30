@@ -201,7 +201,7 @@ CLI, daemon, and dashboard tell the same story (see ADR-0082 and
      earlier NULL-branch rows in the same session.
   3. **`Unassigned` repo + empty branch** — last-resort fallback. Rows in
      this state fold into the `(untagged)` DB bucket and render as
-     `(no branch)` in `budi stats --branches` (#450).
+     `(no branch)` in `budi stats branches` (#450).
 
   A detached HEAD (`gitBranch == "HEAD"`) is normalized to empty so that
   worktrees, mid-rebase sessions, and CI runs do not pollute the branches
@@ -233,9 +233,9 @@ CLI, daemon, and dashboard tell the same story (see ADR-0082 and
   models (suppressed from default output behind `--include-pending`).
 
   Surfaces:
-  - `budi stats --tickets` — list ranked by cost, with a `(no ticket)`
+  - `budi stats tickets` — list ranked by cost, with a `(no ticket)`
     bucket and a `src=…` column showing the dominant `ticket_source`.
-  - `budi stats --ticket <ID>` — detail view with per-branch breakdown
+  - `budi stats ticket <ID>` — detail view with per-branch breakdown
     and a `Source` row. Legacy rows without a `ticket_source` sibling
     tag default to `branch` (the legacy pipeline producer) so older
     DBs stay readable without a reindex.
@@ -270,11 +270,11 @@ CLI, daemon, and dashboard tell the same story (see ADR-0082 and
   value wins, ties broken alphabetically), falling back to `rule` /
   `medium` only when an activity has no companion tags yet (legacy data).
   Surfaces:
-  - `budi stats --activities` — list ranked by cost, with an
+  - `budi stats activities` — list ranked by cost, with an
     `(unclassified)` bucket (#450) for messages that never matched a
     classification rule (short prompts, slash commands, metadata-only
     messages).
-  - `budi stats --activity <NAME>` — detail view with per-branch
+  - `budi stats activity <NAME>` — detail view with per-branch
     breakdown, plus `source` and `confidence` labels.
   - `budi sessions --activity <NAME>` — sessions tagged with the
     activity, mirroring `--ticket`.
@@ -309,12 +309,12 @@ CLI, daemon, and dashboard tell the same story (see ADR-0082 and
   queryable the same way as `ticket_source` / `activity_source`.
 
   Surfaces:
-  - `budi stats --files` — files ranked by cost, with a `(no file tag)`
+  - `budi stats files` — files ranked by cost, with a `(no file tag)`
     bucket (#450) and a `src=…` column showing the dominant source.
     Long paths are middle-ellipsis truncated (configurable via
-    `--label-width N`); full paths stay available via `--file <PATH>`
+    `--label-width N`); full paths stay available via `budi stats file <PATH>`
     and `--format json`.
-  - `budi stats --file <PATH>` — detail view with per-branch **and**
+  - `budi stats file <PATH>` — detail view with per-branch **and**
     per-ticket breakdowns, so you can see which tickets charged cost
     to a particular file.
   - `GET /analytics/files` and `/analytics/files/{*path}` mirror the
@@ -453,7 +453,7 @@ Key points:
 - **cost_confidence**: determines `~` prefix in dashboard for non-exact costs
 - **Source of truth vs derived**: `messages` remains canonical; rollup tables are derived caches maintained incrementally via SQLite triggers during ingest/update/delete
 - **Session context propagation**: git_branch/repo_id flow from user -> assistant messages within a session
-- **Repository identity**: `repo_id` is `Some("host/owner/repo")` only when the cwd is inside a git repo with a remote origin. Non-repo work (scratch dirs, `~/Desktop`, brew-tap checkouts, local-only repos without upstream) persists `repo_id = NULL` and rolls up into a single `(no repository)` bucket in `budi stats --projects`. An idempotent one-shot backfill on startup rewrites any pre-8.3 bare-folder-name values (`Desktop`, `ivan.seredkin`, …) to NULL; `--include-non-repo` opts back into the per-folder detail.
+- **Repository identity**: `repo_id` is `Some("host/owner/repo")` only when the cwd is inside a git repo with a remote origin. Non-repo work (scratch dirs, `~/Desktop`, brew-tap checkouts, local-only repos without upstream) persists `repo_id = NULL` and rolls up into a single `(no repository)` bucket in `budi stats projects`. An idempotent one-shot backfill on startup rewrites any pre-8.3 bare-folder-name values (`Desktop`, `ivan.seredkin`, …) to NULL; `--include-non-repo` opts back into the per-folder detail.
 - **Progressive sync**: files processed newest-first so dashboard shows recent data quickly
 - **Historical import**: `budi db import` = full history backfill, `budi db import --force` = clear all data and re-ingest from scratch. `budi db <verb>` is the only surface — the pre-8.2.1 bare verbs (`budi migrate` / `budi repair` / `budi import`) were removed in 8.3.
 - **Legacy proxy residue (upgrade only)**: live traffic no longer flows through a proxy. The only remaining proxy-related code scans for 8.0/8.1 residue in shell profiles and agent configs, reports retained `proxy_estimated` history honestly, and lets users remove managed blocks via `budi init --cleanup` (consent-first) or `budi uninstall` (managed cleanup parity).
