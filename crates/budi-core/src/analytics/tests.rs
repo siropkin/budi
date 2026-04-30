@@ -6200,11 +6200,13 @@ fn migration_backfills_session_timestamps_from_messages() {
     assert_eq!(again, 0);
 }
 
-/// #569: the repair pass must not clobber an already-populated value
-/// (e.g. cursor's composer-header repair sets a more accurate start time
-/// than the first ingested message). COALESCE keeps the existing value.
+/// #569 / #578: `started_at` is immutable so the repair pass must not
+/// clobber an already-populated value (e.g. cursor's composer-header
+/// repair). `ended_at` *does* advance to MAX(messages.timestamp) — pre-#578
+/// the heal froze it at the first tick's MAX so every active session was
+/// rendered as `<1m` on the cloud.
 #[test]
-fn backfill_does_not_overwrite_existing_session_timestamps() {
+fn backfill_preserves_started_at_but_advances_ended_at() {
     let conn = test_db();
     conn.execute(
         "INSERT INTO sessions (id, provider, started_at, ended_at)
@@ -6212,9 +6214,10 @@ fn backfill_does_not_overwrite_existing_session_timestamps() {
         [],
     )
     .unwrap();
-    // Messages span a wider window — the repair must NOT widen the
-    // session window since cursor's repair already chose authoritative
-    // values from composer headers.
+    // Messages span a wider window. `started_at` must stay at '08' (cursor
+    // chose this from composer headers and it's older than MIN(timestamp));
+    // `ended_at` must advance to '10' so cloud Sessions doesn't freeze the
+    // duration at first-tick MAX.
     conn.execute(
         "INSERT INTO messages (id, session_id, role, timestamp, provider)
          VALUES ('m-1', 's-cursor', 'user', '2026-04-26T07:00:00+00:00', 'cursor'),
@@ -6224,7 +6227,7 @@ fn backfill_does_not_overwrite_existing_session_timestamps() {
     .unwrap();
 
     let healed = crate::migration::backfill_session_timestamps_from_messages(&conn).unwrap();
-    assert_eq!(healed, 0);
+    assert_eq!(healed, 1);
 
     let (start, end): (Option<String>, Option<String>) = conn
         .query_row(
@@ -6234,5 +6237,153 @@ fn backfill_does_not_overwrite_existing_session_timestamps() {
         )
         .unwrap();
     assert_eq!(start.as_deref(), Some("2026-04-26T08:00:00+00:00"));
-    assert_eq!(end.as_deref(), Some("2026-04-26T09:00:00+00:00"));
+    assert_eq!(end.as_deref(), Some("2026-04-26T10:00:00+00:00"));
+
+    // Idempotent: a second run does not re-touch the row now that
+    // ended_at == MAX(messages.timestamp).
+    let again = crate::migration::backfill_session_timestamps_from_messages(&conn).unwrap();
+    assert_eq!(again, 0);
+}
+
+/// #578: regression guard. Pre-fix `COALESCE(ended_at, MAX)` froze ended_at
+/// at the first tick's MAX, so every active session showed `<1m` on the
+/// cloud. Post-fix, fresh messages arriving for a session whose `ended_at`
+/// was already populated must extend it to the new MAX(timestamp).
+#[test]
+fn backfill_advances_ended_at_for_active_session() {
+    let conn = test_db();
+    // Simulate the state right after the first ingest tick: started_at and
+    // ended_at both populated with the first observed message timestamp.
+    conn.execute(
+        "INSERT INTO sessions (id, provider, started_at, ended_at)
+         VALUES ('s-active', 'claude_code',
+                 '2026-04-30T02:37:07+00:00',
+                 '2026-04-30T02:37:08+00:00')",
+        [],
+    )
+    .unwrap();
+    // 30 minutes later, more messages have streamed in.
+    conn.execute(
+        "INSERT INTO messages (id, session_id, role, timestamp, provider)
+         VALUES ('m-1', 's-active', 'user', '2026-04-30T02:37:07+00:00', 'claude_code'),
+                ('m-2', 's-active', 'assistant', '2026-04-30T02:37:08+00:00', 'claude_code'),
+                ('m-3', 's-active', 'assistant', '2026-04-30T03:11:44+00:00', 'claude_code')",
+        [],
+    )
+    .unwrap();
+
+    let healed = crate::migration::backfill_session_timestamps_from_messages(&conn).unwrap();
+    assert_eq!(healed, 1);
+
+    let (start, end): (Option<String>, Option<String>) = conn
+        .query_row(
+            "SELECT started_at, ended_at FROM sessions WHERE id = 's-active'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    // started_at preserved (immutable).
+    assert_eq!(start.as_deref(), Some("2026-04-30T02:37:07+00:00"));
+    // ended_at advanced to the new MAX.
+    assert_eq!(end.as_deref(), Some("2026-04-30T03:11:44+00:00"));
+
+    // Idempotent now that ended_at == MAX.
+    let again = crate::migration::backfill_session_timestamps_from_messages(&conn).unwrap();
+    assert_eq!(again, 0);
+}
+
+/// #577: the repair pass backfills `repo_id` / `git_branch` from the
+/// linked messages so the cloud Sessions table can render a real repo /
+/// branch instead of `(unknown)` / `-`. Pre-#577 the heal pass only
+/// touched `started_at` / `ended_at`, leaving every claude_code / codex
+/// session row's repo and branch NULL.
+#[test]
+fn backfill_repo_and_branch_from_messages() {
+    let conn = test_db();
+    conn.execute(
+        "INSERT INTO sessions (id, provider) VALUES ('s-cc', 'claude_code'),
+                                                    ('s-cx', 'codex')",
+        [],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO messages (id, session_id, role, timestamp, provider, repo_id, git_branch)
+         VALUES ('m-cc-1', 's-cc', 'user', '2026-04-30T09:00:00+00:00', 'claude_code',
+                  'github.com/siropkin/budi', 'main'),
+                ('m-cc-2', 's-cc', 'assistant', '2026-04-30T09:30:00+00:00', 'claude_code',
+                  'github.com/siropkin/budi', 'fix-577'),
+                ('m-cx-1', 's-cx', 'user', '2026-04-30T10:00:00+00:00', 'codex',
+                  'github.com/siropkin/codex-experiments', 'master')",
+        [],
+    )
+    .unwrap();
+
+    let healed = crate::migration::backfill_session_timestamps_from_messages(&conn).unwrap();
+    assert_eq!(healed, 2);
+
+    // claude_code session: most-recent message wins for branch (so a
+    // mid-session branch switch is reflected).
+    let (cc_repo, cc_branch): (Option<String>, Option<String>) = conn
+        .query_row(
+            "SELECT repo_id, git_branch FROM sessions WHERE id = 's-cc'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(cc_repo.as_deref(), Some("github.com/siropkin/budi"));
+    assert_eq!(cc_branch.as_deref(), Some("fix-577"));
+
+    let (cx_repo, cx_branch): (Option<String>, Option<String>) = conn
+        .query_row(
+            "SELECT repo_id, git_branch FROM sessions WHERE id = 's-cx'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(cx_repo.as_deref(), Some("github.com/siropkin/codex-experiments"));
+    assert_eq!(cx_branch.as_deref(), Some("master"));
+
+    // Idempotent.
+    let again = crate::migration::backfill_session_timestamps_from_messages(&conn).unwrap();
+    assert_eq!(again, 0);
+}
+
+/// #577: a session row with `repo_id` / `git_branch` already populated
+/// (e.g. by a future provider-authoritative writer) is preserved by the
+/// heal — COALESCE / NULLIF only fills holes.
+#[test]
+fn backfill_preserves_already_populated_repo_and_branch() {
+    let conn = test_db();
+    conn.execute(
+        "INSERT INTO sessions (id, provider, started_at, ended_at, repo_id, git_branch)
+         VALUES ('s-set', 'claude_code',
+                 '2026-04-30T09:00:00+00:00',
+                 '2026-04-30T09:30:00+00:00',
+                 'github.com/example/authoritative-repo',
+                 'authoritative-branch')",
+        [],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO messages (id, session_id, role, timestamp, provider, repo_id, git_branch)
+         VALUES ('m-1', 's-set', 'user', '2026-04-30T09:00:00+00:00', 'claude_code',
+                  'github.com/example/some-other-repo', 'some-other-branch'),
+                ('m-2', 's-set', 'assistant', '2026-04-30T09:30:00+00:00', 'claude_code',
+                  'github.com/example/some-other-repo', 'some-other-branch')",
+        [],
+    )
+    .unwrap();
+
+    let healed = crate::migration::backfill_session_timestamps_from_messages(&conn).unwrap();
+    assert_eq!(healed, 0);
+
+    let (repo, branch): (Option<String>, Option<String>) = conn
+        .query_row(
+            "SELECT repo_id, git_branch FROM sessions WHERE id = 's-set'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(repo.as_deref(), Some("github.com/example/authoritative-repo"));
+    assert_eq!(branch.as_deref(), Some("authoritative-branch"));
 }
