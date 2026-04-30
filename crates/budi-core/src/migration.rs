@@ -909,6 +909,32 @@ fn backfill_non_repo_ids_to_null(conn: &Connection) -> Result<usize> {
     Ok(total)
 }
 
+/// #569: heal `sessions` rows whose `started_at`/`ended_at` are NULL but whose
+/// `messages` table has data for them.
+///
+/// Pre-fix, the message ingest path inserted stub session rows with only
+/// `(id, provider)`, leaving timestamps NULL. `cloud_sync::fetch_session_summaries`
+/// requires `started_at` to be NOT NULL, so those sessions never reached the
+/// cloud. This pass fills both columns from `MIN(timestamp)`/`MAX(timestamp)`
+/// of the linked messages.
+///
+/// Idempotent — the COALESCE leaves already-populated values alone, and the
+/// EXISTS clause skips sessions with no messages so the predicate is empty
+/// after one full run.
+pub fn backfill_session_timestamps_from_messages(conn: &Connection) -> Result<usize> {
+    let count = conn.execute(
+        "UPDATE sessions SET
+            started_at = COALESCE(started_at,
+                (SELECT MIN(timestamp) FROM messages WHERE session_id = sessions.id)),
+            ended_at = COALESCE(ended_at,
+                (SELECT MAX(timestamp) FROM messages WHERE session_id = sessions.id))
+         WHERE (started_at IS NULL OR ended_at IS NULL)
+           AND EXISTS (SELECT 1 FROM messages WHERE session_id = sessions.id)",
+        [],
+    )?;
+    Ok(count)
+}
+
 fn create_indexes(conn: &Connection) -> Result<()> {
     conn.execute_batch(
         "
@@ -1153,6 +1179,17 @@ fn reconcile_schema(conn: &Connection) -> Result<SchemaReconcileReport> {
         // `messages.repo_id` in bulk. Cheaper than firing per-row
         // UPDATE triggers across a large history.
         backfill_rollup_tables(conn)?;
+    }
+
+    // #569: heal sessions that were inserted with NULL timestamps by the
+    // pre-fix message ingest path. Without this, claude_code/codex
+    // sessions stranded in user DBs never make it to the cloud.
+    let healed_timestamps = backfill_session_timestamps_from_messages(conn)?;
+    if healed_timestamps > 0 {
+        tracing::info!(
+            rows = healed_timestamps,
+            "Backfilled started_at/ended_at on sessions from messages (#569)"
+        );
     }
 
     let added_indexes = missing_reconcile_indexes(conn)?;

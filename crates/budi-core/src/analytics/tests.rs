@@ -6087,3 +6087,152 @@ fn resolve_session_id_covers_full_prefix_empty_and_ambiguous() {
         "empty prefix must not silently return a random session, got {msg:?}",
     );
 }
+
+/// #569: a fresh ingest path for non-cursor providers (claude_code, codex)
+/// must populate `sessions.started_at` / `sessions.ended_at` so that
+/// `cloud_sync::fetch_session_summaries` can pick up the row. Pre-fix, the
+/// stub session row was inserted with only `(id, provider)` and the cloud
+/// sync predicate `started_at IS NOT NULL` filtered it out forever.
+#[test]
+fn ingest_populates_session_timestamps_for_claude_code() {
+    let mut conn = test_db();
+    let mut early = assistant_msg("cc-1", "s-cc-569", 1.0);
+    early.timestamp = "2026-04-28T09:00:00Z".parse().unwrap();
+    let mut late = assistant_msg("cc-2", "s-cc-569", 2.0);
+    late.timestamp = "2026-04-28T10:30:00Z".parse().unwrap();
+
+    ingest_messages(&mut conn, &[early, late], None).unwrap();
+
+    let (started, ended): (Option<String>, Option<String>) = conn
+        .query_row(
+            "SELECT started_at, ended_at FROM sessions WHERE id = 's-cc-569'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(started.as_deref(), Some("2026-04-28T09:00:00+00:00"));
+    assert_eq!(ended.as_deref(), Some("2026-04-28T10:30:00+00:00"));
+}
+
+/// #569: a session whose row was inserted with NULL timestamps by older
+/// code must get healed when fresh messages for the same session arrive.
+/// COALESCE means we fill the holes without overwriting a value that some
+/// other source (e.g. cursor's composer-header repair) already set.
+#[test]
+fn ingest_heals_stranded_session_when_new_message_arrives() {
+    let mut conn = test_db();
+    // Simulate the legacy stub-only row: just (id, provider).
+    conn.execute(
+        "INSERT INTO sessions (id, provider) VALUES ('s-stranded', 'claude_code')",
+        [],
+    )
+    .unwrap();
+
+    let mut msg = assistant_msg("strand-1", "s-stranded", 1.0);
+    msg.timestamp = "2026-04-28T09:00:00Z".parse().unwrap();
+    ingest_messages(&mut conn, &[msg], None).unwrap();
+
+    let (started, ended): (Option<String>, Option<String>) = conn
+        .query_row(
+            "SELECT started_at, ended_at FROM sessions WHERE id = 's-stranded'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(started.as_deref(), Some("2026-04-28T09:00:00+00:00"));
+    assert_eq!(ended.as_deref(), Some("2026-04-28T09:00:00+00:00"));
+}
+
+/// #569: the standalone repair pass heals legacy stranded sessions even
+/// when no new messages for them arrive. This is the workhorse for user
+/// DBs that already accumulated thousands of NULL-timestamp rows.
+#[test]
+fn migration_backfills_session_timestamps_from_messages() {
+    let conn = test_db();
+    // Two stranded sessions with messages already in place but no
+    // timestamps on the session rows (older bug).
+    conn.execute(
+        "INSERT INTO sessions (id, provider) VALUES ('s-cc', 'claude_code')",
+        [],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO sessions (id, provider) VALUES ('s-codex', 'codex')",
+        [],
+    )
+    .unwrap();
+    // Insert messages directly so the per-batch ingest backfill can't
+    // mask the test — we want to prove the repair pass alone heals these.
+    conn.execute(
+        "INSERT INTO messages (id, session_id, role, timestamp, provider)
+         VALUES ('m-cc-1', 's-cc', 'assistant', '2026-04-28T09:00:00+00:00', 'claude_code'),
+                ('m-cc-2', 's-cc', 'assistant', '2026-04-28T11:00:00+00:00', 'claude_code'),
+                ('m-cx-1', 's-codex', 'user', '2026-04-29T12:00:00+00:00', 'codex')",
+        [],
+    )
+    .unwrap();
+
+    let healed = crate::migration::backfill_session_timestamps_from_messages(&conn).unwrap();
+    assert_eq!(healed, 2);
+
+    let (cc_start, cc_end): (Option<String>, Option<String>) = conn
+        .query_row(
+            "SELECT started_at, ended_at FROM sessions WHERE id = 's-cc'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(cc_start.as_deref(), Some("2026-04-28T09:00:00+00:00"));
+    assert_eq!(cc_end.as_deref(), Some("2026-04-28T11:00:00+00:00"));
+
+    let (cx_start, cx_end): (Option<String>, Option<String>) = conn
+        .query_row(
+            "SELECT started_at, ended_at FROM sessions WHERE id = 's-codex'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(cx_start.as_deref(), Some("2026-04-29T12:00:00+00:00"));
+    assert_eq!(cx_end.as_deref(), Some("2026-04-29T12:00:00+00:00"));
+
+    // Idempotent: subsequent run touches nothing.
+    let again = crate::migration::backfill_session_timestamps_from_messages(&conn).unwrap();
+    assert_eq!(again, 0);
+}
+
+/// #569: the repair pass must not clobber an already-populated value
+/// (e.g. cursor's composer-header repair sets a more accurate start time
+/// than the first ingested message). COALESCE keeps the existing value.
+#[test]
+fn backfill_does_not_overwrite_existing_session_timestamps() {
+    let conn = test_db();
+    conn.execute(
+        "INSERT INTO sessions (id, provider, started_at, ended_at)
+         VALUES ('s-cursor', 'cursor', '2026-04-26T08:00:00+00:00', '2026-04-26T09:00:00+00:00')",
+        [],
+    )
+    .unwrap();
+    // Messages span a wider window — the repair must NOT widen the
+    // session window since cursor's repair already chose authoritative
+    // values from composer headers.
+    conn.execute(
+        "INSERT INTO messages (id, session_id, role, timestamp, provider)
+         VALUES ('m-1', 's-cursor', 'user', '2026-04-26T07:00:00+00:00', 'cursor'),
+                ('m-2', 's-cursor', 'assistant', '2026-04-26T10:00:00+00:00', 'cursor')",
+        [],
+    )
+    .unwrap();
+
+    let healed = crate::migration::backfill_session_timestamps_from_messages(&conn).unwrap();
+    assert_eq!(healed, 0);
+
+    let (start, end): (Option<String>, Option<String>) = conn
+        .query_row(
+            "SELECT started_at, ended_at FROM sessions WHERE id = 's-cursor'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(start.as_deref(), Some("2026-04-26T08:00:00+00:00"));
+    assert_eq!(end.as_deref(), Some("2026-04-26T09:00:00+00:00"));
+}

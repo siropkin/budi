@@ -326,6 +326,19 @@ fn sync_with_max_age<F: FnMut(&SyncProgress)>(
             );
         }
 
+        // Heal sessions that older code paths inserted with NULL
+        // started_at/ended_at — without this they never reach
+        // `fetch_session_summaries` and the cloud's `session_summaries`
+        // stays silently empty (#569). Runs before title backfill since
+        // titles filter on `started_at`.
+        match crate::migration::backfill_session_timestamps_from_messages(conn) {
+            Ok(healed) if healed > 0 => {
+                tracing::info!("Backfilled started_at/ended_at on {healed} sessions (#569)");
+            }
+            Ok(_) => {}
+            Err(e) => tracing::warn!("Session timestamp backfill failed: {e}"),
+        }
+
         // Backfill session titles from provider-specific sources.
         let titles_backfilled = backfill_session_titles(conn);
         if titles_backfilled > 0 {

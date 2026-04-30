@@ -549,6 +549,20 @@ pub fn ingest_messages_with_sync(
                 "INSERT OR IGNORE INTO sessions (id, provider) VALUES (?1, ?2)",
                 params![sid, provider],
             )?;
+            // Without this, claude_code/codex sessions keep started_at/ended_at
+            // = NULL forever and never reach `fetch_session_summaries`, so
+            // `session_summaries` on cloud goes silently empty (#569). COALESCE
+            // is a no-op for cursor rows already populated by their composer
+            // header repair pass.
+            tx.execute(
+                "UPDATE sessions SET
+                    started_at = COALESCE(started_at,
+                        (SELECT MIN(timestamp) FROM messages WHERE session_id = ?1)),
+                    ended_at = COALESCE(ended_at,
+                        (SELECT MAX(timestamp) FROM messages WHERE session_id = ?1))
+                 WHERE id = ?1",
+                params![sid],
+            )?;
         }
         for (sid, category) in &session_categories {
             tx.execute(
