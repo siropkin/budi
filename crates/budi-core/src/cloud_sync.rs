@@ -506,6 +506,82 @@ fn map_session_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionSummaryRe
     })
 }
 
+/// #572: target chunk size that keeps each POST well under the cloud's
+/// body-size limit. Pre-#572, a 1931 rollups + 2350 sessions envelope
+/// (~8 MB) hit 413 on `budi cloud reset` re-uploads.
+pub const MAX_RECORDS_PER_ENVELOPE: usize = 500;
+
+/// #572: split a sync payload into ≤ [`MAX_RECORDS_PER_ENVELOPE`] chunks
+/// so `sync_tick_report` can POST them one at a time.
+///
+/// Rollup chunks respect `bucket_day` boundaries so the local
+/// "watermark = latest bucket_day fully synced" contract (ADR-0083 §5)
+/// stays honest on partial-chunk failure. A single day larger than the
+/// cap goes out as one oversized chunk rather than splitting mid-day;
+/// in practice no real user has > 500 unique
+/// `(role, provider, model, repo, branch)` tuples in one day. Sessions
+/// chunk in fixed-size batches — the server keys on
+/// `(device_id, session_id)` so partial overlap UPSERTs cleanly.
+///
+/// Always returns at least one (possibly empty) payload so callers can
+/// iterate uniformly.
+pub fn chunk_payload(payload: SyncPayload) -> Vec<SyncPayload> {
+    let SyncPayload {
+        mut daily_rollups,
+        mut session_summaries,
+    } = payload;
+
+    // Defensive sort — the SQL queries already ORDER BY these, but the
+    // function is `pub` and the day-aligned contract depends on it.
+    daily_rollups.sort_by(|a, b| a.bucket_day.cmp(&b.bucket_day));
+    session_summaries.sort_by(|a, b| a.started_at.cmp(&b.started_at));
+
+    if daily_rollups.len() + session_summaries.len() <= MAX_RECORDS_PER_ENVELOPE {
+        return vec![SyncPayload {
+            daily_rollups,
+            session_summaries,
+        }];
+    }
+
+    let mut chunks: Vec<SyncPayload> = Vec::new();
+
+    let mut current: Vec<DailyRollupRecord> = Vec::new();
+    let mut current_day: Option<String> = None;
+    for record in daily_rollups {
+        let same_day = current_day.as_deref() == Some(&record.bucket_day);
+        if !current.is_empty() && !same_day && current.len() >= MAX_RECORDS_PER_ENVELOPE {
+            chunks.push(SyncPayload {
+                daily_rollups: std::mem::take(&mut current),
+                session_summaries: Vec::new(),
+            });
+        }
+        current_day = Some(record.bucket_day.clone());
+        current.push(record);
+    }
+    if !current.is_empty() {
+        chunks.push(SyncPayload {
+            daily_rollups: current,
+            session_summaries: Vec::new(),
+        });
+    }
+
+    for batch in session_summaries.chunks(MAX_RECORDS_PER_ENVELOPE) {
+        chunks.push(SyncPayload {
+            daily_rollups: Vec::new(),
+            session_summaries: batch.to_vec(),
+        });
+    }
+
+    if chunks.is_empty() {
+        chunks.push(SyncPayload {
+            daily_rollups: Vec::new(),
+            session_summaries: Vec::new(),
+        });
+    }
+
+    chunks
+}
+
 /// Build the complete sync envelope from local data.
 pub fn build_sync_envelope(conn: &Connection, config: &CloudConfig) -> Result<SyncEnvelope> {
     let device_id = config
@@ -701,6 +777,13 @@ pub struct SyncTickReport {
     pub envelope_sessions: usize,
     pub server_records_upserted: Option<i64>,
     pub server_watermark: Option<String>,
+    /// #572: number of chunks the payload was split into. `1` on the
+    /// steady-state path; `> 1` when the payload exceeds
+    /// [`MAX_RECORDS_PER_ENVELOPE`].
+    pub chunks_total: usize,
+    /// #572: chunks the cloud confirmed. Less than `chunks_total` when
+    /// the loop stops on a transient/auth/schema failure mid-stream.
+    pub chunks_succeeded: usize,
 }
 
 /// Execute a single sync tick: build envelope, send, update watermark.
@@ -727,6 +810,8 @@ pub fn sync_tick_report(db_path: &Path, config: &CloudConfig) -> SyncTickReport 
                 envelope_sessions: 0,
                 server_records_upserted: None,
                 server_watermark: None,
+                chunks_total: 0,
+                chunks_succeeded: 0,
             };
         }
     };
@@ -741,6 +826,8 @@ pub fn sync_tick_report(db_path: &Path, config: &CloudConfig) -> SyncTickReport 
                 envelope_sessions: 0,
                 server_records_upserted: None,
                 server_watermark: None,
+                chunks_total: 0,
+                chunks_succeeded: 0,
             };
         }
     };
@@ -756,6 +843,8 @@ pub fn sync_tick_report(db_path: &Path, config: &CloudConfig) -> SyncTickReport 
             envelope_sessions,
             server_records_upserted: None,
             server_watermark: None,
+            chunks_total: 0,
+            chunks_succeeded: 0,
         };
     }
 
@@ -769,25 +858,71 @@ pub fn sync_tick_report(db_path: &Path, config: &CloudConfig) -> SyncTickReport 
                 envelope_sessions,
                 server_records_upserted: None,
                 server_watermark: None,
+                chunks_total: 0,
+                chunks_succeeded: 0,
             };
         }
     };
 
-    let result = send_sync_envelope(&endpoint, &api_key, &envelope);
+    // #572: chunk the envelope so a multi-month re-upload doesn't hit 413.
+    // The steady-state tick produces exactly one chunk, matching the
+    // pre-chunking wire shape.
+    let chunks = chunk_payload(envelope.payload);
+    let chunks_total = chunks.len();
 
-    let mut server_records_upserted = None;
-    let mut server_watermark = None;
+    let mut chunks_succeeded = 0usize;
+    let mut server_records_upserted: Option<i64> = None;
+    let mut server_watermark: Option<String> = None;
+    let mut last_result = SyncResult::TransientError("no chunks were sent".to_string());
 
-    // On success, update watermarks (ADR-0083 §5)
-    if let SyncResult::Success(ref resp) = result {
-        server_records_upserted = resp.records_upserted;
-        server_watermark = resp.watermark.clone();
-        if let Some(ref wm) = resp.watermark
-            && let Err(e) = set_cloud_watermark(&conn, wm)
-        {
-            tracing::warn!("Failed to update cloud watermark: {e}");
+    let device_id = envelope.device_id;
+    let org_id = envelope.org_id;
+    let label = envelope.label;
+    let schema_version = envelope.schema_version;
+
+    for chunk in chunks {
+        let chunk_envelope = SyncEnvelope {
+            schema_version,
+            device_id: device_id.clone(),
+            org_id: org_id.clone(),
+            label: label.clone(),
+            synced_at: chrono::Utc::now().to_rfc3339(),
+            payload: chunk,
+        };
+
+        let result = send_sync_envelope(&endpoint, &api_key, &chunk_envelope);
+
+        match &result {
+            SyncResult::Success(resp) => {
+                chunks_succeeded += 1;
+                if let Some(n) = resp.records_upserted {
+                    server_records_upserted = Some(server_records_upserted.unwrap_or(0) + n);
+                }
+                if let Some(wm) = &resp.watermark {
+                    server_watermark = Some(wm.clone());
+                    // ADR-0083 §5: persist per-chunk so partial failure
+                    // leaves the watermark at the latest confirmed day.
+                    if let Err(e) = set_cloud_watermark(&conn, wm) {
+                        tracing::warn!("Failed to update cloud watermark: {e}");
+                    }
+                }
+                last_result = result;
+            }
+            SyncResult::EmptyPayload => {
+                chunks_succeeded += 1;
+                last_result = result;
+            }
+            _ => {
+                last_result = result;
+                break;
+            }
         }
-        // Update session watermark to current time
+    }
+
+    // Advance session watermark only on full success. On partial-chunk
+    // failure the next tick re-fetches the same window and the cloud
+    // UPSERTs on `(device_id, session_id)` (ADR-0083 §6).
+    if chunks_succeeded == chunks_total && matches!(last_result, SyncResult::Success(_)) {
         let now = chrono::Utc::now().to_rfc3339();
         if let Err(e) = set_session_watermark(&conn, &now) {
             tracing::warn!("Failed to update session watermark: {e}");
@@ -795,12 +930,14 @@ pub fn sync_tick_report(db_path: &Path, config: &CloudConfig) -> SyncTickReport 
     }
 
     SyncTickReport {
-        result,
+        result: last_result,
         endpoint,
         envelope_rollups,
         envelope_sessions,
         server_records_upserted,
         server_watermark,
+        chunks_total,
+        chunks_succeeded,
     }
 }
 
@@ -1406,5 +1543,190 @@ mod tests {
         assert!(main_rollup.ticket_source.is_none());
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // -------- #572: chunked envelope tests --------
+
+    fn make_rollup(day: &str, model: &str) -> DailyRollupRecord {
+        DailyRollupRecord {
+            bucket_day: day.into(),
+            role: "assistant".into(),
+            provider: "anthropic".into(),
+            model: model.into(),
+            repo_id: "sha256:test".into(),
+            git_branch: "main".into(),
+            ticket: None,
+            ticket_source: None,
+            message_count: 1,
+            input_tokens: 10,
+            output_tokens: 20,
+            cache_creation_tokens: 0,
+            cache_read_tokens: 0,
+            cost_cents: 0.1,
+        }
+    }
+
+    fn make_session(id: &str, started_at: &str) -> SessionSummaryRecord {
+        SessionSummaryRecord {
+            session_id: id.into(),
+            provider: "anthropic".into(),
+            started_at: Some(started_at.into()),
+            ended_at: None,
+            duration_ms: None,
+            repo_id: None,
+            git_branch: None,
+            ticket: None,
+            ticket_source: None,
+            message_count: 1,
+            total_input_tokens: 10,
+            total_output_tokens: 20,
+            total_cost_cents: 0.1,
+        }
+    }
+
+    #[test]
+    fn chunk_payload_below_threshold_returns_single_chunk() {
+        // Steady-state ticks must keep the pre-#572 single-POST shape.
+        let payload = SyncPayload {
+            daily_rollups: vec![make_rollup("2026-04-10", "claude-sonnet-4-6")],
+            session_summaries: vec![make_session("s1", "2026-04-10T10:00:00Z")],
+        };
+        let chunks = chunk_payload(payload);
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].daily_rollups.len(), 1);
+        assert_eq!(chunks[0].session_summaries.len(), 1);
+    }
+
+    #[test]
+    fn chunk_payload_empty_returns_one_empty_chunk() {
+        // Callers iterate the returned vec; one empty chunk keeps the
+        // call site uniform with the non-empty path.
+        let chunks = chunk_payload(SyncPayload {
+            daily_rollups: vec![],
+            session_summaries: vec![],
+        });
+        assert_eq!(chunks.len(), 1);
+        assert!(chunks[0].daily_rollups.is_empty());
+        assert!(chunks[0].session_summaries.is_empty());
+    }
+
+    #[test]
+    fn chunk_payload_splits_large_rollup_set_at_day_boundaries() {
+        // 12 days × 50 rollups = 600 records → at least 2 chunks. The
+        // contract under test: no bucket_day spans two chunks.
+        let mut rollups: Vec<DailyRollupRecord> = Vec::new();
+        for d in 1..=12 {
+            for i in 0..50 {
+                let model = format!("model-{i:02}");
+                rollups.push(make_rollup(&format!("2026-04-{d:02}"), &model));
+            }
+        }
+        let total = rollups.len();
+        let chunks = chunk_payload(SyncPayload {
+            daily_rollups: rollups,
+            session_summaries: vec![],
+        });
+
+        let chunked_total: usize = chunks.iter().map(|c| c.daily_rollups.len()).sum();
+        assert_eq!(chunked_total, total);
+
+        let seen_days_per_chunk: Vec<Vec<String>> = chunks
+            .iter()
+            .map(|c| {
+                let mut days: Vec<String> = c
+                    .daily_rollups
+                    .iter()
+                    .map(|r| r.bucket_day.clone())
+                    .collect();
+                days.sort();
+                days.dedup();
+                days
+            })
+            .collect();
+        let total_unique = {
+            let mut all: Vec<String> = seen_days_per_chunk.iter().flatten().cloned().collect();
+            all.sort();
+            all.dedup();
+            all.len()
+        };
+        let pair_count: usize = seen_days_per_chunk.iter().map(|d| d.len()).sum();
+        assert_eq!(
+            pair_count, total_unique,
+            "a single bucket_day must not span multiple chunks"
+        );
+
+        assert!(chunks.len() >= 2);
+    }
+
+    #[test]
+    fn chunk_payload_keeps_oversized_single_day_intact() {
+        // A pathological single day > MAX records goes out as one
+        // oversized chunk to preserve "watermark = day fully synced".
+        let mut rollups = Vec::new();
+        for i in 0..(MAX_RECORDS_PER_ENVELOPE + 50) {
+            rollups.push(make_rollup("2026-04-01", &format!("model-{i}")));
+        }
+        let chunks = chunk_payload(SyncPayload {
+            daily_rollups: rollups,
+            session_summaries: vec![],
+        });
+        // All records for the single day land in a single chunk.
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].daily_rollups.len(), MAX_RECORDS_PER_ENVELOPE + 50);
+    }
+
+    #[test]
+    fn chunk_payload_chunks_sessions_separately_from_rollups() {
+        // Sessions chunk in fixed-size batches, isolated from rollups.
+        let mut sessions = Vec::new();
+        for i in 0..(MAX_RECORDS_PER_ENVELOPE * 2 + 100) {
+            sessions.push(make_session(&format!("s-{i}"), "2026-04-10T10:00:00Z"));
+        }
+        let chunks = chunk_payload(SyncPayload {
+            daily_rollups: vec![],
+            session_summaries: sessions,
+        });
+        assert_eq!(chunks.len(), 3);
+        assert_eq!(chunks[0].session_summaries.len(), MAX_RECORDS_PER_ENVELOPE);
+        assert_eq!(chunks[1].session_summaries.len(), MAX_RECORDS_PER_ENVELOPE);
+        assert_eq!(chunks[2].session_summaries.len(), 100);
+        for chunk in &chunks {
+            assert!(chunk.daily_rollups.is_empty());
+        }
+    }
+
+    #[test]
+    fn chunk_payload_simulates_dogfood_db_shape() {
+        // Recreates the issue's failing case (~1920 rollups + 2350
+        // sessions, pre-#572 a single 8+ MB POST → 413).
+        let mut rollups = Vec::new();
+        for d in 0..240 {
+            let day = format!("2025-08-{:02}", (d % 28) + 1);
+            for i in 0..8 {
+                rollups.push(make_rollup(&day, &format!("model-{i}-{d}")));
+            }
+        }
+
+        let mut sessions = Vec::new();
+        for i in 0..2350 {
+            sessions.push(make_session(&format!("s-{i}"), "2026-04-10T10:00:00Z"));
+        }
+
+        let chunks = chunk_payload(SyncPayload {
+            daily_rollups: rollups,
+            session_summaries: sessions,
+        });
+
+        assert!(
+            chunks.len() >= 5,
+            "dogfood-sized payload should split into many chunks; got {}",
+            chunks.len(),
+        );
+        // ⌈2350 / 500⌉ = 5 session chunks.
+        let session_chunks: usize = chunks
+            .iter()
+            .filter(|c| !c.session_summaries.is_empty())
+            .count();
+        assert_eq!(session_chunks, 5);
     }
 }

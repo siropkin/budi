@@ -657,14 +657,25 @@ fn render_sync_text(body: &Value) {
         .and_then(Value::as_i64)
         .unwrap_or(0);
     let watermark = body.get("watermark").and_then(Value::as_str);
+    let chunks_total = body
+        .get("chunks_total")
+        .and_then(Value::as_i64)
+        .unwrap_or(0);
+    let chunks_succeeded = body
+        .get("chunks_succeeded")
+        .and_then(Value::as_i64)
+        .unwrap_or(0);
 
     println!();
     let (icon, color, headline) = match (ok, result) {
-        (true, "success") => (
-            "✓",
-            green,
-            format!("Cloud sync complete ({records} records pushed)"),
-        ),
+        (true, "success") => {
+            let suffix = if chunks_total > 1 {
+                format!(" ({records} records pushed across {chunks_total} chunks)")
+            } else {
+                format!(" ({records} records pushed)")
+            };
+            ("✓", green, format!("Cloud sync complete{suffix}"))
+        }
         (true, "empty_payload") => ("✓", green, "Nothing new to sync".to_string()),
         (_, "disabled") => ("-", dim, "Cloud sync is disabled".to_string()),
         (_, "not_configured") => ("!", yellow, "Cloud sync is not configured".to_string()),
@@ -683,6 +694,9 @@ fn render_sync_text(body: &Value) {
     }
     if rollups > 0 || sessions > 0 {
         println!("    {dim}attempted{reset}  {rollups} rollups, {sessions} sessions");
+    }
+    if chunks_total > 1 {
+        println!("    {dim}chunks{reset}     {chunks_succeeded}/{chunks_total} confirmed");
     }
     if let Some(wm) = watermark {
         println!("    {dim}watermark{reset}  {wm}");
