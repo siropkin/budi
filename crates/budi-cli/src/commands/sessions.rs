@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use budi_core::analytics::SessionHealth;
 use budi_core::pricing::display;
 
 use crate::StatsPeriod;
@@ -179,11 +180,18 @@ pub fn cmd_session_detail(session_id: &str, json_output: bool) -> Result<()> {
         "Could not reach budi daemon. Run `budi init` to set up, or `budi doctor` to diagnose.",
     )?;
 
-    let session = client.session_detail(session_id)?;
+    let resolved_id = if session_id == "latest" {
+        resolve_latest_session_id(&client)?
+    } else {
+        session_id.to_string()
+    };
+
+    let session = client.session_detail(&resolved_id)?;
 
     let Some(s) = session else {
-        anyhow::bail!("Session '{}' not found.", session_id);
+        anyhow::bail!("Session '{}' not found.", resolved_id);
     };
+    let session_id = resolved_id.as_str();
 
     if json_output {
         let tags = client.session_tags(session_id).unwrap_or_default();
@@ -284,35 +292,129 @@ pub fn cmd_session_detail(session_id: &str, json_output: bool) -> Result<()> {
         }
     }
 
-    // Health
+    // Vitals (inlined from the former `budi vitals` command — issue #585).
+    // Every session detail now renders the full vitals block (Prompt
+    // Growth, Cache Reuse, Retry Loops, Cost Acceleration) so the
+    // common-case detail view is genuinely useful without a parallel
+    // `budi vitals` verb.
     if let Ok(health) = client.session_health(Some(session_id)) {
         println!();
-        let state_icon = match health.state.as_str() {
-            "red" => "🔴",
-            "yellow" => "🟡",
-            "gray" | "insufficient_data" => "⚪",
-            _ => "🟢",
-        };
-        let state_label = match health.state.as_str() {
-            "insufficient_data" => "insufficient data".to_string(),
-            other => other.to_string(),
-        };
-        println!("  {state_icon} {bold}Health: {state_label}{reset}");
-        if health.state == "green" || health.state == "insufficient_data" {
-            println!("    {green}{}{reset}", health.tip);
-        }
-        for d in &health.details {
-            let di = match d.state.as_str() {
-                "red" => "🔴",
-                "yellow" => "🟡",
-                _ => "⚪",
-            };
-            println!("    {di} {bold}{}{reset}: {}", d.vital, d.tip);
-        }
+        render_vitals_block(&health);
     }
 
     println!();
     Ok(())
+}
+
+/// Resolve the most recent session ID by asking the daemon for the
+/// newest session in the all-time window. Used by `budi sessions latest`
+/// to fold what was previously `budi vitals` (no args) into the
+/// canonical detail view.
+fn resolve_latest_session_id(client: &DaemonClient) -> Result<String> {
+    let resp = client.sessions(None, None, None, None, None, 1, 0)?;
+    let s = resp
+        .sessions
+        .into_iter()
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("No sessions yet — run an AI agent and try again."))?;
+    Ok(s.id)
+}
+
+/// Render the four-vital health block for a session. Inlined into
+/// `budi sessions <id>` (issue #585) and replaces the standalone
+/// `budi vitals` command output. Skips the leading "N messages · $X.XX
+/// total" summary because the surrounding detail view already shows
+/// those fields.
+fn render_vitals_block(h: &SessionHealth) {
+    let detail_name = |name: &str| -> String {
+        match name {
+            "context_drag" => "Prompt Growth".to_string(),
+            "cache_efficiency" => "Cache Reuse".to_string(),
+            "thrashing" => "Retry Loops".to_string(),
+            "cost_acceleration" => "Cost Acceleration".to_string(),
+            _ => name.to_string(),
+        }
+    };
+
+    let bold = ansi("\x1b[1m");
+    let dim = ansi("\x1b[90m");
+    let reset = ansi("\x1b[0m");
+    let green = ansi("\x1b[32m");
+    let yellow = ansi("\x1b[33m");
+    let red = ansi("\x1b[31m");
+
+    let state_icon = |s: &str| -> &str {
+        match s {
+            "red" => "🔴",
+            "yellow" => "🟡",
+            "gray" | "insufficient_data" => "⚪",
+            _ => "🟢",
+        }
+    };
+    let state_color = |s: &str| -> &str {
+        match s {
+            "red" => red,
+            "yellow" => yellow,
+            "gray" | "insufficient_data" => dim,
+            _ => green,
+        }
+    };
+    let state_label = |s: &str| -> String {
+        match s {
+            "insufficient_data" => "INSUFFICIENT DATA".to_string(),
+            _ => s.to_uppercase(),
+        }
+    };
+
+    let icon = state_icon(&h.state);
+    let color = state_color(&h.state);
+    println!(
+        "  {icon} {bold}Vitals: {color}{}{reset}",
+        state_label(&h.state)
+    );
+
+    let vitals: Vec<(&str, &Option<budi_core::analytics::VitalScore>)> = vec![
+        ("Prompt Growth", &h.vitals.context_drag),
+        ("Cache Reuse", &h.vitals.cache_efficiency),
+        ("Retry Loops", &h.vitals.thrashing),
+        ("Cost Acceleration", &h.vitals.cost_acceleration),
+    ];
+
+    for (name, vital) in &vitals {
+        match vital {
+            Some(v) => {
+                let vi = state_icon(&v.state);
+                let vc = state_color(&v.state);
+                println!("    {vi} {bold}{name}{reset}: {vc}{}{reset}", v.label);
+            }
+            None => {
+                println!("    {dim}⚪ {name}: N/A{reset}");
+            }
+        }
+    }
+
+    if !h.details.is_empty() {
+        println!();
+        for d in &h.details {
+            let di = state_icon(&d.state);
+            let dc = state_color(&d.state);
+            println!(
+                "  {di} {dc}{bold}{} ({}):{reset}",
+                detail_name(&d.vital),
+                d.label
+            );
+            println!("    {}", d.tip);
+            for action in &d.actions {
+                println!("    - {action}");
+            }
+            println!();
+        }
+    }
+
+    if h.state == "green" || h.state == "insufficient_data" {
+        let tip_color = state_color(&h.state);
+        println!("    {tip_color}{}{reset}", h.tip);
+    }
 }
 
 fn format_duration_ms(ms: i64) -> String {

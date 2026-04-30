@@ -153,8 +153,8 @@ budi stats tickets           # tickets ranked by cost
 budi stats models            # model breakdown
 budi stats files             # files ranked by cost
 budi sessions                # recent sessions with cost and health
-budi sessions <id>           # session detail: cost, models, health, tags
-budi vitals                  # session health for the latest session
+budi sessions <id>           # session detail: cost, models, vitals, tags
+budi sessions latest         # detail + vitals for the most recent session
 budi doctor                  # full health check
 budi db import               # import historical transcripts (one-time backfill)
 budi update                  # update to latest release
@@ -289,9 +289,8 @@ budi stats files --limit 0         # show every row (default limit is 30)
 budi sessions                      # list recent sessions with cost and health
 budi sessions --ticket <id>        # sessions tagged with a ticket
 budi sessions --activity <name>    # sessions tagged with an activity
-budi sessions <id>                 # session detail: cost, models, health, tags, work outcome
-budi vitals                        # session health vitals for most recent session
-budi vitals --session <id>         # health vitals for a specific session
+budi sessions <id>                 # session detail: cost, models, vitals, tags, work outcome
+budi sessions latest               # detail + vitals for the most recent session
 ```
 
 **Diagnostics and maintenance:**
