@@ -374,7 +374,7 @@ async fn main() -> Result<()> {
             let dummy_app = axum::Router::new().fallback(axum::routing::any(|| async {
                 (
                     axum::http::StatusCode::BAD_REQUEST,
-                    "Budi proxy is removed in 8.2.0. Please run `budi init --cleanup` to fix your shell profile."
+                    "Budi proxy was removed in 8.2.0. Run `budi doctor` to see which managed blocks remain in your shell profile, then remove them by hand or run `budi uninstall`."
                 )
             }));
             if let Ok(listener) = tokio::net::TcpListener::bind("127.0.0.1:9878").await {

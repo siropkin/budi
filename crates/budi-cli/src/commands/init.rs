@@ -1,28 +1,14 @@
 use std::fs;
-use std::io::IsTerminal;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
 use anyhow::{Context, Result};
 use budi_core::config;
-use budi_core::legacy_proxy::{self, LegacyProxyFile, LegacyProxyScan};
 use budi_core::provider::Provider;
 
 use crate::daemon::ensure_daemon_running;
 
-pub fn cmd_init(cleanup: bool, yes: bool, no_integrations: bool, no_daemon: bool) -> Result<()> {
-    if cleanup {
-        run_cleanup_flow(yes)?;
-    } else if let Ok(scan) = legacy_proxy::scan()
-        && scan.has_managed_blocks()
-    {
-        let yellow = super::ansi("\x1b[33m");
-        let reset = super::ansi("\x1b[0m");
-        println!("\n{yellow}Critical:{reset} Detected legacy 8.0/8.1 proxy configuration.");
-        println!("This configuration will break Claude Code in 8.2.0 and must be removed.");
-        run_cleanup_flow(yes)?;
-    }
-
+pub fn cmd_init(no_integrations: bool, no_daemon: bool) -> Result<()> {
     clean_duplicate_binaries();
     check_daemon_binary_and_version();
 
@@ -199,139 +185,6 @@ fn claude_code_installed() -> bool {
         return false;
     };
     home.join(".claude").is_dir()
-}
-
-fn run_cleanup_flow(yes: bool) -> Result<()> {
-    let scan = legacy_proxy::scan()?;
-    let managed_files = scan
-        .files
-        .iter()
-        .filter(|file| file.has_managed_blocks())
-        .collect::<Vec<_>>();
-
-    if managed_files.is_empty() {
-        println!("No managed 8.0/8.1 Budi proxy blocks found. Nothing to clean.");
-        print_manual_review_findings(&scan);
-        print_current_shell_warning(&scan);
-        println!();
-        return Ok(());
-    }
-
-    if !yes && !std::io::stdin().is_terminal() {
-        anyhow::bail!(
-            "Non-interactive terminal. Use `budi init --cleanup --yes` to skip per-file confirmation."
-        );
-    }
-
-    println!("Reviewing legacy 8.0/8.1 proxy residue...");
-
-    let mut removed = 0usize;
-    let mut skipped = 0usize;
-
-    for file in managed_files {
-        println!();
-        print_cleanup_preview(file);
-
-        let should_apply = yes || prompt_for_cleanup(file)?;
-        if should_apply {
-            file.apply_cleanup()?;
-            removed += 1;
-            println!(
-                "  Removed managed Budi proxy block(s) from {}",
-                file.path.display()
-            );
-        } else {
-            skipped += 1;
-            println!("  Skipped {}", file.path.display());
-        }
-
-        if file.has_fuzzy_findings() {
-            print_file_manual_review(file);
-        }
-    }
-
-    print_manual_review_findings(&scan);
-    print_current_shell_warning(&scan);
-    println!();
-    println!("Cleanup summary: removed {removed} file(s), skipped {skipped}.");
-    Ok(())
-}
-
-fn print_cleanup_preview(file: &LegacyProxyFile) {
-    println!(
-        "  {} ({})",
-        file.path.display(),
-        file.surface.display_name()
-    );
-    println!("    diff preview:");
-    for block in &file.managed_blocks {
-        let range = match block.end_line {
-            Some(end_line) => format!("lines {}-{}", block.start_line, end_line),
-            None => format!("line {} to EOF (unterminated block)", block.start_line),
-        };
-        println!("      - remove managed block at {range}");
-        for line in &block.lines {
-            println!("      - {}", line);
-        }
-    }
-    if file.surface == budi_core::legacy_proxy::LegacyProxySurface::CursorSettings {
-        println!("      - clean up any dangling JSON comma left behind by the removed block");
-    }
-}
-
-fn prompt_for_cleanup(file: &LegacyProxyFile) -> Result<bool> {
-    eprint!(
-        "Remove the managed Budi proxy block(s) from {}? [y/N] ",
-        file.path.display()
-    );
-    let mut answer = String::new();
-    std::io::stdin()
-        .read_line(&mut answer)
-        .context("Failed to read stdin")?;
-    Ok(matches!(answer.trim(), "y" | "Y"))
-}
-
-fn print_manual_review_findings(scan: &LegacyProxyScan) {
-    let fuzzy_only = scan
-        .files
-        .iter()
-        .filter(|file| !file.has_managed_blocks() && file.has_fuzzy_findings())
-        .collect::<Vec<_>>();
-    if fuzzy_only.is_empty() {
-        return;
-    }
-    println!();
-    println!("Manual review only (not auto-removed):");
-    for file in fuzzy_only {
-        print_file_manual_review(file);
-    }
-}
-
-fn print_file_manual_review(file: &LegacyProxyFile) {
-    println!("  {}:", file.path.display());
-    for finding in &file.fuzzy_findings {
-        println!(
-            "    ! line {} ({}) {}",
-            finding.line_number, finding.label, finding.snippet
-        );
-    }
-}
-
-fn print_current_shell_warning(scan: &LegacyProxyScan) {
-    if scan.exported_env_vars.is_empty() {
-        return;
-    }
-    let rendered = scan
-        .exported_env_vars
-        .iter()
-        .map(|entry| format!("{}={}", entry.key, entry.value))
-        .collect::<Vec<_>>()
-        .join(", ");
-    println!();
-    println!("Current shell still has legacy proxy env vars loaded: {rendered}");
-    println!(
-        "Open a fresh terminal after cleanup so those stale exports disappear from the live session."
-    );
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

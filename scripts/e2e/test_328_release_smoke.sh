@@ -22,8 +22,8 @@
 #        legacy managed shell / Cursor / Codex blocks are seeded
 #      - rerunning init drops `proxy_events` while keeping retained
 #        history queryable (#326)
-#      - `budi init --cleanup` removes the three managed-block flavors
-#        idempotently and produces a reviewable diff (#357)
+#      - `budi uninstall` strips the three managed-block flavors as part
+#        of the managed-cleanup parity path (#587 dropped `init --cleanup`)
 #      - `budi doctor` reports the legacy state honestly and is silent
 #        about the obsolete table after migration
 #
@@ -809,52 +809,7 @@ fi
 
 start_daemon
 
-step "scenario 2b: upgrade from 8.1 — budi init --cleanup removes managed blocks idempotently"
-
-CURSOR_SETTINGS="$HOME/Library/Application Support/Cursor/User/settings.json"
-mkdir -p "$(dirname "$CURSOR_SETTINGS")"
-
-cat >"$HOME/.zshrc" <<'EOF'
-export PATH="/usr/local/bin:$PATH"
-# >>> budi >>>
-export ANTHROPIC_BASE_URL="http://localhost:9878"
-export OPENAI_BASE_URL="http://localhost:9878"
-# <<< budi <<<
-EOF
-cat >"$CURSOR_SETTINGS" <<'EOF'
-{
-  "editor.fontSize": 14,
-  // >>> budi >>>
-  "openai.baseUrl": "http://localhost:9878"
-  // <<< budi <<<
-}
-EOF
-cat >"$CODEX_HOME/config.toml" <<'EOF'
-# >>> budi >>>
-openai_base_url = "http://localhost:9878"
-# <<< budi <<<
-EOF
-
-CLEANUP_LOG="$TMPDIR_ROOT/cleanup.log"
-"$BUDI" init --cleanup --yes --no-daemon >"$CLEANUP_LOG" 2>&1 || {
-  cat "$CLEANUP_LOG" >&2
-  echo "[e2e] FAIL: budi init --cleanup failed" >&2
-  exit 1
-}
-assert_contains "$CLEANUP_LOG" "Cleanup summary"
-assert_not_contains "$HOME/.zshrc" "ANTHROPIC_BASE_URL"
-assert_not_contains "$CURSOR_SETTINGS" "openai.baseUrl"
-assert_not_contains "$CODEX_HOME/config.toml" "openai_base_url"
-
-CLEANUP_LOG_2="$TMPDIR_ROOT/cleanup-2.log"
-"$BUDI" init --cleanup --yes --no-daemon >"$CLEANUP_LOG_2" 2>&1 || {
-  cat "$CLEANUP_LOG_2" >&2
-  echo "[e2e] FAIL: idempotent cleanup re-run failed" >&2
-  exit 1
-}
-assert_contains "$CLEANUP_LOG_2" "Nothing to clean."
-
-step "scenario 2c: upgrade — doctor honestly reports retained legacy state"
+step "scenario 2b: upgrade — doctor honestly reports retained legacy state"
 
 DOCTOR_UPGRADE_LOG="$TMPDIR_ROOT/doctor-upgrade.log"
 (
@@ -864,7 +819,7 @@ DOCTOR_UPGRADE_LOG="$TMPDIR_ROOT/doctor-upgrade.log"
 assert_contains "$DOCTOR_UPGRADE_LOG" "PASS legacy proxy history:"
 assert_not_contains "$DOCTOR_UPGRADE_LOG" "obsolete \`proxy_events\` table is still present"
 
-step "scenario 2d: uninstall on an upgraded-from-8.1 machine reports parity"
+step "scenario 2c: uninstall on an upgraded-from-8.1 machine reports parity"
 
 # Reseed managed blocks to verify uninstall removes them.
 cat >"$HOME/.zshrc" <<'EOF'

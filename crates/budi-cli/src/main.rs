@@ -28,12 +28,6 @@ struct Cli {
 enum Commands {
     /// Set up budi (daemon + autostart) and show detected agents.
     Init {
-        /// Remove legacy 8.0/8.1 proxy residue after showing a consent-first cleanup flow
-        #[arg(long, default_value_t = false)]
-        cleanup: bool,
-        /// Skip cleanup confirmation prompts
-        #[arg(long, default_value_t = false)]
-        yes: bool,
         /// Skip the default recommended-integrations install (Claude Code
         /// statusline + Cursor extension). Useful for CI, containers, or
         /// when the user manages Claude / Cursor settings by hand.
@@ -631,11 +625,9 @@ fn main() -> Result<()> {
 
     match cli.command {
         Commands::Init {
-            cleanup,
-            yes,
             no_integrations,
             no_daemon,
-        } => commands::init::cmd_init(cleanup, yes, no_integrations, no_daemon),
+        } => commands::init::cmd_init(no_integrations, no_daemon),
         Commands::Doctor {
             deep,
             quiet,
