@@ -496,7 +496,7 @@ Key points:
 - `crates/budi-cli/src/commands/status.rs` — `budi status` quick overview (daemon, today's cost, first-run hints).
 - `crates/budi-cli/src/commands/statusline.rs` — Statusline rendering (default quiet rolling `1d` / `7d` / `30d`, provider-scoped; `coach` / `full` opt-in variants).
 - `crates/budi-cli/src/commands/cloud.rs` — `budi cloud sync` / `budi cloud status` / `budi cloud init` (text + JSON; exit code 2 on non-ok sync).
-- `crates/budi-cli/src/commands/pricing.rs` — `budi pricing status [--json] [--refresh]`.
+- `crates/budi-cli/src/commands/pricing.rs` — `budi pricing` / `budi pricing status` (read-only) + `budi pricing sync` (network refresh; mirrors `cloud sync`). Both accept `--format json`.
 <!-- budi-cursor and budi-cloud live in their own repos: siropkin/budi-cursor, siropkin/budi-cloud -->
 
 ## Dev notes

@@ -232,16 +232,21 @@ Examples:
         #[command(subcommand)]
         action: CloudAction,
     },
-    /// Pricing manifest: view status, trigger a manual refresh
+    /// Pricing manifest: view status (read-only) or sync from upstream (network)
+    ///
+    /// Bare `budi pricing` defaults to the read-only `pricing status` view.
+    /// `pricing sync` is the network-touching verb that fetches the latest
+    /// LiteLLM manifest, mirroring the `cloud sync` shape on the cloud
+    /// namespace — both are direction-tagged data movements, both come
+    /// with `--format json` for scripted use.
     #[command(after_help = "\
 Examples:
-  budi pricing status              Show current manifest layer, version, and unknown models
-  budi pricing status --refresh    Fetch the latest LiteLLM manifest before showing status
-  budi pricing status --format json  JSON output for scripting")]
-    Pricing {
-        #[command(subcommand)]
-        action: PricingAction,
-    },
+  budi pricing                     Show current manifest layer, version, and unknown models (read-only)
+  budi pricing status              Same as bare `budi pricing` (long form)
+  budi pricing sync                Fetch the latest LiteLLM manifest into the local cache
+  budi pricing --format json       JSON output for scripting
+  budi pricing sync --format json  JSON output (exit code 2 on refresh failure)")]
+    Pricing(PricingArgs),
 }
 
 /// Top-level args for `budi stats`. Bare invocation (no subcommand) renders
@@ -341,17 +346,26 @@ pub enum StatsView {
     },
 }
 
+/// Top-level args for `budi pricing`. Bare invocation (no subcommand) renders
+/// the read-only manifest status — same output as the explicit `pricing status`.
+/// `pricing sync` is the only network-touching verb in this namespace; it
+/// replaces the pre-8.3.14 `pricing status --refresh` flag (the lone
+/// side-effecting flag in the entire CLI that hid behind a read-only verb).
+#[derive(Debug, clap::Args)]
+pub struct PricingArgs {
+    #[command(subcommand)]
+    pub view: Option<PricingView>,
+    /// Output format: text (default) or json
+    #[arg(short, long, value_enum, default_value_t = StatsFormat::Text, global = true)]
+    pub format: StatsFormat,
+}
+
 #[derive(Debug, Subcommand)]
-enum PricingAction {
-    /// Show manifest layer, version, known model count, and unknown models
-    Status {
-        /// Output format: text (default) or json
-        #[arg(short, long, value_enum, default_value_t = StatsFormat::Text)]
-        format: StatsFormat,
-        /// Trigger an immediate manifest refresh before showing status
-        #[arg(long, default_value_t = false)]
-        refresh: bool,
-    },
+pub enum PricingView {
+    /// Read-only: show manifest layer, version, known model count, unknown models
+    Status,
+    /// Network: fetch the latest LiteLLM manifest into the local cache, then show state
+    Sync,
 }
 
 #[derive(Debug, Subcommand)]
@@ -760,11 +774,13 @@ fn main() -> Result<()> {
             }
             CloudAction::Reset { yes } => commands::cloud::cmd_cloud_reset(yes),
         },
-        Commands::Pricing { action } => match action {
-            PricingAction::Status { format, refresh } => {
-                commands::pricing::cmd_pricing_status(format, refresh)
+        Commands::Pricing(args) => {
+            let PricingArgs { view, format } = args;
+            match view {
+                None | Some(PricingView::Status) => commands::pricing::cmd_pricing_status(format),
+                Some(PricingView::Sync) => commands::pricing::cmd_pricing_sync(format),
             }
-        },
+        }
     }
 }
 
@@ -1414,6 +1430,72 @@ mod tests {
             }
             _ => panic!("expected cloud init command"),
         }
+    }
+
+    #[test]
+    fn cli_parses_pricing_subcommands() {
+        // #584: split `pricing status --refresh` (the lone read-only-shaped
+        // verb that hid a network call) into `pricing status` (read-only)
+        // and `pricing sync` (network), with bare `budi pricing` defaulting
+        // to the read-only view.
+        let cli = Cli::try_parse_from(["budi", "pricing"]).expect("bare budi pricing parses");
+        match cli.command {
+            Commands::Pricing(args) => {
+                assert!(args.view.is_none(), "bare invocation has no view");
+                assert!(matches!(args.format, StatsFormat::Text));
+            }
+            _ => panic!("expected pricing command"),
+        }
+
+        let cli = Cli::try_parse_from(["budi", "pricing", "status"])
+            .expect("budi pricing status parses");
+        match cli.command {
+            Commands::Pricing(args) => assert!(matches!(args.view, Some(PricingView::Status))),
+            _ => panic!("expected pricing status command"),
+        }
+
+        let cli =
+            Cli::try_parse_from(["budi", "pricing", "sync"]).expect("budi pricing sync parses");
+        match cli.command {
+            Commands::Pricing(args) => assert!(matches!(args.view, Some(PricingView::Sync))),
+            _ => panic!("expected pricing sync command"),
+        }
+
+        let cli = Cli::try_parse_from(["budi", "pricing", "--format", "json"])
+            .expect("budi pricing --format json parses");
+        match cli.command {
+            Commands::Pricing(args) => {
+                assert!(args.view.is_none());
+                assert!(matches!(args.format, StatsFormat::Json));
+            }
+            _ => panic!("expected pricing command"),
+        }
+
+        let cli = Cli::try_parse_from(["budi", "pricing", "sync", "--format", "json"])
+            .expect("budi pricing sync --format json parses");
+        match cli.command {
+            Commands::Pricing(args) => {
+                assert!(matches!(args.view, Some(PricingView::Sync)));
+                assert!(matches!(args.format, StatsFormat::Json));
+            }
+            _ => panic!("expected pricing sync command"),
+        }
+    }
+
+    #[test]
+    fn cli_rejects_legacy_pricing_refresh_flag() {
+        // #584: `--refresh` was the only flag in the entire CLI that
+        // performed a network call from a read-only-shaped verb. It is
+        // dropped entirely (no users, safe to break per the ticket); the
+        // replacement is `budi pricing sync`.
+        assert!(
+            Cli::try_parse_from(["budi", "pricing", "status", "--refresh"]).is_err(),
+            "`pricing status --refresh` must hard-fail; use `pricing sync` instead",
+        );
+        assert!(
+            Cli::try_parse_from(["budi", "pricing", "--refresh"]).is_err(),
+            "bare `pricing --refresh` must hard-fail; use `pricing sync` instead",
+        );
     }
 
     #[test]
