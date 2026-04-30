@@ -1,5 +1,28 @@
 # Changelog
 
+## 8.3.11 — 2026-04-29
+
+8.3.11 is a single-bug correctness patch for the cloud session-summary
+sync path. After the org-switch / watermark recovery work in `v8.3.10`,
+a separate dogfood divergence surfaced: cost / tokens / messages totals
+kept landing on the cloud (Overview was correct, "Synced 2m ago" was
+green), but `/dashboard/sessions` silently returned zero rows for any
+window that excluded the last cursor-only sliver of activity. Root
+cause was on the *local* side, not the cloud — claude_code and codex
+sessions never had `started_at` populated, so the cloud-sync predicate
+filtered them out forever. No new ingest / pricing behavior, no ADR
+amendments, no wire changes.
+
+### Fixed
+
+- **`session_summaries` no longer goes silently empty for claude_code / codex sessions** (#569 / PR #570). Pre-fix the message-ingest path in `crates/budi-core/src/analytics/mod.rs` inserted stub `sessions` rows with only `(id, provider)` when it discovered a new `session_id` while ingesting messages — `started_at` and `ended_at` stayed `NULL`. The only production code path that populated `started_at` was `crates/budi-core/src/providers/cursor.rs`'s `cursor_session_contexts` backfill, so claude_code and codex sessions were stranded with `started_at IS NULL` permanently. `cloud_sync::fetch_session_summaries` filters with `WHERE s.started_at > ?1 OR s.ended_at > ?1 OR (s.ended_at IS NULL AND s.started_at IS NOT NULL)` — every clause requires one of the timestamps to be NOT NULL — so those rows were silently skipped on every sync, forever. The dashboard hid this because `message_rollups_daily` (which feeds `daily_rollups`) is populated by SQLite triggers directly from `messages` and doesn't depend on `sessions.started_at`, so cost / token / message totals kept flowing on Overview while Sessions emptied. Real evidence from a live DB the day this was filed: `983` claude_code + `67` codex session rows with `COUNT(started_at) = 0`, including 73 active claude_code sessions whose messages spanned the four days after the last cursor row that fed cloud sync. Cloud-side smoke alarm shipped in `budi-cloud` PR #86. Post-fix three idempotent layers heal both new and existing rows: per-batch ingest now COALESCE-fills `started_at`/`ended_at` from `MIN(timestamp)` / `MAX(timestamp)` of the matching `messages` immediately after the `INSERT OR IGNORE` (so freshly-discovered sessions are visible to cloud sync atomically); a standalone `migration::backfill_session_timestamps_from_messages` repair pass runs after every successful sync tick in `analytics::sync` (heals legacy stranded rows the moment the daemon ticks even if no new messages for them arrive); the same repair runs once on boot from `migration::reconcile_schema` so user DBs that already accumulated thousands of NULL-timestamp rows get fixed without waiting for fresh ingest on every stranded session. `COALESCE` keeps cursor's authoritative composer-header timestamps intact when both passes run. Pinned by 4 new unit tests covering: fresh ingest populates timestamps for non-cursor providers, ingest-time heal of pre-existing stranded rows when fresh messages arrive, the standalone repair pass heals stranded rows for both `claude_code` and `codex` and is idempotent on re-run, and `COALESCE` preserves a session row whose timestamps were already populated by cursor's repair.
+
+### Non-blocking, carried forward
+
+- **RC-4 Part B** (#504) — Cursor Usage API auth root-cause; Part A shipped with `v8.3.1`.
+- **ADR-0090 supersede** — pending one release cycle of live validation on the now-working `cursorDiskKV` bubbles path before the Usage API §1 surface can be retired.
+- **Detached daemon log capture** — first post-`budi update` daemon's startup lines don't land in `~/Library/Logs/budi-daemon.log` until the next launchctl kickstart. Observability-only; carried from v8.3.6 / v8.3.7.
+
 ## 8.3.10 — 2026-04-28
 
 8.3.10 closes out the "after an org switch on the cloud, my daemon is
