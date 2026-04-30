@@ -186,8 +186,30 @@ pub fn cmd_update(yes: bool, version: Option<String>) -> Result<()> {
     // `budi update` is still the PRE-install process, so a pre-
     // install daemon matches and no restart fires. `latest` is the
     // version we just put on disk; that's the true respawn target.
-    let _ =
-        restart_daemon_for_version_upgrade(repo_root.as_deref(), &config, daemon_override, &latest);
+    if let Err(e) =
+        restart_daemon_for_version_upgrade(repo_root.as_deref(), &config, daemon_override, &latest)
+    {
+        eprintln!(
+            "{yellow}!{reset} Daemon restart did not complete cleanly: {e}\n  Run `budi doctor` to verify the daemon is healthy."
+        );
+    }
+
+    // #582: on Linux, if no autostart is registered, the daemon won't
+    // come back after a logout / reboot. The fix-582 changes detach the
+    // CLI-spawned daemon via `setsid`, but persistence still needs the
+    // systemd-user unit. Surface a one-line, actionable nudge so the
+    // "I don't see a daemon" report becomes self-healing.
+    #[cfg(target_os = "linux")]
+    if matches!(
+        budi_core::autostart::service_status(),
+        budi_core::autostart::ServiceStatus::NotInstalled
+    ) {
+        println!();
+        println!(
+            "{yellow}!{reset} Autostart is not registered — the daemon won't survive logout/reboot."
+        );
+        println!("  Register it with: budi autostart install");
+    }
 
     // Verify installed version.
     let verification_bin = prepared.as_ref().map(|p| p.budi_dst.as_path());

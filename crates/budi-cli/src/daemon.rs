@@ -176,6 +176,15 @@ fn daemon_version_equals(config: &BudiConfig, expected: &str) -> bool {
 /// and hands off to `ensure_daemon_running_with_binary` to spawn the new
 /// one.
 ///
+/// On Linux, when a `budi autostart install` systemd-user unit is
+/// registered, restart routes through `systemctl --user restart` so the
+/// fresh daemon is owned by systemd (not the CLI process) and survives
+/// the CLI's exit. Without that path, a CLI-spawned daemon shares the
+/// CLI's controlling terminal and dies on terminal close — see #582.
+/// The raw kill/spawn fallback that the macOS / Windows / no-systemd
+/// branch uses is hardened by `setsid` in `spawn_daemon_process` so the
+/// child detaches from the parent CLI's session.
+///
 /// No-op when the daemon already reports the expected version (the brew /
 /// launchd respawn already picked up the new binary on its own).
 pub fn restart_daemon_for_version_upgrade(
@@ -194,7 +203,44 @@ pub fn restart_daemon_for_version_upgrade(
         force_kill_all_daemons();
         let _ = wait_for_port_release(config, 20, Duration::from_millis(150));
     }
+
+    #[cfg(target_os = "linux")]
+    if try_systemd_user_restart()
+        && wait_for_daemon_health(
+            config,
+            startup_timeout_retries(),
+            Duration::from_millis(500),
+            Duration::from_millis(150),
+        )
+        && daemon_version_equals(config, expected)
+    {
+        return Ok(());
+    }
+
     ensure_daemon_running_with_binary(repo_root, config, daemon_bin_override)
+}
+
+/// #582: when the systemd-user unit is registered, prefer `systemctl
+/// --user restart` so the fresh daemon is reparented to systemd rather
+/// than to the exiting `budi update` process. Returns true on a
+/// `systemctl restart` exit-success — the caller still has to verify
+/// that the daemon comes up healthy. Returns false when the unit is
+/// not installed (caller falls back to raw spawn).
+#[cfg(target_os = "linux")]
+fn try_systemd_user_restart() -> bool {
+    if matches!(
+        budi_core::autostart::service_status(),
+        budi_core::autostart::ServiceStatus::NotInstalled
+    ) {
+        return false;
+    }
+    Command::new("systemctl")
+        .args(["--user", "restart", "budi-daemon"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
 }
 
 fn wait_for_daemon_health(
@@ -481,18 +527,54 @@ fn spawn_daemon_process(
         .open(&log_path)
         .with_context(|| format!("Failed opening {}", log_path.display()))?;
     let stderr = stdout.try_clone()?;
-    Command::new(daemon_bin)
-        .arg("serve")
+    let mut cmd = Command::new(daemon_bin);
+    cmd.arg("serve")
         .arg("--host")
         .arg(&config.daemon_host)
         .arg("--port")
         .arg(config.daemon_port.to_string())
         .stdout(Stdio::from(stdout))
         .stderr(Stdio::from(stderr))
-        .stdin(Stdio::null())
-        .spawn()
+        .stdin(Stdio::null());
+    detach_from_session(&mut cmd);
+    cmd.spawn()
         .with_context(|| "Failed to spawn budi-daemon process".to_string())?;
     Ok(())
+}
+
+/// #582: detach the spawned daemon from the parent CLI's session so it
+/// survives the CLI exit and a subsequent terminal close. Without this
+/// hook, on Linux without an installed systemd-user unit, `budi update`
+/// kills the old daemon and spawns the new one as a child of the CLI;
+/// when the user closes the terminal the kernel sends SIGHUP to every
+/// process in the session and the daemon dies. macOS papered over this
+/// with launchd respawning the daemon as a child of launchd, hiding the
+/// bug there.
+///
+/// `setsid()` creates a new session and process group, detaching from
+/// the controlling terminal. Safe to call on every Unix spawn — the
+/// daemon should never be in the same session as the spawning CLI.
+#[cfg(unix)]
+fn detach_from_session(cmd: &mut Command) {
+    use std::os::unix::process::CommandExt;
+    // SAFETY: `setsid` is async-signal-safe. We make no allocations and
+    // touch no shared state in the closure, satisfying the contract
+    // documented on `pre_exec`.
+    unsafe {
+        cmd.pre_exec(|| {
+            if libc::setsid() == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+}
+
+#[cfg(not(unix))]
+fn detach_from_session(_cmd: &mut Command) {
+    // Windows: Task Scheduler owns the daemon's lifecycle when autostart
+    // is registered; CLI-spawned daemons run as orphan child processes
+    // that survive the CLI exit by default.
 }
 
 pub(crate) fn resolve_daemon_binary() -> Result<PathBuf> {
@@ -574,5 +656,45 @@ mod tests {
         let resolved =
             resolve_daemon_binary_from(None, Some(Path::new("/tmp/no-sibling-dir/budi")));
         assert_eq!(resolved, PathBuf::from(daemon_binary_name()));
+    }
+
+    /// #582 regression guard: a daemon spawn must detach from the parent
+    /// CLI's session so it survives `budi update` exiting + the user
+    /// closing their terminal. `setsid()` creates a new session AND a
+    /// new process group, so the child's PGID has to differ from ours.
+    /// If anyone removes the `pre_exec` hook in `detach_from_session`,
+    /// this test fires.
+    #[cfg(unix)]
+    #[test]
+    fn detach_from_session_starts_new_process_group() {
+        use std::process::{Command, Stdio};
+        use std::time::Duration;
+
+        let parent_pgid = unsafe { libc::getpgid(0) };
+        assert!(parent_pgid > 0, "getpgid for self should succeed");
+
+        let mut cmd = Command::new("sleep");
+        cmd.arg("3").stdout(Stdio::null()).stderr(Stdio::null());
+        super::detach_from_session(&mut cmd);
+        let mut child = cmd.spawn().expect("spawn sleep");
+        let pid = child.id() as libc::pid_t;
+
+        // pre_exec runs after fork, before exec — but the parent doesn't
+        // wait for exec. A tiny pause lets the child's setsid commit
+        // before we observe its PGID.
+        std::thread::sleep(Duration::from_millis(100));
+        let child_pgid = unsafe { libc::getpgid(pid) };
+
+        let _ = child.kill();
+        let _ = child.wait();
+
+        assert!(child_pgid > 0, "getpgid for child should succeed");
+        assert_ne!(
+            child_pgid, parent_pgid,
+            "detach_from_session must put the child in a new process group \
+             (parent pgid {parent_pgid}, child pgid {child_pgid}) — without \
+             this, `budi update` on Linux leaves no daemon running once the \
+             user closes their terminal (#582)"
+        );
     }
 }
