@@ -41,7 +41,7 @@ pub fn cmd_pricing_status(format: StatsFormat, refresh: bool) -> Result<()> {
         // #443 acceptance: JSON consumers see the Budi display-name
         // alias overlay alongside the LiteLLM pricing status. The
         // overlay answers "how does a raw provider model id map to
-        // the canonical `budi stats --models` display name?" without
+        // the canonical `budi stats models` display name?" without
         // having to dump the whole 3k-entry LiteLLM manifest.
         let aliases = json_alias_catalogue();
         let combined = if let Some(r) = &refresh_body {

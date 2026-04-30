@@ -10,8 +10,8 @@ use super::ansi;
 
 // ─── Shared Breakdown Rendering (#449) ───────────────────────────────────────
 //
-// Every `budi stats` breakdown view (`--projects / --branches / --tickets /
-// --activities / --files / --models / --tag`) ships through the same bar
+// Every `budi stats` breakdown view (`projects / branches / tickets /
+// activities / files / models / tag`) ships through the same bar
 // renderer, header shape, and footer so the visual signal never drifts. The
 // contract, nailed down by #449:
 //
@@ -1028,7 +1028,7 @@ fn cmd_stats_branch_detail(
         None => {
             println!("  No data found for branch '{}'.", branch);
             println!("  Tip: run `budi db import` first if you haven't imported data yet.");
-            println!("  Run `budi stats --branches` to see available branches.");
+            println!("  Run `budi stats branches` to see available branches.");
         }
     }
 
@@ -1230,7 +1230,7 @@ fn cmd_stats_ticket_detail(
         None => {
             println!("  No data found for ticket '{}'.", ticket);
             println!("  Tip: run `budi db import` first if you haven't imported data yet.");
-            println!("  Run `budi stats --tickets` to see available tickets.");
+            println!("  Run `budi stats tickets` to see available tickets.");
         }
     }
 
@@ -1438,7 +1438,7 @@ fn cmd_stats_activity_detail(
         None => {
             println!("  No data found for activity '{}'.", activity);
             println!("  Tip: run `budi db import` first if you haven't imported data yet.");
-            println!("  Run `budi stats --activities` to see available activities.");
+            println!("  Run `budi stats activities` to see available activities.");
         }
     }
 
@@ -1682,7 +1682,7 @@ fn cmd_stats_file_detail(
         None => {
             println!("  No data found for file '{}'.", file_path);
             println!("  Tip: run `budi db import` first if you haven't imported data yet.");
-            println!("  Run `budi stats --files` to see available files.");
+            println!("  Run `budi stats files` to see available files.");
         }
     }
 
@@ -2670,7 +2670,7 @@ mod tests {
 
     #[test]
     fn breakdown_row_snapshot_models_view() {
-        // Snapshot baseline for `budi stats --models` row layout
+        // Snapshot baseline for `budi stats models` row layout
         // (#449 acceptance). One row at the top of the scale, one
         // tiny but non-zero row, one $0 row — the three cases the
         // ticket's Reproduction section calls out as bug triggers.
@@ -2727,7 +2727,7 @@ mod tests {
 
     #[test]
     fn breakdown_row_snapshot_tickets_view() {
-        // Golden snapshot for `budi stats --tickets` — pinned so the
+        // Golden snapshot for `budi stats tickets` — pinned so the
         // bar/cost order cannot silently flip back to the pre-#449
         // layout (cost-before-bar).
         let label_w = 24usize;
@@ -2789,7 +2789,7 @@ mod tests {
 
     #[test]
     fn breakdown_row_snapshot_activities_view() {
-        // Golden snapshot for `budi stats --activities`. Preserves the
+        // Golden snapshot for `budi stats activities`. Preserves the
         // `conf=…` in-row legend (addressed more fully by #450) while
         // pinning the #449 layout contract.
         let label_w = 18usize;
@@ -2833,7 +2833,7 @@ mod tests {
 
     #[test]
     fn breakdown_row_snapshot_tag_view() {
-        // Golden snapshot for `budi stats --tag <key>` — the layout
+        // Golden snapshot for `budi stats tag <key>` — the layout
         // every other breakdown now mirrors. Kept as the canonical
         // shape so a future refactor that regresses one view will
         // fail a targeted test.

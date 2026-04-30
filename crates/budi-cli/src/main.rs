@@ -17,7 +17,7 @@ const HEALTH_TIMEOUT_SECS: u64 = 3;
 #[command(about = "budi — AI cost analytics. Know where your tokens and money go.")]
 #[command(version)]
 #[command(
-    after_help = "Get started:\n  budi init\n\nCommon commands:\n  budi stats              Show today's cost summary\n  budi stats --models     Cost breakdown by model\n  budi stats --branches   Cost breakdown by branch\n  budi sessions           List recent sessions with cost and vitals\n  budi sessions <id>      Session detail: cost, models, vitals, tags\n  budi vitals             Session health vitals for the most recent session\n  budi status             Quick check: daemon and today's spend\n  budi doctor             Full diagnostic: daemon, tailer, schema, transcript visibility\n  budi cloud status       Cloud sync readiness and last-synced-at\n  budi cloud sync         Push queued local data to the cloud now\n  budi autostart status   Check daemon autostart service\n  budi db import          Import historical transcripts from disk\n  budi db import --force  Re-ingest all data from scratch (use after upgrades)\n  budi db repair          Repair schema drift and run migration\n  budi db migrate         Run database migration explicitly\n\nMore info: https://github.com/siropkin/budi"
+    after_help = "Get started:\n  budi init\n\nCommon commands:\n  budi stats              Show today's cost summary\n  budi stats models       Cost breakdown by model\n  budi stats branches     Cost breakdown by branch\n  budi sessions           List recent sessions with cost and vitals\n  budi sessions <id>      Session detail: cost, models, vitals, tags\n  budi vitals             Session health vitals for the most recent session\n  budi status             Quick check: daemon and today's spend\n  budi doctor             Full diagnostic: daemon, tailer, schema, transcript visibility\n  budi cloud status       Cloud sync readiness and last-synced-at\n  budi cloud sync         Push queued local data to the cloud now\n  budi autostart status   Check daemon autostart service\n  budi db import          Import historical transcripts from disk\n  budi db import --force  Re-ingest all data from scratch (use after upgrades)\n  budi db repair          Repair schema drift and run migration\n  budi db migrate         Run database migration explicitly\n\nMore info: https://github.com/siropkin/budi"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -55,128 +55,26 @@ enum Commands {
         #[arg(long, hide = true)]
         repo_root: Option<PathBuf>,
     },
-    /// Show usage analytics (only one view flag at a time: --projects, --branches, --branch, --tickets, --ticket, --activities, --activity, --files, --file, --models, or --tag)
-    #[command(
-        group(clap::ArgGroup::new("view").multiple(false).args(["projects", "branches", "branch", "tickets", "ticket", "activities", "activity", "files", "file", "models", "tag"])),
-        after_help = "\
+    /// Show usage analytics. Bare `budi stats` prints today's summary; subcommands drill into specific views.
+    #[command(after_help = "\
 Examples:
   budi stats                       Today's cost summary (default)
   budi stats -p week               This week's summary
-  budi stats -p month --models     Model breakdown for the month
-  budi stats -p 7d                 Last 7 days (rolling window)
-  budi stats -p 2w                 Last 2 weeks (rolling window)
-  budi stats -p 1m                 Last 1 month (rolling, calendar months)
-  budi stats --branches            Branches ranked by cost (today)
-  budi stats --branch main         Cost details for a specific branch
-  budi stats --branch main --repo github.com/acme/app
-  budi stats --tickets             Tickets ranked by cost (today)
-  budi stats --ticket ENG-123      Cost details for a specific ticket
-  budi stats --ticket ENG-123 --repo github.com/acme/app
-  budi stats --activities          Activities ranked by cost (today)
-  budi stats --activity bugfix     Cost details for a specific activity
-  budi stats --files               Files ranked by cost (today)
-  budi stats --file src/main.rs    Cost details for a specific file
-  budi stats --projects -p all     All-time project costs
-  budi stats --tag activity        Raw cost breakdown by the activity tag
-  budi stats --provider cursor     Filter to Cursor only
-  budi stats --format json         JSON output for scripting"
-    )]
-    Stats {
-        /// Time period to show (today, week, month, all, or relative like 1d, 7d, 1m)
-        #[arg(long, short, default_value = "today")]
-        period: StatsPeriod,
-        /// Show repositories ranked by cost
-        #[arg(long, default_value_t = false)]
-        projects: bool,
-        /// Show branches ranked by cost
-        #[arg(long, default_value_t = false)]
-        branches: bool,
-        /// Show cost for a specific branch
-        #[arg(long)]
-        branch: Option<String>,
-        /// Show tickets ranked by cost (sourced from the `ticket_id` tag).
-        /// Mirrors `--branches` so ticket attribution is a first-class CLI
-        /// dimension alongside branches and repos.
-        #[arg(long, default_value_t = false)]
-        tickets: bool,
-        /// Show cost details for a specific ticket id (e.g. ENG-123).
-        /// Mirrors `--branch <NAME>` and includes a per-branch breakdown
-        /// of where the ticket was worked on.
-        #[arg(long, value_name = "ID")]
-        ticket: Option<String>,
-        /// Show activities ranked by cost (sourced from the `activity` tag
-        /// emitted by the prompt classifier). Mirrors `--tickets` so
-        /// activity attribution is a first-class CLI dimension.
-        #[arg(long, default_value_t = false)]
-        activities: bool,
-        /// Show cost details for a specific activity (e.g. `bugfix`,
-        /// `refactor`). Mirrors `--ticket <ID>` and includes a per-branch
-        /// breakdown so you can see where each kind of work was done.
-        #[arg(long, value_name = "NAME")]
-        activity: Option<String>,
-        /// Show files ranked by cost (sourced from the `file_path` tag
-        /// emitted by the pipeline when tool-call arguments point at a
-        /// file inside the repo root). Mirrors `--tickets` / `--activities`
-        /// so file-level attribution is a first-class CLI dimension.
-        #[arg(long, default_value_t = false)]
-        files: bool,
-        /// Show cost details for a specific file (repo-relative path,
-        /// forward-slashed, inside the repo root). Mirrors `--ticket <ID>`
-        /// and includes per-branch and per-ticket breakdowns so you can see
-        /// which tickets touched the file.
-        #[arg(long, value_name = "PATH")]
-        file: Option<String>,
-        /// Optional repository filter for --branch, --ticket, --activity,
-        /// or --file (recommended when names repeat across repos).
-        #[arg(long)]
-        repo: Option<String>,
-        /// Show model usage breakdown
-        #[arg(long, default_value_t = false)]
-        models: bool,
-        /// Filter by provider (e.g. claude_code, cursor, codex, copilot_cli, openai). Only works with the default summary view.
-        #[arg(long, conflicts_with = "view")]
-        provider: Option<String>,
-        /// Break down cost by the given tag KEY (e.g. `--tag ticket_id`,
-        /// `--tag activity`, `--tag custom_key`). Unlike `--tickets`
-        /// and `--activities`, which are first-class per-dimension
-        /// views with their own ranking shape, `--tag <KEY>` is the
-        /// escape hatch for any tag key the pipeline emits — including
-        /// custom keys that the CLI doesn't hard-code a flag for. The
-        /// output ranks rows by the tag's VALUES for that key.
-        #[arg(long, value_name = "KEY")]
-        tag: Option<String>,
-        /// Maximum rows to show in breakdown views (`--projects`,
-        /// `--branches`, `--tickets`, `--activities`, `--files`,
-        /// `--models`, `--tag`). `0` = no cap (show every matching row).
-        /// Truncated rows collapse into an `(other N: $X)` aggregate so
-        /// the Total footer always reconciles to the cent.
-        #[arg(long, default_value_t = 30)]
-        limit: usize,
-        /// Maximum characters for labels and label-like extra columns
-        /// (branch / file path / ticket id) in breakdown views. Values
-        /// longer than this truncate with a middle ellipsis (`…`). The
-        /// default balances readability on an 80-col terminal with the
-        /// natural length of file paths.
-        #[arg(long, default_value_t = 40)]
-        label_width: usize,
-        /// Include zero-cost `(model not yet attributed)` rows in
-        /// `--models` output. By default, Cursor-lag transient rows
-        /// that carry no backing cost are collapsed into a
-        /// suppressed-count footnote; pass `--include-pending` to
-        /// see them as their own row. Rows with real Cursor-Auto
-        /// cost always render regardless of this flag.
-        #[arg(long, default_value_t = false)]
-        include_pending: bool,
-        /// Break out the `(no repository)` bucket in `--projects` into a
-        /// per-folder breakdown keyed on the cwd basename. Off by
-        /// default so the main Repositories table stays clean of
-        /// `Desktop` / `~` / scratch-dir rows.
-        #[arg(long, default_value_t = false)]
-        include_non_repo: bool,
-        /// Output format: text (default) or json
-        #[arg(short, long, value_enum, default_value_t = StatsFormat::Text)]
-        format: StatsFormat,
-    },
+  budi stats projects -p all       All-time project costs
+  budi stats branches              Branches ranked by cost (today)
+  budi stats branch main           Cost details for a specific branch
+  budi stats branch main --repo github.com/acme/app
+  budi stats tickets               Tickets ranked by cost (today)
+  budi stats ticket ENG-123        Cost details for a specific ticket
+  budi stats activities            Activities ranked by cost (today)
+  budi stats activity bugfix       Cost details for a specific activity
+  budi stats files                 Files ranked by cost (today)
+  budi stats file src/main.rs      Cost details for a specific file
+  budi stats models                Model usage breakdown
+  budi stats tag activity          Raw cost breakdown by the activity tag
+  budi stats --provider cursor     Filter summary to Cursor only
+  budi stats --format json         JSON output for scripting")]
+    Stats(StatsArgs),
     /// Update budi to the latest version
     Update {
         /// Skip confirmation prompt
@@ -343,6 +241,103 @@ Examples:
     Pricing {
         #[command(subcommand)]
         action: PricingAction,
+    },
+}
+
+/// Top-level args for `budi stats`. Bare invocation (no subcommand) renders
+/// the default summary scoped by `--period` / `--provider` / `--format`.
+/// Subcommands drill into a specific view; their flags are global so they
+/// parse equivalently before or after the subcommand name.
+#[derive(Debug, clap::Args)]
+pub struct StatsArgs {
+    #[command(subcommand)]
+    pub view: Option<StatsView>,
+    #[command(flatten)]
+    pub opts: StatsOpts,
+}
+
+/// Shared output / filter knobs for every `budi stats` view. Every flag is
+/// `global = true` so it parses at any depth (`budi stats -p week projects`
+/// and `budi stats projects -p week` are equivalent).
+#[derive(Debug, clap::Args)]
+pub struct StatsOpts {
+    /// Time period to show (today, week, month, all, or relative like 1d, 7d, 1m)
+    #[arg(long, short, default_value = "today", global = true)]
+    pub period: StatsPeriod,
+    /// Optional repository filter for `branch`, `ticket`, `activity`, or
+    /// `file` detail views (recommended when names repeat across repos).
+    #[arg(long, global = true)]
+    pub repo: Option<String>,
+    /// Filter by provider (e.g. claude_code, cursor, codex, copilot_cli, openai). Only meaningful for the default summary view.
+    #[arg(long, global = true)]
+    pub provider: Option<String>,
+    /// Maximum rows in breakdown views (`projects`, `branches`, `tickets`,
+    /// `activities`, `files`, `models`, `tag`). `0` = no cap. Truncated
+    /// rows collapse into an `(other N: $X)` aggregate so the Total
+    /// footer always reconciles to the cent.
+    #[arg(long, default_value_t = 30, global = true)]
+    pub limit: usize,
+    /// Maximum characters for labels and label-like extra columns in
+    /// breakdown views. Values longer than this truncate with a middle
+    /// ellipsis (`…`).
+    #[arg(long, default_value_t = 40, global = true)]
+    pub label_width: usize,
+    /// Include zero-cost `(model not yet attributed)` rows in the
+    /// `models` view. By default Cursor-lag transient rows are collapsed
+    /// into a suppressed-count footnote.
+    #[arg(long, default_value_t = false, global = true)]
+    pub include_pending: bool,
+    /// Break out the `(no repository)` bucket in `projects` into a
+    /// per-folder breakdown keyed on the cwd basename.
+    #[arg(long, default_value_t = false, global = true)]
+    pub include_non_repo: bool,
+    /// Output format: text (default) or json
+    #[arg(short, long, value_enum, default_value_t = StatsFormat::Text, global = true)]
+    pub format: StatsFormat,
+}
+
+/// Drill-in views for `budi stats`. Each variant maps to one of the
+/// pre-8.3.14 mutually-exclusive view flags. Singular variants take an
+/// argument (the specific entity to drill into); plural variants render
+/// a ranked breakdown.
+#[derive(Debug, Subcommand)]
+pub enum StatsView {
+    /// Repositories ranked by cost
+    Projects,
+    /// Branches ranked by cost
+    Branches,
+    /// Cost details for a specific branch
+    Branch {
+        /// Branch name (e.g. `main`)
+        name: String,
+    },
+    /// Tickets ranked by cost
+    Tickets,
+    /// Cost details for a specific ticket
+    Ticket {
+        /// Ticket id (e.g. ENG-123)
+        id: String,
+    },
+    /// Activities ranked by cost
+    Activities,
+    /// Cost details for a specific activity
+    Activity {
+        /// Activity name (e.g. `bugfix`, `refactor`)
+        name: String,
+    },
+    /// Files ranked by cost
+    Files,
+    /// Cost details for a specific file
+    File {
+        /// Repo-relative file path (forward-slashed, inside the repo root)
+        path: String,
+    },
+    /// Cost breakdown by model
+    Models,
+    /// Raw cost breakdown by tag KEY (escape hatch for custom tag keys)
+    Tag {
+        /// Tag key (e.g. `ticket_id`, `activity`, or any custom key)
+        key: String,
     },
 }
 
@@ -627,28 +622,48 @@ fn main() -> Result<()> {
             quiet,
             repo_root,
         } => commands::doctor::cmd_doctor(repo_root, deep, quiet),
-        Commands::Stats {
-            period,
-            projects,
-            branches,
-            branch,
-            tickets,
-            ticket,
-            activities,
-            activity,
-            files,
-            file,
-            repo,
-            models,
-            provider,
-            tag,
-            limit,
-            label_width,
-            include_pending,
-            include_non_repo,
-            format,
-        } => {
+        Commands::Stats(args) => {
+            let StatsArgs { view, opts } = args;
+            let StatsOpts {
+                period,
+                repo,
+                provider,
+                limit,
+                label_width,
+                include_pending,
+                include_non_repo,
+                format,
+            } = opts;
             let json_output = matches!(format, StatsFormat::Json);
+            // Translate the new subcommand shape to the existing
+            // `cmd_stats` dispatch — the helper still drives the
+            // per-view rendering, we just project `view` back into the
+            // legacy boolean / Option arguments it expects.
+            let mut projects = false;
+            let mut branches = false;
+            let mut branch: Option<String> = None;
+            let mut tickets = false;
+            let mut ticket: Option<String> = None;
+            let mut activities = false;
+            let mut activity: Option<String> = None;
+            let mut files = false;
+            let mut file: Option<String> = None;
+            let mut models = false;
+            let mut tag: Option<String> = None;
+            match view {
+                None => {}
+                Some(StatsView::Projects) => projects = true,
+                Some(StatsView::Branches) => branches = true,
+                Some(StatsView::Branch { name }) => branch = Some(name),
+                Some(StatsView::Tickets) => tickets = true,
+                Some(StatsView::Ticket { id }) => ticket = Some(id),
+                Some(StatsView::Activities) => activities = true,
+                Some(StatsView::Activity { name }) => activity = Some(name),
+                Some(StatsView::Files) => files = true,
+                Some(StatsView::File { path }) => file = Some(path),
+                Some(StatsView::Models) => models = true,
+                Some(StatsView::Tag { key }) => tag = Some(key),
+            }
             commands::stats::cmd_stats(
                 period,
                 projects,
@@ -912,47 +927,58 @@ mod tests {
     }
 
     #[test]
-    fn cli_parses_stats_tickets_flag() {
+    fn cli_parses_stats_tickets_subcommand() {
         let cli =
-            Cli::try_parse_from(["budi", "stats", "--tickets"]).expect("budi stats --tickets");
+            Cli::try_parse_from(["budi", "stats", "tickets"]).expect("budi stats tickets parses");
         match cli.command {
-            Commands::Stats {
-                tickets, ticket, ..
-            } => {
-                assert!(tickets);
-                assert!(ticket.is_none());
+            Commands::Stats(args) => {
+                assert!(matches!(args.view, Some(StatsView::Tickets)));
             }
             _ => panic!("expected stats command"),
         }
     }
 
     #[test]
-    fn cli_parses_stats_ticket_value_flag() {
-        let cli = Cli::try_parse_from(["budi", "stats", "--ticket", "PAVA-2057"])
-            .expect("budi stats --ticket PAVA-2057");
+    fn cli_parses_stats_ticket_subcommand() {
+        let cli = Cli::try_parse_from(["budi", "stats", "ticket", "PAVA-2057"])
+            .expect("budi stats ticket PAVA-2057 parses");
         match cli.command {
-            Commands::Stats {
-                tickets, ticket, ..
-            } => {
-                assert!(!tickets);
-                assert_eq!(ticket.as_deref(), Some("PAVA-2057"));
-            }
+            Commands::Stats(args) => match args.view {
+                Some(StatsView::Ticket { id }) => assert_eq!(id, "PAVA-2057"),
+                other => panic!("expected ticket variant, got {:?}", other),
+            },
             _ => panic!("expected stats command"),
         }
     }
 
     #[test]
-    fn cli_stats_view_flags_are_mutually_exclusive() {
-        // --tickets vs --ticket
-        assert!(Cli::try_parse_from(["budi", "stats", "--tickets", "--ticket", "X-1"]).is_err());
-        // --tickets vs --branches
-        assert!(Cli::try_parse_from(["budi", "stats", "--tickets", "--branches"]).is_err());
-        // --ticket vs --branch
-        assert!(
-            Cli::try_parse_from(["budi", "stats", "--ticket", "X-1", "--branch", "main"]).is_err()
-        );
-        // --tickets vs --models
-        assert!(Cli::try_parse_from(["budi", "stats", "--tickets", "--models"]).is_err());
+    fn cli_stats_legacy_view_flags_are_rejected() {
+        // #589: the 11 mutually-exclusive view flags (--projects /
+        // --branches / --branch / --tickets / --ticket / --activities /
+        // --activity / --files / --file / --models / --tag) were removed
+        // in favor of subcommands. Regression guard so they don't quietly
+        // come back.
+        assert!(Cli::try_parse_from(["budi", "stats", "--tickets"]).is_err());
+        assert!(Cli::try_parse_from(["budi", "stats", "--ticket", "X-1"]).is_err());
+        assert!(Cli::try_parse_from(["budi", "stats", "--branches"]).is_err());
+        assert!(Cli::try_parse_from(["budi", "stats", "--branch", "main"]).is_err());
+        assert!(Cli::try_parse_from(["budi", "stats", "--activities"]).is_err());
+        assert!(Cli::try_parse_from(["budi", "stats", "--activity", "bugfix"]).is_err());
+        assert!(Cli::try_parse_from(["budi", "stats", "--files"]).is_err());
+        assert!(Cli::try_parse_from(["budi", "stats", "--file", "x.rs"]).is_err());
+        assert!(Cli::try_parse_from(["budi", "stats", "--models"]).is_err());
+        assert!(Cli::try_parse_from(["budi", "stats", "--projects"]).is_err());
+        assert!(Cli::try_parse_from(["budi", "stats", "--tag", "ticket_id"]).is_err());
+    }
+
+    #[test]
+    fn cli_stats_subcommands_are_mutually_exclusive_by_construction() {
+        // With clap subcommands, only one drill-in view can be selected
+        // per invocation by definition. Passing two subcommand names back
+        // to back parses the first as the view and the second as a
+        // positional / unknown argument, which clap rejects.
+        assert!(Cli::try_parse_from(["budi", "stats", "tickets", "branches"]).is_err());
+        assert!(Cli::try_parse_from(["budi", "stats", "models", "files"]).is_err());
     }
 
     #[test]
@@ -960,16 +986,19 @@ mod tests {
         let cli = Cli::try_parse_from([
             "budi",
             "stats",
-            "--ticket",
+            "ticket",
             "PAVA-2057",
             "--repo",
             "siropkin/budi",
         ])
-        .expect("budi stats --ticket --repo");
+        .expect("budi stats ticket --repo parses");
         match cli.command {
-            Commands::Stats { ticket, repo, .. } => {
-                assert_eq!(ticket.as_deref(), Some("PAVA-2057"));
-                assert_eq!(repo.as_deref(), Some("siropkin/budi"));
+            Commands::Stats(args) => {
+                match args.view {
+                    Some(StatsView::Ticket { id }) => assert_eq!(id, "PAVA-2057"),
+                    other => panic!("expected ticket variant, got {:?}", other),
+                }
+                assert_eq!(args.opts.repo.as_deref(), Some("siropkin/budi"));
             }
             _ => panic!("expected stats command"),
         }
@@ -988,58 +1017,28 @@ mod tests {
     }
 
     #[test]
-    fn cli_parses_stats_activities_flag() {
-        let cli = Cli::try_parse_from(["budi", "stats", "--activities"])
-            .expect("budi stats --activities parses");
+    fn cli_parses_stats_activities_subcommand() {
+        let cli = Cli::try_parse_from(["budi", "stats", "activities"])
+            .expect("budi stats activities parses");
         match cli.command {
-            Commands::Stats {
-                activities,
-                activity,
-                ..
-            } => {
-                assert!(activities);
-                assert!(activity.is_none());
+            Commands::Stats(args) => {
+                assert!(matches!(args.view, Some(StatsView::Activities)));
             }
             _ => panic!("expected stats command"),
         }
     }
 
     #[test]
-    fn cli_parses_stats_activity_value_flag() {
-        let cli = Cli::try_parse_from(["budi", "stats", "--activity", "bugfix"])
-            .expect("budi stats --activity bugfix parses");
+    fn cli_parses_stats_activity_subcommand() {
+        let cli = Cli::try_parse_from(["budi", "stats", "activity", "bugfix"])
+            .expect("budi stats activity bugfix parses");
         match cli.command {
-            Commands::Stats {
-                activities,
-                activity,
-                ..
-            } => {
-                assert!(!activities);
-                assert_eq!(activity.as_deref(), Some("bugfix"));
-            }
+            Commands::Stats(args) => match args.view {
+                Some(StatsView::Activity { name }) => assert_eq!(name, "bugfix"),
+                other => panic!("expected activity variant, got {:?}", other),
+            },
             _ => panic!("expected stats command"),
         }
-    }
-
-    #[test]
-    fn cli_stats_activity_is_mutually_exclusive_with_other_views() {
-        // --activities vs --tickets / --branches / --activity / --models
-        assert!(
-            Cli::try_parse_from(["budi", "stats", "--activities", "--tickets"]).is_err(),
-            "--activities and --tickets must be mutually exclusive"
-        );
-        assert!(
-            Cli::try_parse_from(["budi", "stats", "--activities", "--branches"]).is_err(),
-            "--activities and --branches must be mutually exclusive"
-        );
-        assert!(
-            Cli::try_parse_from(["budi", "stats", "--activities", "--activity", "bugfix"]).is_err(),
-            "--activities and --activity must be mutually exclusive"
-        );
-        assert!(
-            Cli::try_parse_from(["budi", "stats", "--activity", "bugfix", "--models"]).is_err(),
-            "--activity and --models must be mutually exclusive"
-        );
     }
 
     #[test]
@@ -1047,66 +1046,48 @@ mod tests {
         let cli = Cli::try_parse_from([
             "budi",
             "stats",
-            "--activity",
+            "activity",
             "bugfix",
             "--repo",
             "siropkin/budi",
         ])
-        .expect("budi stats --activity --repo parses");
+        .expect("budi stats activity --repo parses");
         match cli.command {
-            Commands::Stats { activity, repo, .. } => {
-                assert_eq!(activity.as_deref(), Some("bugfix"));
-                assert_eq!(repo.as_deref(), Some("siropkin/budi"));
+            Commands::Stats(args) => {
+                match args.view {
+                    Some(StatsView::Activity { name }) => assert_eq!(name, "bugfix"),
+                    other => panic!("expected activity variant, got {:?}", other),
+                }
+                assert_eq!(args.opts.repo.as_deref(), Some("siropkin/budi"));
             }
             _ => panic!("expected stats command"),
         }
     }
 
     #[test]
-    fn cli_parses_stats_files_flag() {
-        let cli =
-            Cli::try_parse_from(["budi", "stats", "--files"]).expect("budi stats --files parses");
+    fn cli_parses_stats_files_subcommand() {
+        let cli = Cli::try_parse_from(["budi", "stats", "files"]).expect("budi stats files parses");
         match cli.command {
-            Commands::Stats { files, file, .. } => {
-                assert!(files);
-                assert!(file.is_none());
+            Commands::Stats(args) => {
+                assert!(matches!(args.view, Some(StatsView::Files)));
             }
             _ => panic!("expected stats command"),
         }
     }
 
     #[test]
-    fn cli_parses_stats_file_value_flag() {
-        let cli = Cli::try_parse_from(["budi", "stats", "--file", "crates/budi-core/src/lib.rs"])
-            .expect("budi stats --file <path> parses");
+    fn cli_parses_stats_file_subcommand() {
+        let cli = Cli::try_parse_from(["budi", "stats", "file", "crates/budi-core/src/lib.rs"])
+            .expect("budi stats file <path> parses");
         match cli.command {
-            Commands::Stats { files, file, .. } => {
-                assert!(!files);
-                assert_eq!(file.as_deref(), Some("crates/budi-core/src/lib.rs"));
-            }
+            Commands::Stats(args) => match args.view {
+                Some(StatsView::File { path }) => {
+                    assert_eq!(path, "crates/budi-core/src/lib.rs")
+                }
+                other => panic!("expected file variant, got {:?}", other),
+            },
             _ => panic!("expected stats command"),
         }
-    }
-
-    #[test]
-    fn cli_stats_file_is_mutually_exclusive_with_other_views() {
-        // --files vs --tickets / --branches / --file / --models etc.
-        assert!(
-            Cli::try_parse_from(["budi", "stats", "--files", "--tickets"]).is_err(),
-            "--files and --tickets must be mutually exclusive"
-        );
-        assert!(
-            Cli::try_parse_from(["budi", "stats", "--files", "--activities"]).is_err(),
-            "--files and --activities must be mutually exclusive"
-        );
-        assert!(
-            Cli::try_parse_from(["budi", "stats", "--files", "--file", "x.rs"]).is_err(),
-            "--files and --file must be mutually exclusive"
-        );
-        assert!(
-            Cli::try_parse_from(["budi", "stats", "--file", "x.rs", "--models"]).is_err(),
-            "--file and --models must be mutually exclusive"
-        );
     }
 
     #[test]
@@ -1114,16 +1095,133 @@ mod tests {
         let cli = Cli::try_parse_from([
             "budi",
             "stats",
-            "--file",
+            "file",
             "src/main.rs",
             "--repo",
             "siropkin/budi",
         ])
-        .expect("budi stats --file --repo parses");
+        .expect("budi stats file --repo parses");
         match cli.command {
-            Commands::Stats { file, repo, .. } => {
-                assert_eq!(file.as_deref(), Some("src/main.rs"));
-                assert_eq!(repo.as_deref(), Some("siropkin/budi"));
+            Commands::Stats(args) => {
+                match args.view {
+                    Some(StatsView::File { path }) => assert_eq!(path, "src/main.rs"),
+                    other => panic!("expected file variant, got {:?}", other),
+                }
+                assert_eq!(args.opts.repo.as_deref(), Some("siropkin/budi"));
+            }
+            _ => panic!("expected stats command"),
+        }
+    }
+
+    #[test]
+    fn cli_stats_global_flags_parse_after_subcommand() {
+        // Regression guard: shared flags marked `global = true` must
+        // parse equivalently before or after the subcommand name. The
+        // typical user reach is `budi stats projects -p week` (after).
+        let cli = Cli::try_parse_from(["budi", "stats", "projects", "-p", "week"])
+            .expect("budi stats projects -p week should parse");
+        match cli.command {
+            Commands::Stats(args) => {
+                assert!(matches!(args.view, Some(StatsView::Projects)));
+                assert_eq!(args.opts.period, StatsPeriod::Week);
+            }
+            _ => panic!("expected stats command"),
+        }
+
+        // `budi stats branches --limit 5 --format json` exercises three
+        // shared knobs at once on a breakdown view.
+        let cli = Cli::try_parse_from([
+            "budi", "stats", "branches", "--limit", "5", "--format", "json",
+        ])
+        .expect("budi stats branches with shared opts should parse");
+        match cli.command {
+            Commands::Stats(args) => {
+                assert!(matches!(args.view, Some(StatsView::Branches)));
+                assert_eq!(args.opts.limit, 5);
+                assert_eq!(args.opts.format, StatsFormat::Json);
+            }
+            _ => panic!("expected stats command"),
+        }
+    }
+
+    #[test]
+    fn cli_parses_stats_models_subcommand() {
+        let cli =
+            Cli::try_parse_from(["budi", "stats", "models"]).expect("budi stats models parses");
+        match cli.command {
+            Commands::Stats(args) => assert!(matches!(args.view, Some(StatsView::Models))),
+            _ => panic!("expected stats command"),
+        }
+    }
+
+    #[test]
+    fn cli_parses_stats_projects_subcommand() {
+        let cli = Cli::try_parse_from(["budi", "stats", "projects", "-p", "all"])
+            .expect("budi stats projects -p all parses");
+        match cli.command {
+            Commands::Stats(args) => {
+                assert!(matches!(args.view, Some(StatsView::Projects)));
+                assert_eq!(args.opts.period, StatsPeriod::All);
+            }
+            _ => panic!("expected stats command"),
+        }
+    }
+
+    #[test]
+    fn cli_parses_stats_branches_subcommand() {
+        let cli =
+            Cli::try_parse_from(["budi", "stats", "branches"]).expect("budi stats branches parses");
+        match cli.command {
+            Commands::Stats(args) => assert!(matches!(args.view, Some(StatsView::Branches))),
+            _ => panic!("expected stats command"),
+        }
+    }
+
+    #[test]
+    fn cli_parses_stats_branch_subcommand() {
+        let cli = Cli::try_parse_from(["budi", "stats", "branch", "main"])
+            .expect("budi stats branch main parses");
+        match cli.command {
+            Commands::Stats(args) => match args.view {
+                Some(StatsView::Branch { name }) => assert_eq!(name, "main"),
+                other => panic!("expected branch variant, got {:?}", other),
+            },
+            _ => panic!("expected stats command"),
+        }
+    }
+
+    #[test]
+    fn cli_parses_stats_tag_subcommand() {
+        let cli = Cli::try_parse_from(["budi", "stats", "tag", "activity"])
+            .expect("budi stats tag activity parses");
+        match cli.command {
+            Commands::Stats(args) => match args.view {
+                Some(StatsView::Tag { key }) => assert_eq!(key, "activity"),
+                other => panic!("expected tag variant, got {:?}", other),
+            },
+            _ => panic!("expected stats command"),
+        }
+    }
+
+    #[test]
+    fn cli_parses_bare_stats() {
+        // No subcommand → default summary view. Shared opts still parse
+        // at the top level.
+        let cli = Cli::try_parse_from(["budi", "stats"]).expect("bare budi stats parses");
+        match cli.command {
+            Commands::Stats(args) => {
+                assert!(args.view.is_none());
+                assert_eq!(args.opts.period, StatsPeriod::Today);
+            }
+            _ => panic!("expected stats command"),
+        }
+
+        let cli = Cli::try_parse_from(["budi", "stats", "--provider", "cursor"])
+            .expect("budi stats --provider cursor parses");
+        match cli.command {
+            Commands::Stats(args) => {
+                assert!(args.view.is_none());
+                assert_eq!(args.opts.provider.as_deref(), Some("cursor"));
             }
             _ => panic!("expected stats command"),
         }
@@ -1453,21 +1551,21 @@ mod tests {
         let cli = Cli::try_parse_from(["budi", "stats", "-p", "7d"])
             .expect("budi stats -p 7d should parse");
         match cli.command {
-            Commands::Stats { period, .. } => assert_eq!(period, StatsPeriod::Days(7)),
+            Commands::Stats(args) => assert_eq!(args.opts.period, StatsPeriod::Days(7)),
             _ => panic!("expected stats command"),
         }
 
         let cli = Cli::try_parse_from(["budi", "stats", "--period", "2w"])
             .expect("budi stats --period 2w should parse");
         match cli.command {
-            Commands::Stats { period, .. } => assert_eq!(period, StatsPeriod::Weeks(2)),
+            Commands::Stats(args) => assert_eq!(args.opts.period, StatsPeriod::Weeks(2)),
             _ => panic!("expected stats command"),
         }
 
         let cli = Cli::try_parse_from(["budi", "stats", "-p", "1m"])
             .expect("budi stats -p 1m should parse");
         match cli.command {
-            Commands::Stats { period, .. } => assert_eq!(period, StatsPeriod::Months(1)),
+            Commands::Stats(args) => assert_eq!(args.opts.period, StatsPeriod::Months(1)),
             _ => panic!("expected stats command"),
         }
 
