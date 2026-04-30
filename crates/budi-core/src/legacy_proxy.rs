@@ -218,7 +218,7 @@ fn emit_upgrade_notice_once_for_scan(
     tracing::warn!(
         managed_files = scan.managed_file_count(),
         paths = %managed_paths,
-        "Detected legacy 8.0/8.1 proxy config residue managed by Budi. Run `budi init --cleanup` to review and remove it before those stale localhost routes break your agents on 8.2."
+        "Detected legacy 8.0/8.1 proxy config residue managed by Budi. `budi doctor` lists the affected files; remove the managed blocks by hand or run `budi uninstall` so those stale localhost routes don't break your agents."
     );
 
     fs::write(flag_path, "logged\n")

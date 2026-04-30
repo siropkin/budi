@@ -495,7 +495,10 @@ fn check_legacy_proxy_residue() -> CheckResult {
             return CheckResult::warn(
                 "leftover proxy config",
                 format!("could not inspect legacy proxy residue ({e})"),
-                Some("Run `budi init --cleanup` once the affected files are readable.".to_string()),
+                Some(
+                    "Re-run once the affected files are readable, or run `budi uninstall` to remove managed blocks."
+                        .to_string(),
+                ),
             );
         }
     };
@@ -548,7 +551,7 @@ fn check_legacy_proxy_residue() -> CheckResult {
         "leftover proxy config",
         details.join("; "),
         Some(
-            "Run `budi init --cleanup` to review and remove old 8.0/8.1 proxy residue with explicit consent."
+            "Remove the listed managed blocks by hand, or run `budi uninstall` (which strips managed 8.0/8.1 proxy residue as part of teardown)."
                 .to_string(),
         ),
     )

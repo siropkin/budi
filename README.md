@@ -224,8 +224,6 @@ budi integrations install --with claude-code-statusline
 **Cursor extension offline or quiet:**
 Run `budi doctor`, then **Budi: Refresh Status** in Cursor. Open a Cursor chat once so it creates its local session files, then recheck `budi status`.
 
-**Upgraded from 8.0/8.1?** Run `budi doctor` — if it warns about proxy residue, run `budi init --cleanup`.
-
 **Daemon doesn't survive reboots:** `budi autostart status` — if not installed, run `budi autostart install`.
 
 ## Uninstall
@@ -261,7 +259,6 @@ Quick validation: `cargo fmt --all && cargo clippy --workspace --all-targets --l
 
 ```bash
 budi init                          # start daemon + install autostart + show detected agents
-budi init --cleanup                # review/remove managed 8.0/8.1 proxy residue
 budi db import                     # one-time import of historical transcripts (shows per-agent progress)
 budi db import --format json       # JSON output with per-agent file/message breakdown (scripting)
 ```
