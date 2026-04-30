@@ -1,5 +1,32 @@
 # Changelog
 
+## 8.3.12 — 2026-04-29
+
+8.3.12 is a same-day follow-up to `v8.3.11`. Verifying the
+`session_summaries` fix on a real dogfood DB after `budi cloud reset`
+returned `Server returned 413` — the watermark-less re-upload built a
+single envelope of 1931 rollups + 2350 sessions and blew past the
+cloud's body-size cap. Cutting the v8.3.11 tag immediately after
+merging the prep PR also surfaced a long-suspected race in the release
+workflow: `wait-on-check-action` exited within seconds because the
+`ci-success` umbrella check hadn't been registered yet on the fresh
+tag SHA, so every release prep that pushed a tag right after merge was
+playing roulette with a workflow_dispatch retry. Both are
+infrastructure fixes — no new ingest / pricing behavior, no ADR
+amendments, no wire / data-shape changes.
+
+### Fixed
+
+- **`budi cloud reset` + `budi cloud sync` no longer 413 on multi-month DBs** (#572 / PR #574). Pre-fix `cloud_sync::build_envelope` collected everything `fetch_daily_rollups` and `fetch_session_summaries` returned for the watermark in one shot and `push_envelope` POSTed it as one body. Per-tick incremental sync stayed under the limit by accident — each tick covers ≤ 1 day of new data — but `budi cloud reset` deliberately drops the three sentinel rows in `sync_state` (`__budi_cloud_sync__`, `__budi_cloud_sync___value`, `__budi_cloud_sync_sessions__`) to force a no-watermark rebuild, and the rebuilt envelope on a real dogfood DB (~8 rollups/day × ~245 days, ~10 sessions/day → ~4000 records, ~8 MB body) immediately exceeded the cloud's body-size cap. Real evidence from the maintainer machine the day this was filed: `budi cloud reset --yes` succeeded, `budi cloud sync` failed with `Cloud sync hit a transient error: Server returned 413` (`attempted 1931 rollups, 2350 sessions`). Workaround used to verify v8.3.11 fix #569 was a manual `INSERT OR REPLACE INTO sync_state` to seed an intermediate watermark — not a hatch any user will figure out, and explicitly the recovery path that v8.3.10 advertised. Post-fix `cloud_sync.rs` chunks the envelope client-side at `MAX_RECORDS_PER_ENVELOPE = 500`, with rollup chunks day-aligned (a single `bucket_day` never spans two chunks) so the local "watermark = latest day fully synced" contract from ADR-0083 §5 stays honest on partial-chunk failure. The chunk loop POSTs each batch separately; on partial-chunk failure already-confirmed watermark progress is preserved and the next tick / CLI retry resumes from there. Cloud-side dedup (ADR-0083 §6) keeps the re-upload safe even when records overlap with rows the cloud already has. Per-chunk progress now surfaces through `SyncTickReport` and the daemon's `/cloud/sync` JSON, so `budi cloud sync` renders "(N records pushed across M chunks)" instead of one long silence. Pinned by 6 new unit tests covering: small payload → single chunk, empty input → one empty chunk, large rollup set → day-aligned multi-chunk split, oversized single day stays intact (one `bucket_day` is never split), sessions chunk independently of rollups, dogfood-sized payload (~1920 rollups + 2350 sessions) splits as expected; plus a new daemon route test for the partial-success message including chunk progress in the transient-error path.
+
+- **Release workflow no longer races on the `ci-success` umbrella check for fresh tags** (#573 / PR #575). Pre-fix `release.yml`'s `Verify CI passed` job used `lewagon/wait-on-check-action@v1.3.4` to wait for `check-name: ci-success` on the tag's SHA. The action queries check-runs for the SHA, filters by check name, and exits within seconds with `"The requested check was never run against this ref"` if no match — confusing "not yet registered" with "won't happen". On every fresh tag push made immediately after merging the prep PR, `ci-success` (which depends on `rust-checks` / `windows-build` / `macos-build` / `supply-chain` and only registers once those start completing) hadn't been registered yet, and the verify step exited 1 within ~2 seconds. Real evidence: pushing the v8.3.11 tag at 17:45 PDT this evening hit exactly that path, and the workaround was `gh workflow run release.yml -f tag=v8.3.11` after `main`'s `ci-success` went green by hand — which is why v8.3.11 binaries didn't appear on the release page until 00:53 UTC. Post-fix the verify step uses `fountainhead/action-wait-for-check@v1.2.0` (pinned to commit SHA `5a908a2` to match the existing convention in this workflow), which polls until a completed check named `ci-success` actually appears on the SHA before returning its conclusion. The new action only reports the result via an output (`conclusion`), so a follow-up step explicitly fails the job when the conclusion is anything other than `success`. v8.3.12's own tag is the in-anger smoke test for this fix.
+
+### Non-blocking, carried forward
+
+- **RC-4 Part B** (#504) — Cursor Usage API auth root-cause; Part A shipped with `v8.3.1`.
+- **ADR-0090 supersede** — pending one release cycle of live validation on the now-working `cursorDiskKV` bubbles path before the Usage API §1 surface can be retired.
+- **Detached daemon log capture** — first post-`budi update` daemon's startup lines don't land in `~/Library/Logs/budi-daemon.log` until the next launchctl kickstart. Observability-only; carried from v8.3.6 / v8.3.7.
+
 ## 8.3.11 — 2026-04-29
 
 8.3.11 is a single-bug correctness patch for the cloud session-summary
