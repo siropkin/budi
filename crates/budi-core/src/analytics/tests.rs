@@ -6340,7 +6340,10 @@ fn backfill_repo_and_branch_from_messages() {
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .unwrap();
-    assert_eq!(cx_repo.as_deref(), Some("github.com/siropkin/codex-experiments"));
+    assert_eq!(
+        cx_repo.as_deref(),
+        Some("github.com/siropkin/codex-experiments")
+    );
     assert_eq!(cx_branch.as_deref(), Some("master"));
 
     // Idempotent.
@@ -6384,6 +6387,9 @@ fn backfill_preserves_already_populated_repo_and_branch() {
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .unwrap();
-    assert_eq!(repo.as_deref(), Some("github.com/example/authoritative-repo"));
+    assert_eq!(
+        repo.as_deref(),
+        Some("github.com/example/authoritative-repo")
+    );
     assert_eq!(branch.as_deref(), Some("authoritative-branch"));
 }
