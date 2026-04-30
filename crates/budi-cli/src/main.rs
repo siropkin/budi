@@ -1447,8 +1447,8 @@ mod tests {
             _ => panic!("expected pricing command"),
         }
 
-        let cli = Cli::try_parse_from(["budi", "pricing", "status"])
-            .expect("budi pricing status parses");
+        let cli =
+            Cli::try_parse_from(["budi", "pricing", "status"]).expect("budi pricing status parses");
         match cli.command {
             Commands::Pricing(args) => assert!(matches!(args.view, Some(PricingView::Status))),
             _ => panic!("expected pricing status command"),
