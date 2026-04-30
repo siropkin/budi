@@ -25,14 +25,27 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
+      # fountainhead/action-wait-for-check treats a missing check as "wait" rather
+      # than "exit immediately", which avoids the race where ci-success hasn't
+      # registered yet on a fresh tag push (see issue #573).
       - name: Wait for CI workflow
-        uses: lewagon/wait-on-check-action@ccfb013c15c8afb7bf2b7c028fb74dc5a068cccc # v1.3.4
+        id: wait-ci
+        uses: fountainhead/action-wait-for-check@5a908a24814494009c4bb27c242ea38c93c593be # v1.2.0
         with:
+          token: ${{ secrets.GITHUB_TOKEN }}
           ref: ${{ github.sha }}
-          check-name: ci-success
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
-          wait-interval: 15
-          allowed-conclusions: success
+          checkName: ci-success
+          timeoutSeconds: 1500
+          intervalSeconds: 15
+
+      - name: Verify ci-success conclusion
+        run: |
+          conclusion='${{ steps.wait-ci.outputs.conclusion }}'
+          echo "ci-success conclusion: ${conclusion}"
+          if [[ "${conclusion}" != "success" ]]; then
+            echo "::error::ci-success did not succeed (conclusion=${conclusion})"
+            exit 1
+          fi
 
   verify_tag_version:
     name: Verify tag matches Cargo version
