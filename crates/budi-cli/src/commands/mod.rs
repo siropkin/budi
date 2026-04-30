@@ -14,7 +14,6 @@ pub mod import;
 pub mod init;
 pub mod integrations;
 pub mod pricing;
-pub mod repair;
 pub mod sessions;
 pub mod stats;
 pub mod status;

@@ -60,7 +60,7 @@ fn build_router(app_state: AppState) -> Router {
     // `/sync/all` and `/sync/reset` call `open_db_with_migration` internally
     // so they can't trip the schema guard; `POST /sync` contains its own
     // bail-on-stale-schema branch that now returns a structured 503 (see
-    // `routes::hooks::analytics_sync`).  `/admin/migrate` and
+    // `routes::hooks::analytics_sync`).  `/admin/check` and
     // `/admin/repair` must NOT be gated by the schema guard — those are
     // the escape hatches operators use to fix the very drift that trips
     // it.
@@ -73,7 +73,7 @@ fn build_router(app_state: AppState) -> Router {
         .route("/pricing/refresh", post(p::pricing_refresh))
         .route("/admin/providers", get(a::analytics_registered_providers))
         .route("/admin/schema", get(a::analytics_schema_version))
-        .route("/admin/migrate", post(a::analytics_migrate))
+        .route("/admin/check", get(a::analytics_check))
         .route("/admin/repair", post(a::analytics_repair))
         .route(
             "/admin/integrations/install",
@@ -237,7 +237,7 @@ async fn main() -> Result<()> {
                     current,
                     target,
                     db_path = %db_path.display(),
-                    "analytics schema is behind this daemon binary; /analytics/* and POST /sync will return 503 until `budi db migrate` succeeds"
+                    "analytics schema is behind this daemon binary; /analytics/* and POST /sync will return 503 until `budi db check --fix` succeeds"
                 );
             } else if current > target {
                 tracing::warn!(
@@ -822,7 +822,7 @@ mod tests {
         let msg = v["error"].as_str().unwrap_or_default();
         assert!(msg.contains("analytics schema is v0"));
         assert!(msg.contains("daemon expects v1"));
-        assert!(msg.contains("budi db migrate"));
+        assert!(msg.contains("budi db check --fix"));
     }
 
     #[test]

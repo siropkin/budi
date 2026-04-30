@@ -48,7 +48,7 @@ pub fn open_db(db_path: &Path) -> Result<Connection> {
 }
 
 /// Open the analytics database and run pending migrations.
-/// Used by `budi init`, `budi update`, and `budi db migrate`.
+/// Used by `budi init`, `budi update`, and `budi db check --fix`.
 pub fn open_db_with_migration(db_path: &Path) -> Result<Connection> {
     let conn = open_db(db_path)?;
     crate::migration::migrate(&conn)?;

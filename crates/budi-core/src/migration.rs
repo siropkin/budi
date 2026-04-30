@@ -79,6 +79,73 @@ pub fn repair(conn: &Connection) -> Result<RepairReport> {
     })
 }
 
+/// Diagnose schema drift without applying any changes.
+///
+/// Returns a [`RepairReport`] populated as if [`repair`] had been called,
+/// but the database is left untouched. `migrated` indicates that a
+/// migration is needed; `added_columns` / `added_indexes` /
+/// `removed_tables` enumerate the additive drift that [`repair`] would
+/// fix. When `migrated` is true the drift lists are empty: the version
+/// migration would recreate the schema from scratch, so per-item drift
+/// is moot.
+pub fn check(conn: &Connection) -> Result<RepairReport> {
+    let from_version = current_version(conn);
+    let to_version = SCHEMA_VERSION;
+    let migrated = from_version != to_version;
+
+    let (added_columns, added_indexes, removed_tables) = if migrated {
+        (Vec::new(), Vec::new(), Vec::new())
+    } else {
+        detect_drift(conn)?
+    };
+
+    Ok(RepairReport {
+        from_version,
+        to_version,
+        migrated,
+        added_columns,
+        added_indexes,
+        removed_tables,
+    })
+}
+
+fn detect_drift(conn: &Connection) -> Result<(Vec<String>, Vec<String>, Vec<String>)> {
+    let mut added_columns: Vec<String> = Vec::new();
+    let mut removed_tables: Vec<String> = Vec::new();
+
+    if !table_exists(conn, "message_rollups_hourly")? {
+        added_columns.push("message_rollups_hourly".to_string());
+    }
+    if !table_exists(conn, "message_rollups_daily")? {
+        added_columns.push("message_rollups_daily".to_string());
+    }
+    for trigger in [
+        "trg_messages_rollup_insert",
+        "trg_messages_rollup_delete",
+        "trg_messages_rollup_update",
+    ] {
+        if !trigger_exists(conn, trigger)? {
+            added_columns.push(trigger.to_string());
+        }
+    }
+    if !table_exists(conn, "tail_offsets")? {
+        added_columns.push("tail_offsets".to_string());
+    }
+    if table_exists(conn, "messages")? && !has_column(conn, "messages", "pricing_source")? {
+        added_columns.push("messages.pricing_source".to_string());
+    }
+    if !table_exists(conn, "pricing_manifests")? {
+        added_columns.push("pricing_manifests".to_string());
+    }
+    if table_exists(conn, "proxy_events")? {
+        removed_tables.push("proxy_events".to_string());
+    }
+
+    let added_indexes = missing_reconcile_indexes(conn)?;
+
+    Ok((added_columns, added_indexes, removed_tables))
+}
+
 fn run_version_migrations(conn: &Connection) -> Result<()> {
     let version = current_version(conn);
 
@@ -1273,6 +1340,61 @@ mod tests {
 
         assert!(!needs_migration(&conn));
         assert_core_schema(&conn);
+    }
+
+    #[test]
+    fn check_on_clean_db_reports_no_drift() {
+        let conn = Connection::open_in_memory().unwrap();
+        migrate(&conn).unwrap();
+
+        let report = check(&conn).unwrap();
+        assert_eq!(report.from_version, SCHEMA_VERSION);
+        assert_eq!(report.to_version, SCHEMA_VERSION);
+        assert!(!report.migrated);
+        assert!(report.added_columns.is_empty());
+        assert!(report.added_indexes.is_empty());
+        assert!(report.removed_tables.is_empty());
+    }
+
+    #[test]
+    fn check_detects_drift_without_modifying_db() {
+        let conn = Connection::open_in_memory().unwrap();
+        migrate(&conn).unwrap();
+        conn.execute_batch("DROP TABLE tail_offsets;").unwrap();
+        assert!(!table_exists(&conn, "tail_offsets").unwrap());
+
+        let report = check(&conn).unwrap();
+        assert!(!report.migrated);
+        assert!(
+            report.added_columns.iter().any(|c| c == "tail_offsets"),
+            "check should report the missing table; got {:?}",
+            report.added_columns
+        );
+        assert!(
+            !table_exists(&conn, "tail_offsets").unwrap(),
+            "check must not modify the database"
+        );
+    }
+
+    #[test]
+    fn check_reports_migration_needed_for_v0_db() {
+        let conn = Connection::open_in_memory().unwrap();
+        assert_eq!(current_version(&conn), 0);
+
+        let report = check(&conn).unwrap();
+        assert_eq!(report.from_version, 0);
+        assert_eq!(report.to_version, SCHEMA_VERSION);
+        assert!(report.migrated);
+        // When migration is needed, drift lists are empty since the
+        // migration would recreate everything from scratch.
+        assert!(report.added_columns.is_empty());
+        assert!(report.added_indexes.is_empty());
+        assert!(report.removed_tables.is_empty());
+        assert_eq!(
+            current_version(&conn),
+            0,
+            "check must not modify the database"
+        );
     }
 
     #[test]
