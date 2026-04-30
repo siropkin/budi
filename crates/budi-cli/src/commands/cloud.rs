@@ -502,8 +502,35 @@ fn describe_source(src: IdentitySource) -> &'static str {
 }
 
 /// `budi cloud sync` — flush the pending cloud queue now.
-pub fn cmd_cloud_sync(format: StatsFormat) -> Result<()> {
+///
+/// #583: `--full` folds `cloud reset && cloud sync` into one verb. The
+/// watermarks are dropped via the same `POST /cloud/reset` path the
+/// standalone `budi cloud reset` uses (so the daemon's `cloud_syncing`
+/// busy flag still serializes the reset against any concurrent envelope
+/// build) and then the regular sync runs. Cloud-side dedup keeps the
+/// re-upload safe even when records overlap with rows the cloud
+/// already has.
+pub fn cmd_cloud_sync(format: StatsFormat, full: bool, yes: bool) -> Result<()> {
     let client = DaemonClient::connect()?;
+
+    let reset_removed = if full {
+        let cfg = load_cloud_config();
+        if !confirm_reset(&cfg, yes)? {
+            println!("Aborted. Watermarks left unchanged.");
+            return Ok(());
+        }
+        let reset_body = client
+            .cloud_reset()
+            .context("failed to reset cloud sync watermarks via the daemon")?;
+        let removed = reset_body
+            .get("removed")
+            .and_then(Value::as_u64)
+            .unwrap_or(0) as usize;
+        Some(removed)
+    } else {
+        None
+    };
+
     let body = client.cloud_sync()?;
 
     if matches!(format, StatsFormat::Json) {
@@ -515,11 +542,37 @@ pub fn cmd_cloud_sync(format: StatsFormat) -> Result<()> {
         return Ok(());
     }
 
+    if let Some(removed) = reset_removed {
+        render_full_reset_preamble(removed);
+    }
     render_sync_text(&body);
     if body.get("ok").and_then(Value::as_bool) != Some(true) {
         std::process::exit(2);
     }
     Ok(())
+}
+
+/// #583: tiny prefix block printed in `--full` mode so users see the
+/// reset step landed before the regular sync output. Stays quiet when
+/// nothing was dropped (matches the `cloud reset` no-op render).
+fn render_full_reset_preamble(removed: usize) {
+    let green = ansi("\x1b[32m");
+    let yellow = ansi("\x1b[33m");
+    let dim = ansi("\x1b[90m");
+    let bold = ansi("\x1b[1m");
+    let reset = ansi("\x1b[0m");
+
+    println!();
+    if removed == 0 {
+        println!(
+            "  {yellow}!{reset} {bold}No cloud sync watermarks were set.{reset} Re-uploading from scratch."
+        );
+    } else {
+        println!(
+            "  {green}✓{reset} {bold}Dropped cloud sync watermarks{reset}  {dim}({removed} sentinel row{}){reset}",
+            if removed == 1 { "" } else { "s" },
+        );
+    }
 }
 
 /// `budi cloud status` — report cloud sync readiness and last-synced-at.
