@@ -326,6 +326,8 @@ Examples:
   budi cloud status              Show cloud sync readiness and last sync
   budi cloud sync                Push queued local data to the cloud now
   budi cloud sync --format json  JSON output (exit code 2 on failure)
+  budi cloud sync --full         Drop watermarks then re-upload everything
+  budi cloud sync --full --yes   Same, non-interactive (CI / scripts)
   budi cloud reset               Reset watermarks so next sync re-uploads all
   budi cloud reset --yes         Same, non-interactive (CI / scripts)")]
     Cloud {
@@ -421,10 +423,26 @@ enum CloudAction {
         format: StatsFormat,
     },
     /// Push queued local data (daily rollups, session summaries) to the cloud now
+    ///
+    /// `--full` drops the local cloud-sync watermarks before the push so the
+    /// next sync re-uploads every rollup + session summary. Equivalent to
+    /// running `budi cloud reset && budi cloud sync` in one step. The
+    /// re-upload is safe — cloud-side dedup collapses any records that
+    /// overlap with what the cloud already has.
     Sync {
         /// Output format: text (default) or json
         #[arg(short, long, value_enum, default_value_t = StatsFormat::Text)]
         format: StatsFormat,
+        /// Drop the cloud-sync watermarks before pushing so the next sync
+        /// re-uploads everything. Equivalent to `cloud reset && cloud sync`.
+        #[arg(long, default_value_t = false)]
+        full: bool,
+        /// Skip the interactive confirmation that `--full` would otherwise
+        /// show. Required for non-TTY callers (CI, scripts) — otherwise the
+        /// prompt aborts to avoid a silent re-upload on a stray invocation.
+        /// Ignored unless `--full` is set.
+        #[arg(long, default_value_t = false)]
+        yes: bool,
     },
     /// Drop the cloud sync watermarks so the next sync re-uploads everything
     ///
@@ -722,7 +740,9 @@ fn main() -> Result<()> {
                 org_id,
             } => commands::cloud::cmd_cloud_init(api_key, force, yes, device_id, org_id),
             CloudAction::Status { format } => commands::cloud::cmd_cloud_status(format),
-            CloudAction::Sync { format } => commands::cloud::cmd_cloud_sync(format),
+            CloudAction::Sync { format, full, yes } => {
+                commands::cloud::cmd_cloud_sync(format, full, yes)
+            }
             CloudAction::Reset { yes } => commands::cloud::cmd_cloud_reset(yes),
         },
         Commands::Pricing { action } => match action {
@@ -1114,8 +1134,12 @@ mod tests {
         let cli = Cli::try_parse_from(["budi", "cloud", "sync"]).expect("budi cloud sync parses");
         match cli.command {
             Commands::Cloud {
-                action: CloudAction::Sync { format },
-            } => assert!(matches!(format, StatsFormat::Text)),
+                action: CloudAction::Sync { format, full, yes },
+            } => {
+                assert!(matches!(format, StatsFormat::Text));
+                assert!(!full, "default invocation must not drop watermarks");
+                assert!(!yes, "default invocation must be interactive");
+            }
             _ => panic!("expected cloud sync command"),
         }
 
@@ -1126,6 +1150,54 @@ mod tests {
                 action: CloudAction::Status { format },
             } => assert!(matches!(format, StatsFormat::Json)),
             _ => panic!("expected cloud status command"),
+        }
+    }
+
+    #[test]
+    fn cli_parses_cloud_sync_full() {
+        // #583: `--full` folds the prior `cloud reset && cloud sync`
+        // two-step into a single verb. `--yes` is the non-interactive
+        // escape hatch CI / scripts need so the confirmation prompt
+        // isn't a hard block.
+        let cli = Cli::try_parse_from(["budi", "cloud", "sync", "--full"])
+            .expect("budi cloud sync --full parses");
+        match cli.command {
+            Commands::Cloud {
+                action: CloudAction::Sync { full, yes, .. },
+            } => {
+                assert!(full, "--full must request a watermark drop");
+                assert!(!yes, "--full alone must keep the confirmation prompt");
+            }
+            _ => panic!("expected cloud sync --full command"),
+        }
+
+        let cli = Cli::try_parse_from(["budi", "cloud", "sync", "--full", "--yes"])
+            .expect("budi cloud sync --full --yes parses");
+        match cli.command {
+            Commands::Cloud {
+                action: CloudAction::Sync { full, yes, .. },
+            } => {
+                assert!(full);
+                assert!(yes, "--yes must skip the confirmation");
+            }
+            _ => panic!("expected cloud sync --full --yes command"),
+        }
+
+        let cli = Cli::try_parse_from(["budi", "cloud", "sync", "--full", "--format", "json"])
+            .expect("budi cloud sync --full --format json parses");
+        match cli.command {
+            Commands::Cloud {
+                action:
+                    CloudAction::Sync {
+                        full,
+                        format,
+                        yes: _,
+                    },
+            } => {
+                assert!(full);
+                assert!(matches!(format, StatsFormat::Json));
+            }
+            _ => panic!("expected cloud sync --full --format json command"),
         }
     }
 
