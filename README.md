@@ -307,8 +307,8 @@ budi autostart status              # check daemon autostart service
 budi autostart install             # install the autostart service
 budi autostart uninstall           # remove the autostart service
 budi db import --force             # re-ingest all data from scratch
-budi db repair                     # repair schema drift + run migration checks
-budi db migrate                    # run database migration explicitly (usually automatic)
+budi db check                      # verify schema; report drift (read-only)
+budi db check --fix                # verify + auto-repair drift and run migrations
 budi update                        # check for updates (auto-detects Homebrew)
 budi update --version <name>       # update to a specific version
 budi integrations list             # show what is installed vs available

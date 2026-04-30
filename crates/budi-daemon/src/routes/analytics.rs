@@ -393,15 +393,6 @@ pub struct SchemaVersionResponse {
 }
 
 #[derive(serde::Serialize)]
-pub struct MigrateResponse {
-    pub current: u32,
-    pub target: u32,
-    pub migrated: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub from: Option<u32>,
-}
-
-#[derive(serde::Serialize)]
 pub struct RepairResponse {
     pub from_version: u32,
     pub to_version: u32,
@@ -1183,47 +1174,27 @@ pub async fn analytics_session_health(
     Ok(Json(result))
 }
 
-pub async fn analytics_migrate(
-    State(state): State<AppState>,
-) -> Result<Json<MigrateResponse>, (StatusCode, Json<serde_json::Value>)> {
-    if state
-        .syncing
-        .compare_exchange(
-            false,
-            true,
-            std::sync::atomic::Ordering::SeqCst,
-            std::sync::atomic::Ordering::SeqCst,
-        )
-        .is_err()
-    {
-        return Err((
-            StatusCode::CONFLICT,
-            Json(json!({ "ok": false, "error": "another operation is in progress" })),
-        ));
-    }
-    let flag = state.syncing.clone();
+pub async fn analytics_check() -> Result<Json<RepairResponse>, (StatusCode, Json<serde_json::Value>)>
+{
+    // Read-only diagnostic: opens the DB, asks `migration::check` what
+    // would change, and returns the same `RepairResponse` shape as
+    // `/admin/repair` so the CLI can render either with one renderer.
+    // No `syncing` guard — this never writes.
     let result = tokio::task::spawn_blocking(move || {
-        let _busy = BusyFlagGuard::new(flag);
-        (|| -> anyhow::Result<MigrateResponse> {
+        (|| -> anyhow::Result<RepairResponse> {
             let db_path = analytics::db_path()?;
             let conn = analytics::open_db(&db_path)?;
-            let current = budi_core::migration::current_version(&conn);
-            let target = budi_core::migration::SCHEMA_VERSION;
-            if !budi_core::migration::needs_migration(&conn) {
-                return Ok(MigrateResponse {
-                    current,
-                    target,
-                    migrated: false,
-                    from: None,
-                });
-            }
-            drop(conn);
-            analytics::open_db_with_migration(&db_path)?;
-            Ok(MigrateResponse {
-                current: target,
-                target,
-                migrated: true,
-                from: Some(current),
+            let report = budi_core::migration::check(&conn)?;
+            Ok(RepairResponse {
+                from_version: report.from_version,
+                to_version: report.to_version,
+                migrated: report.migrated,
+                repaired: !report.added_columns.is_empty()
+                    || !report.added_indexes.is_empty()
+                    || !report.removed_tables.is_empty(),
+                added_columns: report.added_columns,
+                added_indexes: report.added_indexes,
+                removed_tables: report.removed_tables,
             })
         })()
     })

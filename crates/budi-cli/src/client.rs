@@ -335,10 +335,10 @@ impl DaemonClient {
         Ok(resp.json()?)
     }
 
-    pub fn migrate(&self) -> Result<Value> {
+    pub fn check(&self) -> Result<Value> {
         let resp = self
             .client
-            .post(format!("{}/admin/migrate", self.base_url))
+            .get(format!("{}/admin/check", self.base_url))
             .timeout(std::time::Duration::from_secs(600))
             .send()
             .map_err(describe_send_error)?;
@@ -1041,19 +1041,18 @@ mod tests {
 
     #[test]
     fn parse_needs_migration_error_extracts_message() {
-        // Body text was renamed `budi migrate` → `budi db migrate` in
-        // 8.2.1 (#368). The wire contract (`needs_migration: true`) is
-        // unchanged; only the human-readable verb in `error` moved to
-        // the new namespace.
-        let body = r#"{"ok":false,"error":"analytics schema is v0, daemon expects v1; run `budi db migrate` (or `budi init`) to upgrade","needs_migration":true,"current":0,"target":1}"#;
+        // Body text was renamed `budi db migrate` → `budi db check --fix`
+        // in 8.3.14 (#586). The wire contract (`needs_migration: true`)
+        // is unchanged; only the human-readable verb in `error` moved.
+        let body = r#"{"ok":false,"error":"analytics schema is v0, daemon expects v1; run `budi db check --fix` (or `budi init`) to upgrade","needs_migration":true,"current":0,"target":1}"#;
         let msg = parse_needs_migration_error(body).expect("body matches #366 contract");
         assert!(
             msg.contains("analytics schema is v0, daemon expects v1"),
             "unexpected message: {msg}"
         );
         assert!(
-            msg.contains("budi db migrate"),
-            "should mention budi db migrate"
+            msg.contains("budi db check --fix"),
+            "should mention budi db check --fix"
         );
     }
 

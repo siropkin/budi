@@ -17,7 +17,7 @@ const HEALTH_TIMEOUT_SECS: u64 = 3;
 #[command(about = "budi — AI cost analytics. Know where your tokens and money go.")]
 #[command(version)]
 #[command(
-    after_help = "Get started:\n  budi init\n\nCommon commands:\n  budi stats              Show today's cost summary\n  budi stats models       Cost breakdown by model\n  budi stats branches     Cost breakdown by branch\n  budi sessions           List recent sessions with cost and vitals\n  budi sessions <id>      Session detail: cost, models, vitals, tags\n  budi sessions latest    Detail + vitals for the most recent session\n  budi status             Quick check: daemon and today's spend\n  budi doctor             Full diagnostic: daemon, tailer, schema, transcript visibility\n  budi cloud status       Cloud sync readiness and last-synced-at\n  budi cloud sync         Push queued local data to the cloud now\n  budi autostart status   Check daemon autostart service\n  budi db import          Import historical transcripts from disk\n  budi db import --force  Re-ingest all data from scratch (use after upgrades)\n  budi db repair          Repair schema drift and run migration\n  budi db migrate         Run database migration explicitly\n\nMore info: https://github.com/siropkin/budi"
+    after_help = "Get started:\n  budi init\n\nCommon commands:\n  budi stats              Show today's cost summary\n  budi stats models       Cost breakdown by model\n  budi stats branches     Cost breakdown by branch\n  budi sessions           List recent sessions with cost and vitals\n  budi sessions <id>      Session detail: cost, models, vitals, tags\n  budi sessions latest    Detail + vitals for the most recent session\n  budi status             Quick check: daemon and today's spend\n  budi doctor             Full diagnostic: daemon, tailer, schema, transcript visibility\n  budi cloud status       Cloud sync readiness and last-synced-at\n  budi cloud sync         Push queued local data to the cloud now\n  budi autostart status   Check daemon autostart service\n  budi db import          Import historical transcripts from disk\n  budi db import --force  Re-ingest all data from scratch (use after upgrades)\n  budi db check           Verify schema; report drift (read-only)\n  budi db check --fix     Verify + auto-repair drift and run migrations\n\nMore info: https://github.com/siropkin/budi"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -90,15 +90,16 @@ Examples:
         #[arg(long)]
         yes: bool,
     },
-    /// Database admin commands (migrate, repair, import historical transcripts)
+    /// Database admin commands (check schema, import historical transcripts)
     ///
-    /// Groups migrate / repair / import under a single namespace. The
-    /// pre-8.2.1 bare verbs (`budi migrate` / `budi repair` /
-    /// `budi import`) were removed in 8.3.0; use `budi db <verb>` instead.
+    /// Groups check / import under a single namespace. The pre-8.2.1
+    /// bare verbs (`budi migrate` / `budi repair` / `budi import`) were
+    /// removed in 8.3.0; the 8.2.x `db migrate` / `db repair` verbs
+    /// were collapsed into `db check [--fix]` in 8.3.14.
     #[command(after_help = "\
 Examples:
-  budi db migrate                Run database migration explicitly
-  budi db repair                 Repair schema drift and run migration checks
+  budi db check                  Verify schema; report drift (read-only)
+  budi db check --fix            Verify + auto-repair drift and run migrations
   budi db import                 Import historical transcripts from disk
   budi db import --force         Re-ingest all data from scratch (use after upgrades)
   budi db import --format json   JSON output with per-agent breakdown (for scripting)")]
@@ -466,10 +467,14 @@ enum CloudAction {
 
 #[derive(Debug, Subcommand)]
 enum DbAction {
-    /// Run database migration explicitly (usually automatic with init/update)
-    Migrate,
-    /// Repair schema drift and run migration checks
-    Repair,
+    /// Verify schema and report drift; pass --fix to auto-repair
+    Check {
+        /// Apply migrations and additive repairs in addition to checking.
+        /// Without this flag, `db check` is a read-only diagnostic that
+        /// exits non-zero when drift or a pending migration is detected.
+        #[arg(long, default_value_t = false)]
+        fix: bool,
+    },
     /// Import historical transcripts from Claude Code, Codex, Copilot CLI, and Cursor into the analytics database.
     ///
     /// Use --force to clear all data and re-ingest from scratch (e.g. after upgrades).
@@ -703,8 +708,7 @@ fn main() -> Result<()> {
             commands::uninstall::cmd_uninstall(keep_data, yes)
         }
         Commands::Db { action } => match action {
-            DbAction::Migrate => commands::db::cmd_db_migrate(),
-            DbAction::Repair => commands::repair::cmd_repair(),
+            DbAction::Check { fix } => commands::db::cmd_db_check(fix),
             DbAction::Import { force, format } => {
                 let json = matches!(format, StatsFormat::Json);
                 commands::import::cmd_import(force, json)
@@ -825,21 +829,28 @@ mod tests {
 
     #[test]
     fn cli_parses_db_subcommands() {
-        let cli = Cli::try_parse_from(["budi", "db", "migrate"]).expect("budi db migrate parses");
+        let cli = Cli::try_parse_from(["budi", "db", "check"]).expect("budi db check parses");
         assert!(matches!(
             cli.command,
             Commands::Db {
-                action: DbAction::Migrate
+                action: DbAction::Check { fix: false }
             }
         ));
 
-        let cli = Cli::try_parse_from(["budi", "db", "repair"]).expect("budi db repair parses");
+        let cli = Cli::try_parse_from(["budi", "db", "check", "--fix"])
+            .expect("budi db check --fix parses");
         assert!(matches!(
             cli.command,
             Commands::Db {
-                action: DbAction::Repair
+                action: DbAction::Check { fix: true }
             }
         ));
+
+        // #586: the pre-8.3.14 `db migrate` / `db repair` verbs were
+        // collapsed into `db check [--fix]`. Both must error out as
+        // unknown subcommands so they don't quietly come back.
+        assert!(Cli::try_parse_from(["budi", "db", "migrate"]).is_err());
+        assert!(Cli::try_parse_from(["budi", "db", "repair"]).is_err());
 
         let cli = Cli::try_parse_from(["budi", "db", "import"]).expect("budi db import parses");
         match cli.command {
