@@ -1,5 +1,75 @@
 # Changelog
 
+## 8.3.14 — 2026-04-30
+
+8.3.14 is a CLI ergonomics + Linux-daemon stability release that
+closes out the entire 8.3.14 milestone (9/9 issues). One real bug fix
+(Linux daemon dying with the CLI on `budi update`) plus an
+across-the-board cleanup of the `budi` command surface — pruning dead
+flags, splitting overloaded subcommands, and standardizing
+`--format json` on system-state commands so the surface is finally
+self-consistent before 8.4. No wire / data-shape changes; no ADR
+amendments.
+
+### Fixed
+
+- **Linux daemon now survives `budi update` (#582 / PR #590)**.
+  Pre-fix, on Linux the new daemon was spawned as a child of the CLI
+  with no `setsid()`, so closing the terminal killed it; macOS hid the
+  bug because launchd respawned under its own parent. Three changes:
+  `setsid()` on Unix daemon spawn so the child becomes a session
+  leader; systemctl-aware restart on Linux that routes through
+  `systemctl --user restart budi-daemon` when a `budi autostart
+  install` systemd unit is registered (falls back to raw kill/spawn
+  otherwise); and a one-line nudge to `budi autostart install` at the
+  end of `budi update` on Linux when no autostart is registered.
+  Pinned by a new `detach_from_session_starts_new_process_group`
+  regression test that fails when the `pre_exec` hook is removed.
+  #581 (separate `budi autostart restart` command) was closed in
+  favor of folding the fix straight into `budi update`.
+
+### Changed (CLI surface cleanup)
+
+- **`budi cloud sync --full` replaces the two-step reset+sync flow
+  (#583 / PR #591)** — single command drops watermarks and resyncs in
+  one call so the "cloud lost everything, push it all back" path is
+  one verb instead of two.
+- **`budi stats` view flags converted to subcommands (#589 / PR
+  #592)** — the 11 mutually-exclusive `--by-*` flags
+  (`--by-day`, `--by-tool`, …) are now subcommands
+  (`budi stats day`, `budi stats tool`, …). Old flags removed; help
+  output is finally legible.
+- **`budi pricing status` and `budi pricing sync` are now distinct
+  commands (#584 / PR #593)** — the overloaded
+  `pricing status --refresh` is gone; `status` is read-only,
+  `sync` is the explicit network call.
+- **`--format json` is now consistent across system-state commands
+  (#588 / PR #594)** — `budi status`, `budi doctor`,
+  `budi autostart status`, `budi cloud reset` all accept
+  `--format json` and emit the same envelope shape, so scripting
+  against the CLI no longer requires four parsers.
+- **`budi vitals` folded into `budi sessions <id>` (#585 / PR
+  #595)** — top-level `vitals` is removed; per-session vitals live
+  on the session subcommand they were always describing.
+- **`budi init --cleanup` flag removed (#587 / PR #596)** — the
+  flag existed to wipe legacy 8.0/8.1 proxy residue from
+  ~/.budi; nine months in, that residue is statistically gone from
+  user machines, and the consent-first cleanup flow that gated it is
+  also removed.
+- **`budi db` namespace simplified (#586 / PR #597)** — `db
+  migrate` is dropped (every entry point already runs migrations on
+  open, so the explicit verb did nothing distinct); `db repair` is
+  renamed `db check` and gains a `--fix` flag, so the read-only
+  diagnostic and the destructive repair are one command with one
+  switch instead of two verbs that did almost the same thing.
+
+### Non-blocking, carried forward
+
+- **Cloud Overview cost / token totals diverge from local CLI** (#10) — same as 8.3.13; presentation-layer aggregation difference, not data loss.
+- **RC-4 Part B** (#504) — Cursor Usage API auth root-cause; Part A shipped with `v8.3.1`.
+- **ADR-0090 supersede** — pending one release cycle of live validation on the now-working `cursorDiskKV` bubbles path before the Usage API §1 surface can be retired.
+- **Detached daemon log capture** — first post-`budi update` daemon's startup lines don't land in `~/Library/Logs/budi-daemon.log` until the next launchctl kickstart. Observability-only; carried from v8.3.6 / v8.3.7.
+
 ## 8.3.13 — 2026-04-29
 
 8.3.13 is a same-day follow-up on `v8.3.12` that closes out two
