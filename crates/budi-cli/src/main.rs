@@ -95,7 +95,7 @@ Examples:
     /// Groups check / import under a single namespace. The pre-8.2.1
     /// bare verbs (`budi migrate` / `budi repair` / `budi import`) were
     /// removed in 8.3.0; the 8.2.x `db migrate` / `db repair` verbs
-    /// were collapsed into `db check [--fix]` in 8.3.14 (#586).
+    /// were collapsed into `db check [--fix]` in 8.3.14.
     #[command(after_help = "\
 Examples:
   budi db check                  Verify schema; report drift (read-only)
