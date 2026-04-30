@@ -88,9 +88,7 @@ pub fn cmd_db_check(fix: bool) -> Result<()> {
 
     // Read-only diagnostic.
     if migrated {
-        println!(
-            "Schema is v{from}; binary expects v{to}. Run `budi db check --fix` to upgrade."
-        );
+        println!("Schema is v{from}; binary expects v{to}. Run `budi db check --fix` to upgrade.");
         anyhow::bail!("schema migration required");
     }
 

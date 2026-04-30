@@ -1174,8 +1174,8 @@ pub async fn analytics_session_health(
     Ok(Json(result))
 }
 
-pub async fn analytics_check()
--> Result<Json<RepairResponse>, (StatusCode, Json<serde_json::Value>)> {
+pub async fn analytics_check() -> Result<Json<RepairResponse>, (StatusCode, Json<serde_json::Value>)>
+{
     // Read-only diagnostic: opens the DB, asks `migration::check` what
     // would change, and returns the same `RepairResponse` shape as
     // `/admin/repair` so the CLI can render either with one renderer.
