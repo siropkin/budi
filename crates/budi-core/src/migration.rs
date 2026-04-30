@@ -909,27 +909,63 @@ fn backfill_non_repo_ids_to_null(conn: &Connection) -> Result<usize> {
     Ok(total)
 }
 
-/// #569: heal `sessions` rows whose `started_at`/`ended_at` are NULL but whose
-/// `messages` table has data for them.
+/// #569 / #578 / #577: heal `sessions` rows whose `started_at`, `ended_at`,
+/// `repo_id`, or `git_branch` are stale or missing but whose `messages` table
+/// has data for them.
 ///
 /// Pre-fix, the message ingest path inserted stub session rows with only
-/// `(id, provider)`, leaving timestamps NULL. `cloud_sync::fetch_session_summaries`
-/// requires `started_at` to be NOT NULL, so those sessions never reached the
-/// cloud. This pass fills both columns from `MIN(timestamp)`/`MAX(timestamp)`
-/// of the linked messages.
+/// `(id, provider)`, leaving timestamps and repo/branch NULL.
+/// `cloud_sync::fetch_session_summaries` requires `started_at` to be NOT NULL,
+/// so those sessions never reached the cloud. This pass fills the four
+/// derivable columns from the linked messages.
 ///
-/// Idempotent — the COALESCE leaves already-populated values alone, and the
-/// EXISTS clause skips sessions with no messages so the predicate is empty
-/// after one full run.
+/// `started_at` is immutable (the session's first observed message), so it
+/// uses `COALESCE` to preserve any already-set value (e.g. one written by a
+/// future provider-authoritative path). `ended_at` is the session's *last*
+/// observed message and must keep advancing as new messages stream in for
+/// in-flight sessions — `COALESCE` would freeze it at the first ingest tick's
+/// MAX (#578), so this pass always recomputes MAX(messages.timestamp) for any
+/// session whose stored `ended_at` is older. `repo_id` and `git_branch`
+/// (#577) likewise live on every message row; we backfill them from the
+/// session's most-recent message so a branch switch mid-session is reflected.
+///
+/// The WHERE predicate is empty after one full sweep on a stable DB — so
+/// steady-state cost stays the same as the v8.3.11 heal.
 pub fn backfill_session_timestamps_from_messages(conn: &Connection) -> Result<usize> {
     let count = conn.execute(
         "UPDATE sessions SET
             started_at = COALESCE(started_at,
                 (SELECT MIN(timestamp) FROM messages WHERE session_id = sessions.id)),
-            ended_at = COALESCE(ended_at,
-                (SELECT MAX(timestamp) FROM messages WHERE session_id = sessions.id))
-         WHERE (started_at IS NULL OR ended_at IS NULL)
-           AND EXISTS (SELECT 1 FROM messages WHERE session_id = sessions.id)",
+            ended_at =
+                (SELECT MAX(timestamp) FROM messages WHERE session_id = sessions.id),
+            repo_id = COALESCE(NULLIF(sessions.repo_id, ''),
+                (SELECT m.repo_id FROM messages m
+                  WHERE m.session_id = sessions.id
+                    AND m.repo_id IS NOT NULL AND m.repo_id <> ''
+                  ORDER BY m.timestamp DESC LIMIT 1)),
+            git_branch = COALESCE(NULLIF(sessions.git_branch, ''),
+                (SELECT m.git_branch FROM messages m
+                  WHERE m.session_id = sessions.id
+                    AND m.git_branch IS NOT NULL AND m.git_branch <> ''
+                  ORDER BY m.timestamp DESC LIMIT 1))
+         WHERE EXISTS (SELECT 1 FROM messages WHERE session_id = sessions.id)
+           AND (
+                started_at IS NULL
+                OR ended_at IS NULL
+                OR ended_at < (SELECT MAX(timestamp) FROM messages WHERE session_id = sessions.id)
+                OR (
+                    (sessions.repo_id IS NULL OR sessions.repo_id = '')
+                    AND EXISTS (SELECT 1 FROM messages m
+                                WHERE m.session_id = sessions.id
+                                  AND m.repo_id IS NOT NULL AND m.repo_id <> '')
+                )
+                OR (
+                    (sessions.git_branch IS NULL OR sessions.git_branch = '')
+                    AND EXISTS (SELECT 1 FROM messages m
+                                WHERE m.session_id = sessions.id
+                                  AND m.git_branch IS NOT NULL AND m.git_branch <> '')
+                )
+           )",
         [],
     )?;
     Ok(count)

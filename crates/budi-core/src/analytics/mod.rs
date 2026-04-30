@@ -549,17 +549,30 @@ pub fn ingest_messages_with_sync(
                 "INSERT OR IGNORE INTO sessions (id, provider) VALUES (?1, ?2)",
                 params![sid, provider],
             )?;
-            // Without this, claude_code/codex sessions keep started_at/ended_at
-            // = NULL forever and never reach `fetch_session_summaries`, so
-            // `session_summaries` on cloud goes silently empty (#569). COALESCE
-            // is a no-op for cursor rows already populated by their composer
-            // header repair pass.
+            // Without this, claude_code/codex sessions keep started_at/ended_at/
+            // repo_id/git_branch = NULL forever (#569 / #577) and never reach
+            // `fetch_session_summaries`, so `session_summaries` on cloud goes
+            // silently empty. `started_at` is immutable so COALESCE preserves
+            // any pre-set value; `ended_at` must keep advancing for in-flight
+            // sessions so we always recompute MAX(messages.timestamp) (#578 —
+            // pre-fix `COALESCE(ended_at, MAX)` froze it at the first tick's
+            // MAX, leaving every active session rendered as `<1m` on cloud).
             tx.execute(
                 "UPDATE sessions SET
                     started_at = COALESCE(started_at,
                         (SELECT MIN(timestamp) FROM messages WHERE session_id = ?1)),
-                    ended_at = COALESCE(ended_at,
-                        (SELECT MAX(timestamp) FROM messages WHERE session_id = ?1))
+                    ended_at =
+                        (SELECT MAX(timestamp) FROM messages WHERE session_id = ?1),
+                    repo_id = COALESCE(NULLIF(sessions.repo_id, ''),
+                        (SELECT m.repo_id FROM messages m
+                          WHERE m.session_id = ?1
+                            AND m.repo_id IS NOT NULL AND m.repo_id <> ''
+                          ORDER BY m.timestamp DESC LIMIT 1)),
+                    git_branch = COALESCE(NULLIF(sessions.git_branch, ''),
+                        (SELECT m.git_branch FROM messages m
+                          WHERE m.session_id = ?1
+                            AND m.git_branch IS NOT NULL AND m.git_branch <> ''
+                          ORDER BY m.timestamp DESC LIMIT 1))
                  WHERE id = ?1",
                 params![sid],
             )?;
