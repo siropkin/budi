@@ -609,7 +609,7 @@ fn format_summary(
         // identical to the populated case.
         writeln!(
             out,
-            "    {dim}(no provider data — run `budi vitals` to inspect tail offsets){reset}",
+            "    {dim}(no provider data — run `budi sessions latest` to inspect tail offsets){reset}",
         )
         .unwrap();
     } else {
