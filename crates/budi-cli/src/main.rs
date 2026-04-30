@@ -52,6 +52,9 @@ enum Commands {
         /// gates and for a glance-only human check on a working box.
         #[arg(long, default_value_t = false)]
         quiet: bool,
+        /// Output format: text (default) or json
+        #[arg(short, long, value_enum, default_value_t = StatsFormat::Text)]
+        format: StatsFormat,
         #[arg(long, hide = true)]
         repo_root: Option<PathBuf>,
     },
@@ -167,7 +170,11 @@ Examples:
         format: StatsFormat,
     },
     /// Quick overview: daemon and today's cost (is everything working?)
-    Status,
+    Status {
+        /// Output format: text (default) or json
+        #[arg(short, long, value_enum, default_value_t = StatsFormat::Text)]
+        format: StatsFormat,
+    },
     /// Show AI spending in your shell prompt (reads editor context from stdin when piped)
     ///
     /// Emits the shared provider-scoped status contract. Rolling
@@ -201,9 +208,10 @@ Examples:
     /// Manage the daemon autostart service (launchd / systemd / Task Scheduler)
     #[command(after_help = "\
 Examples:
-  budi autostart status      Check if autostart is installed and running
-  budi autostart install     Install the autostart service
-  budi autostart uninstall   Remove the autostart service")]
+  budi autostart status              Check if autostart is installed and running
+  budi autostart status --format json  JSON output for scripting
+  budi autostart install             Install the autostart service
+  budi autostart uninstall           Remove the autostart service")]
     Autostart {
         #[command(subcommand)]
         action: AutostartAction,
@@ -227,7 +235,8 @@ Examples:
   budi cloud sync --full         Drop watermarks then re-upload everything
   budi cloud sync --full --yes   Same, non-interactive (CI / scripts)
   budi cloud reset               Reset watermarks so next sync re-uploads all
-  budi cloud reset --yes         Same, non-interactive (CI / scripts)")]
+  budi cloud reset --yes         Same, non-interactive (CI / scripts)
+  budi cloud reset --format json JSON output (requires --yes for non-TTY)")]
     Cloud {
         #[command(subcommand)]
         action: CloudAction,
@@ -466,6 +475,9 @@ enum CloudAction {
         /// re-upload on a stray invocation.
         #[arg(long, default_value_t = false)]
         yes: bool,
+        /// Output format: text (default) or json
+        #[arg(short, long, value_enum, default_value_t = StatsFormat::Text)]
+        format: StatsFormat,
     },
 }
 
@@ -495,7 +507,11 @@ enum DbAction {
 #[derive(Debug, Subcommand)]
 enum AutostartAction {
     /// Show whether the autostart service is installed and running
-    Status,
+    Status {
+        /// Output format: text (default) or json
+        #[arg(short, long, value_enum, default_value_t = StatsFormat::Text)]
+        format: StatsFormat,
+    },
     /// Install the autostart service (daemon starts at login)
     Install,
     /// Remove the autostart service
@@ -634,8 +650,9 @@ fn main() -> Result<()> {
         Commands::Doctor {
             deep,
             quiet,
+            format,
             repo_root,
-        } => commands::doctor::cmd_doctor(repo_root, deep, quiet),
+        } => commands::doctor::cmd_doctor(repo_root, deep, quiet, format),
         Commands::Stats(args) => {
             let StatsArgs { view, opts } = args;
             let StatsOpts {
@@ -753,10 +770,10 @@ fn main() -> Result<()> {
                 )
             }
         }
-        Commands::Status => commands::status::cmd_status(),
+        Commands::Status { format } => commands::status::cmd_status(format),
         Commands::Integrations { action } => commands::integrations::cmd_integrations(action),
         Commands::Autostart { action } => match action {
-            AutostartAction::Status => commands::autostart::cmd_autostart_status(),
+            AutostartAction::Status { format } => commands::autostart::cmd_autostart_status(format),
             AutostartAction::Install => commands::autostart::cmd_autostart_install(),
             AutostartAction::Uninstall => commands::autostart::cmd_autostart_uninstall(),
         },
@@ -772,7 +789,7 @@ fn main() -> Result<()> {
             CloudAction::Sync { format, full, yes } => {
                 commands::cloud::cmd_cloud_sync(format, full, yes)
             }
-            CloudAction::Reset { yes } => commands::cloud::cmd_cloud_reset(yes),
+            CloudAction::Reset { yes, format } => commands::cloud::cmd_cloud_reset(yes, format),
         },
         Commands::Pricing(args) => {
             let PricingArgs { view, format } = args;
@@ -1324,8 +1341,11 @@ mod tests {
         let cli = Cli::try_parse_from(["budi", "cloud", "reset"]).expect("budi cloud reset parses");
         match cli.command {
             Commands::Cloud {
-                action: CloudAction::Reset { yes },
-            } => assert!(!yes, "default invocation must be interactive"),
+                action: CloudAction::Reset { yes, format },
+            } => {
+                assert!(!yes, "default invocation must be interactive");
+                assert_eq!(format, StatsFormat::Text);
+            }
             _ => panic!("expected cloud reset command"),
         }
 
@@ -1333,9 +1353,27 @@ mod tests {
             .expect("budi cloud reset --yes parses");
         match cli.command {
             Commands::Cloud {
-                action: CloudAction::Reset { yes },
-            } => assert!(yes, "--yes must skip the confirmation"),
+                action: CloudAction::Reset { yes, format },
+            } => {
+                assert!(yes, "--yes must skip the confirmation");
+                assert_eq!(format, StatsFormat::Text);
+            }
             _ => panic!("expected cloud reset --yes command"),
+        }
+
+        // #588: `--format json` parses on `cloud reset` so scripted
+        // callers (CI gates, dashboards) can emit a stable JSON shape
+        // without scraping the human render.
+        let cli = Cli::try_parse_from(["budi", "cloud", "reset", "--yes", "--format", "json"])
+            .expect("budi cloud reset --yes --format json parses");
+        match cli.command {
+            Commands::Cloud {
+                action: CloudAction::Reset { yes, format },
+            } => {
+                assert!(yes);
+                assert_eq!(format, StatsFormat::Json);
+            }
+            _ => panic!("expected cloud reset --yes --format json command"),
         }
     }
 
@@ -1725,6 +1763,75 @@ mod tests {
                 assert_eq!(format, StatuslineFormat::Json);
             }
             _ => panic!("expected statusline command"),
+        }
+    }
+
+    // #588: every system-state command must accept `--format json` so CI
+    // gates and dashboards can stop scraping the human render. The
+    // following tests lock the clap surface; the per-command JSON shapes
+    // are tested next to their implementations.
+
+    #[test]
+    fn cli_status_accepts_format_json() {
+        let cli = Cli::try_parse_from(["budi", "status"]).expect("budi status parses");
+        match cli.command {
+            Commands::Status { format } => assert_eq!(format, StatsFormat::Text),
+            _ => panic!("expected status command"),
+        }
+        let cli = Cli::try_parse_from(["budi", "status", "--format", "json"])
+            .expect("budi status --format json parses");
+        match cli.command {
+            Commands::Status { format } => assert_eq!(format, StatsFormat::Json),
+            _ => panic!("expected status --format json command"),
+        }
+    }
+
+    #[test]
+    fn cli_doctor_accepts_format_json() {
+        let cli = Cli::try_parse_from(["budi", "doctor"]).expect("budi doctor parses");
+        match cli.command {
+            Commands::Doctor { format, .. } => assert_eq!(format, StatsFormat::Text),
+            _ => panic!("expected doctor command"),
+        }
+        let cli = Cli::try_parse_from(["budi", "doctor", "--format", "json"])
+            .expect("budi doctor --format json parses");
+        match cli.command {
+            Commands::Doctor { format, .. } => assert_eq!(format, StatsFormat::Json),
+            _ => panic!("expected doctor --format json command"),
+        }
+    }
+
+    #[test]
+    fn cli_autostart_status_accepts_format_json() {
+        let cli =
+            Cli::try_parse_from(["budi", "autostart", "status"]).expect("budi autostart status");
+        match cli.command {
+            Commands::Autostart {
+                action: AutostartAction::Status { format },
+            } => assert_eq!(format, StatsFormat::Text),
+            _ => panic!("expected autostart status command"),
+        }
+
+        let cli = Cli::try_parse_from(["budi", "autostart", "status", "--format", "json"])
+            .expect("budi autostart status --format json parses");
+        match cli.command {
+            Commands::Autostart {
+                action: AutostartAction::Status { format },
+            } => assert_eq!(format, StatsFormat::Json),
+            _ => panic!("expected autostart status --format json command"),
+        }
+    }
+
+    #[test]
+    fn cli_cloud_status_accepts_format_json() {
+        // Already shipped pre-#588 — guard regression.
+        let cli = Cli::try_parse_from(["budi", "cloud", "status", "--format", "json"])
+            .expect("budi cloud status --format json parses");
+        match cli.command {
+            Commands::Cloud {
+                action: CloudAction::Status { format },
+            } => assert_eq!(format, StatsFormat::Json),
+            _ => panic!("expected cloud status --format json command"),
         }
     }
 }

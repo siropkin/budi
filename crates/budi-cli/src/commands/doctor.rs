@@ -7,31 +7,49 @@ use budi_core::legacy_proxy;
 use budi_core::provider::Provider;
 use chrono::{DateTime, Local, Utc};
 use rusqlite::{Connection, OptionalExtension, params};
+use serde::Serialize;
 
+use crate::StatsFormat;
 use crate::daemon::{daemon_health, ensure_daemon_running, resolve_daemon_binary};
 
-pub fn cmd_doctor(repo_root: Option<PathBuf>, deep: bool, quiet: bool) -> Result<()> {
+pub fn cmd_doctor(
+    repo_root: Option<PathBuf>,
+    deep: bool,
+    quiet: bool,
+    format: StatsFormat,
+) -> Result<()> {
     let repo_root = super::try_resolve_repo_root(repo_root);
     let config = match &repo_root {
         Some(root) => config::load_or_default(root)?,
         None => config::BudiConfig::default(),
     };
 
+    let json_output = matches!(format, StatsFormat::Json);
+
     let dim = super::ansi("\x1b[90m");
     let reset = super::ansi("\x1b[0m");
 
-    if let Some(ref root) = repo_root {
-        println!("budi doctor - {}", root.display());
-    } else {
-        println!("budi doctor - global mode");
+    if !json_output {
+        if let Some(ref root) = repo_root {
+            println!("budi doctor - {}", root.display());
+        } else {
+            println!("budi doctor - global mode");
+        }
+        println!();
     }
-    println!();
 
     let mut report = DoctorReport::default();
+    // Buffer of every check that ran, in the same order they appear in the
+    // text-mode output. Used to render the `--format json` payload after
+    // the run completes so the JSON shape matches what the operator sees.
+    let mut checks: Vec<CheckResult> = Vec::new();
 
     let daemon = check_daemon_health(repo_root.as_deref(), &config);
-    daemon.result.print_respecting(quiet);
+    if !json_output {
+        daemon.result.print_respecting(quiet);
+    }
     report.record(&daemon.result);
+    checks.push(daemon.result.clone());
 
     if daemon.started_this_run {
         // The daemon seeds tail offsets on startup before the backstop loop
@@ -42,21 +60,33 @@ pub fn cmd_doctor(repo_root: Option<PathBuf>, deep: bool, quiet: bool) -> Result
 
     let db_path = budi_core::analytics::db_path()?;
     let schema = check_schema(&db_path, deep);
-    schema.result.print_respecting(quiet);
+    if !json_output {
+        schema.result.print_respecting(quiet);
+    }
     report.record(&schema.result);
+    checks.push(schema.result.clone());
 
     let proxy_residue = check_legacy_proxy_residue();
-    proxy_residue.print_respecting(quiet);
+    if !json_output {
+        proxy_residue.print_respecting(quiet);
+    }
     report.record(&proxy_residue);
+    checks.push(proxy_residue);
 
     let statusline_check = check_claude_statusline_integration();
-    statusline_check.print_respecting(quiet);
+    if !json_output {
+        statusline_check.print_respecting(quiet);
+    }
     report.record(&statusline_check);
+    checks.push(statusline_check);
 
     if let Some(conn) = schema.conn.as_ref() {
         let legacy_proxy_history = check_legacy_proxy_history(conn);
-        legacy_proxy_history.print_respecting(quiet);
+        if !json_output {
+            legacy_proxy_history.print_respecting(quiet);
+        }
         report.record(&legacy_proxy_history);
+        checks.push(legacy_proxy_history);
     }
 
     let providers = doctor_providers();
@@ -69,21 +99,46 @@ pub fn cmd_doctor(repo_root: Option<PathBuf>, deep: bool, quiet: bool) -> Result
                     .to_string(),
             ),
         );
-        no_providers.print_respecting(quiet);
+        if !json_output {
+            no_providers.print_respecting(quiet);
+        }
         report.record(&no_providers);
+        checks.push(no_providers);
     } else {
         let conn = schema.conn.as_ref();
         for provider in &providers {
             let diag = gather_provider_doctor_data(conn, provider.as_ref());
 
             let tailer = summarize_tailer_health(&diag);
-            tailer.print_respecting(quiet);
+            if !json_output {
+                tailer.print_respecting(quiet);
+            }
             report.record(&tailer);
+            checks.push(tailer);
 
             let visibility = summarize_transcript_visibility(&diag);
-            visibility.print_respecting(quiet);
+            if !json_output {
+                visibility.print_respecting(quiet);
+            }
             report.record(&visibility);
+            checks.push(visibility);
         }
+    }
+
+    if json_output {
+        let body = DoctorJson {
+            all_pass: report.fails == 0 && report.warns == 0,
+            checks: checks.iter().map(CheckResultJson::from).collect(),
+        };
+        super::print_json(&body)?;
+        // Exit code matrix matches text mode: warnings are not failures,
+        // so we only escalate on an actual FAIL row. Use process::exit(2)
+        // (matching `cloud sync --format json`) so callers can branch on
+        // status without parsing stderr.
+        if report.fails > 0 {
+            std::process::exit(2);
+        }
+        return Ok(());
     }
 
     println!();
@@ -108,6 +163,33 @@ pub fn cmd_doctor(repo_root: Option<PathBuf>, deep: bool, quiet: bool) -> Result
         report.fail_count(),
         report.warn_count()
     );
+}
+
+#[derive(Debug, Serialize)]
+struct DoctorJson {
+    all_pass: bool,
+    checks: Vec<CheckResultJson>,
+}
+
+#[derive(Debug, Serialize)]
+struct CheckResultJson {
+    name: String,
+    status: &'static str,
+    detail: String,
+}
+
+impl From<&CheckResult> for CheckResultJson {
+    fn from(value: &CheckResult) -> Self {
+        Self {
+            name: value.label.clone(),
+            status: match value.state {
+                CheckState::Pass => "pass",
+                CheckState::Warn => "warn",
+                CheckState::Fail => "fail",
+            },
+            detail: value.detail.clone(),
+        }
+    }
 }
 
 #[derive(Debug, Default)]
@@ -1065,6 +1147,64 @@ fn parse_rfc3339_utc(raw: &str) -> Option<DateTime<Utc>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #588: `budi doctor --format json` lock-in. The JSON contract is
+    /// `{checks: [{name, status, detail}], all_pass}` with `status`
+    /// drawn from a fixed vocabulary of `pass | warn | fail`. Scripted
+    /// callers branch on this shape — a future rename would silently
+    /// break them.
+    #[test]
+    fn doctor_json_locks_schema_and_status_vocabulary() {
+        let checks = [
+            CheckResult::pass("daemon health", "responding on http://127.0.0.1:7878"),
+            CheckResult::warn("tailer providers", "no enabled providers", None),
+            CheckResult::fail(
+                "schema",
+                "missing column `tags`",
+                Some("budi db check --fix".into()),
+            ),
+        ];
+        let body = DoctorJson {
+            all_pass: false,
+            checks: checks.iter().map(CheckResultJson::from).collect(),
+        };
+        let v = serde_json::to_value(&body).expect("serialise");
+
+        let mut top_keys: Vec<&str> = v.as_object().unwrap().keys().map(String::as_str).collect();
+        top_keys.sort();
+        assert_eq!(top_keys, vec!["all_pass", "checks"]);
+        assert_eq!(v["all_pass"], serde_json::json!(false));
+
+        let arr = v["checks"].as_array().expect("checks array");
+        assert_eq!(arr.len(), 3);
+        for entry in arr {
+            let mut keys: Vec<&str> = entry
+                .as_object()
+                .unwrap()
+                .keys()
+                .map(String::as_str)
+                .collect();
+            keys.sort();
+            assert_eq!(keys, vec!["detail", "name", "status"]);
+        }
+        assert_eq!(arr[0]["status"], serde_json::json!("pass"));
+        assert_eq!(arr[1]["status"], serde_json::json!("warn"));
+        assert_eq!(arr[2]["status"], serde_json::json!("fail"));
+        // `fix` is intentionally not part of the JSON shape — it's a
+        // text-mode-only operator hint, not part of the wire contract.
+        assert!(arr[2].as_object().unwrap().get("fix").is_none());
+    }
+
+    #[test]
+    fn doctor_json_all_pass_true_when_all_checks_pass() {
+        let checks = [CheckResult::pass("a", "ok"), CheckResult::pass("b", "ok")];
+        let body = DoctorJson {
+            all_pass: true,
+            checks: checks.iter().map(CheckResultJson::from).collect(),
+        };
+        let v = serde_json::to_value(&body).expect("serialise");
+        assert_eq!(v["all_pass"], serde_json::json!(true));
+    }
 
     fn diag(display_name: &'static str) -> ProviderDoctorData {
         ProviderDoctorData {

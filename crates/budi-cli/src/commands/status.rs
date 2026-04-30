@@ -1,13 +1,22 @@
 use anyhow::Result;
+use serde::Serialize;
 
 use crate::StatsPeriod;
 use crate::client::DaemonClient;
 use crate::commands::stats::{format_cost_cents, format_tokens, period_date_range};
+use crate::{StatsFormat, commands};
 
 use super::ansi;
 
 /// Quick operational overview: daemon and today's cost.
-pub fn cmd_status() -> Result<()> {
+pub fn cmd_status(format: StatsFormat) -> Result<()> {
+    if matches!(format, StatsFormat::Json) {
+        return cmd_status_json();
+    }
+    cmd_status_text()
+}
+
+fn cmd_status_text() -> Result<()> {
     let bold_cyan = ansi("\x1b[1;36m");
     let bold = ansi("\x1b[1m");
     let dim = ansi("\x1b[90m");
@@ -84,4 +93,133 @@ pub fn cmd_status() -> Result<()> {
 
     println!();
     Ok(())
+}
+
+#[derive(Debug, Serialize)]
+struct StatusJson {
+    daemon: DaemonJson,
+    today: Option<TodayJson>,
+}
+
+#[derive(Debug, Serialize)]
+struct DaemonJson {
+    running: bool,
+    version: String,
+    port: u16,
+}
+
+#[derive(Debug, Serialize)]
+struct TodayJson {
+    cost_cents: f64,
+    messages: u64,
+    providers: Vec<String>,
+}
+
+fn cmd_status_json() -> Result<()> {
+    let config = DaemonClient::load_config();
+    let daemon_ok = crate::daemon::daemon_health(&config);
+    let daemon = DaemonJson {
+        running: daemon_ok,
+        version: env!("CARGO_PKG_VERSION").to_string(),
+        port: config.daemon_port,
+    };
+
+    let today = if daemon_ok {
+        match DaemonClient::connect() {
+            Ok(client) => {
+                let (since, _until) = period_date_range(StatsPeriod::Today);
+                let summary = client.summary(since.as_deref(), None, None).ok();
+                let cost = client.cost(since.as_deref(), None, None).ok();
+                let providers = client.providers(since.as_deref(), None).ok();
+
+                match (summary, cost) {
+                    (Some(summary), Some(cost)) => Some(TodayJson {
+                        cost_cents: cost.total_cost * 100.0,
+                        messages: summary.total_messages,
+                        providers: providers
+                            .unwrap_or_default()
+                            .into_iter()
+                            .map(|p| p.provider)
+                            .collect(),
+                    }),
+                    _ => None,
+                }
+            }
+            Err(_) => None,
+        }
+    } else {
+        None
+    };
+
+    commands::print_json(&StatusJson { daemon, today })?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Lock the JSON shape: `{daemon: {running, version, port}, today:
+    /// {cost_cents, messages, providers}}`. Scripted callers — CI gates,
+    /// dashboards, the cloud surface — depend on these names.
+    #[test]
+    fn status_json_locks_schema_with_today_present() {
+        let body = StatusJson {
+            daemon: DaemonJson {
+                running: true,
+                version: "8.3.14".to_string(),
+                port: 7878,
+            },
+            today: Some(TodayJson {
+                cost_cents: 12345.6,
+                messages: 42,
+                providers: vec!["claude_code".to_string(), "cursor".to_string()],
+            }),
+        };
+        let v = serde_json::to_value(&body).expect("serialise");
+        let mut top_keys: Vec<&str> = v.as_object().unwrap().keys().map(String::as_str).collect();
+        top_keys.sort();
+        assert_eq!(top_keys, vec!["daemon", "today"]);
+
+        // Daemon block.
+        let daemon = v["daemon"].as_object().expect("daemon is object");
+        let mut keys: Vec<&str> = daemon.keys().map(String::as_str).collect();
+        keys.sort();
+        assert_eq!(keys, vec!["port", "running", "version"]);
+        assert!(v["daemon"]["running"].is_boolean());
+        assert!(v["daemon"]["version"].is_string());
+        assert!(v["daemon"]["port"].is_number());
+
+        // Today block + the cents-key normalisation contract from #445.
+        let today = v["today"].as_object().expect("today is object");
+        let mut keys: Vec<&str> = today.keys().map(String::as_str).collect();
+        keys.sort();
+        assert_eq!(keys, vec!["cost_cents", "messages", "providers"]);
+        // After commands::print_json runs the cents normaliser the float
+        // would round to an integer; here we serialise without the
+        // helper so the raw float should still pass through. The
+        // round_cents_to_integer test in mod.rs covers that conversion.
+        assert!(v["today"]["cost_cents"].is_number());
+        assert!(v["today"]["messages"].is_u64());
+        assert!(v["today"]["providers"].is_array());
+    }
+
+    #[test]
+    fn status_json_today_is_null_when_daemon_down() {
+        // When the daemon is unreachable we still emit `today` as a
+        // top-level key (so the shape stays stable for `jq .today`),
+        // but as `null` rather than zero-valued so callers can detect
+        // "no data" without false positives.
+        let body = StatusJson {
+            daemon: DaemonJson {
+                running: false,
+                version: "8.3.14".to_string(),
+                port: 7878,
+            },
+            today: None,
+        };
+        let v = serde_json::to_value(&body).expect("serialise");
+        assert!(v["today"].is_null());
+        assert_eq!(v["daemon"]["running"], serde_json::json!(false));
+    }
 }

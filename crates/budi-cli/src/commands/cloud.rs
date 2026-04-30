@@ -601,9 +601,19 @@ pub fn cmd_cloud_status(format: StatsFormat) -> Result<()> {
 /// background tick would — that way a manual reset can never race a
 /// concurrent envelope build that already read the about-to-be-deleted
 /// watermark.
-pub fn cmd_cloud_reset(yes: bool) -> Result<()> {
+pub fn cmd_cloud_reset(yes: bool, format: StatsFormat) -> Result<()> {
     let cfg = load_cloud_config();
     if !confirm_reset(&cfg, yes)? {
+        if matches!(format, StatsFormat::Json) {
+            // No mutation happened. Emit the same shape the success path
+            // would, so scripted callers don't have to special-case the
+            // abort with a separate text-only branch.
+            super::print_json(&CloudResetJson {
+                watermarks_dropped: 0,
+                org: cfg.org_id.clone(),
+            })?;
+            return Ok(());
+        }
         println!("Aborted. Watermarks left unchanged.");
         return Ok(());
     }
@@ -613,9 +623,24 @@ pub fn cmd_cloud_reset(yes: bool) -> Result<()> {
         .cloud_reset()
         .context("failed to reset cloud sync watermarks via the daemon")?;
 
-    let removed = body.get("removed").and_then(Value::as_u64).unwrap_or(0) as usize;
-    render_reset_text(&cfg, removed);
+    let removed = body.get("removed").and_then(Value::as_u64).unwrap_or(0) as u32;
+
+    if matches!(format, StatsFormat::Json) {
+        super::print_json(&CloudResetJson {
+            watermarks_dropped: removed,
+            org: cfg.org_id.clone(),
+        })?;
+        return Ok(());
+    }
+
+    render_reset_text(&cfg, removed as usize);
     Ok(())
+}
+
+#[derive(Debug, serde::Serialize)]
+struct CloudResetJson {
+    watermarks_dropped: u32,
+    org: Option<String>,
 }
 
 fn confirm_reset(cfg: &CloudConfig, yes: bool) -> Result<bool> {
@@ -866,6 +891,35 @@ fn render_status_text(body: &Value) {
 mod tests {
     use super::*;
     use budi_core::config::CloudConfig;
+
+    /// #588: lock the JSON shape for `budi cloud reset --format json`.
+    /// Scripted callers (CI watermark resets, dashboards) depend on
+    /// these field names — a future refactor that renamed
+    /// `watermarks_dropped` would silently break them.
+    #[test]
+    fn cloud_reset_json_locks_schema_with_org() {
+        let body = CloudResetJson {
+            watermarks_dropped: 7,
+            org: Some("acme-org-123".to_string()),
+        };
+        let v = serde_json::to_value(&body).expect("serialise");
+        let mut keys: Vec<&str> = v.as_object().unwrap().keys().map(String::as_str).collect();
+        keys.sort();
+        assert_eq!(keys, vec!["org", "watermarks_dropped"]);
+        assert_eq!(v["watermarks_dropped"], serde_json::json!(7));
+        assert_eq!(v["org"], serde_json::json!("acme-org-123"));
+    }
+
+    #[test]
+    fn cloud_reset_json_serialises_missing_org_as_null() {
+        let body = CloudResetJson {
+            watermarks_dropped: 0,
+            org: None,
+        };
+        let v = serde_json::to_value(&body).expect("serialise");
+        assert!(v["org"].is_null());
+        assert_eq!(v["watermarks_dropped"], serde_json::json!(0));
+    }
 
     #[test]
     fn template_stub_variant_is_disabled_and_carries_placeholder() {
