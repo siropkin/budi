@@ -1,4 +1,4 @@
-//! `budi pricing` subcommand — manifest status + manual refresh.
+//! `budi pricing` subcommand — manifest status (read-only) and sync (network).
 //!
 //! Surfaces what [`budi_core::pricing::current_state`] knows about the
 //! in-memory pricing manifest: which layer is authoritative (disk cache
@@ -7,13 +7,15 @@
 //! model ids seen in transcripts that aren't in the manifest yet (those
 //! get `cost_cents = 0` until a refresh resolves them, ADR-0091 §2).
 //!
-//! The `--refresh` flag triggers an immediate manifest fetch via
+//! `pricing sync` triggers an immediate manifest fetch via
 //! `POST /pricing/refresh` and then prints the post-refresh status. This
-//! is the only user-facing way to skip the 24 h worker cadence.
+//! is the only user-facing way to skip the 24 h worker cadence; in 8.3.14
+//! it replaces the pre-existing `pricing status --refresh` flag, mirroring
+//! the `cloud sync` direction-tagged verb shape (#584).
 //!
 //! Output format matches the `budi cloud status` contract: `--format
 //! text` is the default, `--format json` emits the daemon payload
-//! verbatim for scripting. Exit code is `2` on refresh failure so CI
+//! verbatim for scripting. Exit code is `2` on `sync` failure so CI
 //! scripts can branch on status without parsing the body.
 
 use anyhow::Result;
@@ -25,16 +27,9 @@ use crate::client::DaemonClient;
 
 use super::{ansi, format_cost};
 
-/// `budi pricing status [--json] [--refresh]`
-pub fn cmd_pricing_status(format: StatsFormat, refresh: bool) -> Result<()> {
+/// `budi pricing` (bare) and `budi pricing status` — read-only manifest state.
+pub fn cmd_pricing_status(format: StatsFormat) -> Result<()> {
     let client = DaemonClient::connect()?;
-
-    let refresh_body = if refresh {
-        Some(client.pricing_refresh()?)
-    } else {
-        None
-    };
-
     let status = client.pricing_status()?;
 
     if matches!(format, StatsFormat::Json) {
@@ -44,26 +39,50 @@ pub fn cmd_pricing_status(format: StatsFormat, refresh: bool) -> Result<()> {
         // the canonical `budi stats models` display name?" without
         // having to dump the whole 3k-entry LiteLLM manifest.
         let aliases = json_alias_catalogue();
-        let combined = if let Some(r) = &refresh_body {
-            serde_json::json!({ "refresh": r, "status": status, "aliases": aliases })
-        } else {
-            serde_json::json!({ "status": status, "aliases": aliases })
-        };
+        let combined = serde_json::json!({ "status": status, "aliases": aliases });
         super::print_json(&combined)?;
-        if let Some(r) = refresh_body.as_ref()
-            && r.get("ok").and_then(Value::as_bool) != Some(true)
-        {
+        return Ok(());
+    }
+
+    render_status_text(&status);
+    render_alias_map_text();
+    Ok(())
+}
+
+/// `budi pricing sync` — fetch the latest LiteLLM manifest, then show state.
+///
+/// 8.3.14 (#584) split this off the pre-existing `pricing status --refresh`
+/// flag so the only network-touching verb in the namespace lives behind its
+/// own subcommand, matching the `cloud sync` shape. Exit code is `2` on
+/// refresh failure so CI scripts can branch on status without parsing the
+/// body.
+pub fn cmd_pricing_sync(format: StatsFormat) -> Result<()> {
+    let client = DaemonClient::connect()?;
+    let refresh_body = client.pricing_refresh()?;
+    let status = client.pricing_status()?;
+    let ok = refresh_body
+        .get("ok")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+
+    if matches!(format, StatsFormat::Json) {
+        let aliases = json_alias_catalogue();
+        let combined = serde_json::json!({
+            "refresh": refresh_body,
+            "status": status,
+            "aliases": aliases,
+        });
+        super::print_json(&combined)?;
+        if !ok {
             std::process::exit(2);
         }
         return Ok(());
     }
 
-    if let Some(r) = &refresh_body {
-        render_refresh_text(r);
-        if r.get("ok").and_then(Value::as_bool) != Some(true) {
-            render_status_text(&status);
-            std::process::exit(2);
-        }
+    render_refresh_text(&refresh_body);
+    if !ok {
+        render_status_text(&status);
+        std::process::exit(2);
     }
     render_status_text(&status);
     render_alias_map_text();

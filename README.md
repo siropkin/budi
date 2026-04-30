@@ -299,9 +299,9 @@ budi vitals --session <id>         # health vitals for a specific session
 ```bash
 budi doctor                        # check health: daemon, tailer, schema, transcript visibility
 budi doctor --deep                 # run full SQLite integrity_check (slower)
-budi pricing status                # pricing manifest source, version, fetched-at, model count
-budi pricing status --refresh      # trigger an immediate LiteLLM manifest refresh
-budi pricing status --json         # same data in JSON
+budi pricing                       # pricing manifest source, version, fetched-at, model count (read-only)
+budi pricing sync                  # fetch the latest LiteLLM manifest into the local cache
+budi pricing --format json         # same data in JSON
 budi cloud init                    # generate ~/.config/budi/cloud.toml from a commented template
 budi cloud init --api-key KEY      # write the key + enable sync in one step
 budi cloud status                  # cloud sync readiness + last-synced-at + queued records
