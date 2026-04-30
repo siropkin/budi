@@ -549,10 +549,7 @@ pub fn chunk_payload(payload: SyncPayload) -> Vec<SyncPayload> {
     let mut current_day: Option<String> = None;
     for record in daily_rollups {
         let same_day = current_day.as_deref() == Some(&record.bucket_day);
-        if !current.is_empty()
-            && !same_day
-            && current.len() >= MAX_RECORDS_PER_ENVELOPE
-        {
+        if !current.is_empty() && !same_day && current.len() >= MAX_RECORDS_PER_ENVELOPE {
             chunks.push(SyncPayload {
                 daily_rollups: std::mem::take(&mut current),
                 session_summaries: Vec::new(),
@@ -876,8 +873,7 @@ pub fn sync_tick_report(db_path: &Path, config: &CloudConfig) -> SyncTickReport 
     let mut chunks_succeeded = 0usize;
     let mut server_records_upserted: Option<i64> = None;
     let mut server_watermark: Option<String> = None;
-    let mut last_result =
-        SyncResult::TransientError("no chunks were sent".to_string());
+    let mut last_result = SyncResult::TransientError("no chunks were sent".to_string());
 
     let device_id = envelope.device_id;
     let org_id = envelope.org_id;
@@ -900,8 +896,7 @@ pub fn sync_tick_report(db_path: &Path, config: &CloudConfig) -> SyncTickReport 
             SyncResult::Success(resp) => {
                 chunks_succeeded += 1;
                 if let Some(n) = resp.records_upserted {
-                    server_records_upserted =
-                        Some(server_records_upserted.unwrap_or(0) + n);
+                    server_records_upserted = Some(server_records_upserted.unwrap_or(0) + n);
                 }
                 if let Some(wm) = &resp.watermark {
                     server_watermark = Some(wm.clone());
@@ -1638,16 +1633,18 @@ mod tests {
         let seen_days_per_chunk: Vec<Vec<String>> = chunks
             .iter()
             .map(|c| {
-                let mut days: Vec<String> =
-                    c.daily_rollups.iter().map(|r| r.bucket_day.clone()).collect();
+                let mut days: Vec<String> = c
+                    .daily_rollups
+                    .iter()
+                    .map(|r| r.bucket_day.clone())
+                    .collect();
                 days.sort();
                 days.dedup();
                 days
             })
             .collect();
         let total_unique = {
-            let mut all: Vec<String> =
-                seen_days_per_chunk.iter().flatten().cloned().collect();
+            let mut all: Vec<String> = seen_days_per_chunk.iter().flatten().cloned().collect();
             all.sort();
             all.dedup();
             all.len()

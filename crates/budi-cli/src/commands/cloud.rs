@@ -657,7 +657,10 @@ fn render_sync_text(body: &Value) {
         .and_then(Value::as_i64)
         .unwrap_or(0);
     let watermark = body.get("watermark").and_then(Value::as_str);
-    let chunks_total = body.get("chunks_total").and_then(Value::as_i64).unwrap_or(0);
+    let chunks_total = body
+        .get("chunks_total")
+        .and_then(Value::as_i64)
+        .unwrap_or(0);
     let chunks_succeeded = body
         .get("chunks_succeeded")
         .and_then(Value::as_i64)
