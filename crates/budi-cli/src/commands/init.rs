@@ -160,6 +160,19 @@ fn install_default_integrations(config: &config::BudiConfig) {
         return;
     }
 
+    // #604: snapshot statusline state before install so we can decide
+    // whether to surface the discoverability hint. A user who already
+    // has both the budi marker in `~/.claude/settings.json` and a
+    // `~/.config/budi/statusline.toml` file has been onboarded and may
+    // have customized their config — repeating the hint would nag.
+    let statusline_in_selection =
+        selected.contains(&super::integrations::IntegrationComponent::ClaudeCodeStatusline);
+    let statusline_was_installed =
+        statusline_in_selection && super::integrations::claude_statusline_installed();
+    let statusline_toml_existed = config::statusline_config_path()
+        .map(|p| p.exists())
+        .unwrap_or(false);
+
     let report = super::integrations::install_selected(config, &selected, None);
 
     let mut prefs = super::integrations::load_preferences();
@@ -178,6 +191,40 @@ fn install_default_integrations(config: &config::BudiConfig) {
             eprintln!("{yellow}  Warning:{reset} {warning}");
         }
     }
+
+    if should_print_statusline_hint(
+        statusline_in_selection,
+        statusline_was_installed,
+        statusline_toml_existed,
+    ) {
+        print_statusline_discoverability_hint();
+    }
+}
+
+/// #604: pure suppression rule for the statusline customization hint.
+/// Print on first install of the statusline, or when the budi marker
+/// is in `~/.claude/settings.json` but `statusline.toml` is missing
+/// (pre-#600 install state). Stay quiet when the user is fully
+/// onboarded, or when the statusline isn't part of this install path
+/// at all.
+fn should_print_statusline_hint(
+    statusline_in_selection: bool,
+    statusline_was_installed: bool,
+    statusline_toml_existed: bool,
+) -> bool {
+    if !statusline_in_selection {
+        return false;
+    }
+    !(statusline_was_installed && statusline_toml_existed)
+}
+
+fn print_statusline_discoverability_hint() {
+    let dim = super::ansi("\x1b[90m");
+    let reset = super::ansi("\x1b[0m");
+    println!("  Status line: cost preset {dim}(rolling 1d / 7d / 30d){reset}");
+    println!(
+        "    Customize: ~/.config/budi/statusline.toml {dim}— try `budi integrations install --statusline-preset coach` for live session vitals{reset}"
+    );
 }
 
 fn claude_code_installed() -> bool {
@@ -425,10 +472,50 @@ fn install_autostart_service(config: &config::BudiConfig) {
 
 #[cfg(test)]
 mod tests {
-    use super::{DetectedAgent, detect_agents_from_providers};
+    use super::{DetectedAgent, detect_agents_from_providers, should_print_statusline_hint};
     use anyhow::Result;
     use budi_core::provider::{DiscoveredFile, Provider};
     use std::path::{Path, PathBuf};
+
+    #[test]
+    fn statusline_hint_prints_on_fresh_install() {
+        // Neither the budi marker nor the toml file exist yet — the user
+        // is being onboarded for the first time, so the hint is on.
+        assert!(should_print_statusline_hint(true, false, false));
+    }
+
+    #[test]
+    fn statusline_hint_suppressed_when_already_onboarded() {
+        // Budi marker present in claude settings AND statusline.toml
+        // exists — the user has already gone through onboarding (and may
+        // have edited the file). Stay silent.
+        assert!(!should_print_statusline_hint(true, true, true));
+    }
+
+    #[test]
+    fn statusline_hint_prints_when_marker_present_but_toml_missing() {
+        // Pre-#600 install state: claude settings have the budi marker
+        // but `statusline.toml` was never seeded. Showing the hint
+        // surfaces the new file the user has just been given.
+        assert!(should_print_statusline_hint(true, true, false));
+    }
+
+    #[test]
+    fn statusline_hint_prints_when_toml_present_but_marker_missing() {
+        // User uninstalled and is reinstalling the statusline. The toml
+        // file is theirs to keep, but they're going through install
+        // again — surface the hint.
+        assert!(should_print_statusline_hint(true, false, true));
+    }
+
+    #[test]
+    fn statusline_hint_suppressed_when_statusline_not_in_selection() {
+        // `~/.claude` does not exist on this machine (or some other
+        // gate stripped the statusline from the selection). The hint is
+        // about a thing that wasn't installed — don't print it.
+        assert!(!should_print_statusline_hint(false, false, false));
+        assert!(!should_print_statusline_hint(false, true, true));
+    }
 
     struct StubProvider {
         display_name: &'static str,
