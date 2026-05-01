@@ -375,6 +375,13 @@ fn install_claude_settings(
         }
         if let Some(preset) = statusline_preset {
             set_statusline_preset(preset)?;
+        } else {
+            // #600: when no preset is passed (the `budi init` path), drop a
+            // template `statusline.toml` so users have a real file to edit.
+            // README docs the file as the source of truth; without seeding
+            // a fresh install has nothing to discover. Idempotent — repeat
+            // installs leave user edits byte-stable.
+            seed_statusline_toml()?;
         }
     }
 
@@ -438,6 +445,29 @@ pub(crate) fn apply_statusline(settings: &mut Value) -> Result<StatuslineApply> 
         "padding": 0
     });
     Ok(StatuslineApply::Changed)
+}
+
+/// Idempotently seed `~/.config/budi/statusline.toml` with the default
+/// `cost` preset and commented examples. Called on the no-preset path
+/// (i.e. `budi init`) so users have a real file to edit.
+///
+/// Prints a single confirmation line on first generation. Stays quiet
+/// on repeat runs so `budi init` doesn't nag once the user already has
+/// (and possibly customized) the file.
+fn seed_statusline_toml() -> Result<()> {
+    match config::seed_statusline_config_if_needed()? {
+        config::SeedStatuslineOutcome::Generated => {
+            let path = config::statusline_config_path()?;
+            let dim = super::ansi("\x1b[90m");
+            let reset = super::ansi("\x1b[0m");
+            println!(
+                "  Status line: {} {dim}(cost preset — edit to customize){reset}",
+                path.display()
+            );
+        }
+        config::SeedStatuslineOutcome::AlreadySet => {}
+    }
+    Ok(())
 }
 
 pub fn set_statusline_preset(preset: StatuslinePreset) -> Result<()> {
