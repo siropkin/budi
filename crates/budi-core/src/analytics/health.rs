@@ -794,7 +794,18 @@ fn generate_tip(
     na_count: usize,
 ) -> String {
     if overall_state == STATE_INSUFFICIENT_DATA {
-        return "Not enough session data yet to assess".to_string();
+        // #602: surface the assistant-message count so a user wondering "why
+        // is this stuck on N/A?" sees data is flowing and the warm-up window.
+        // First scoring threshold is 5 assistant messages (context_drag); the
+        // others (cache_efficiency, cost_acceleration) join in over the next
+        // few turns. `thrashing` stays N/A in 8.3.x (rebuild pending).
+        return match message_count {
+            0 => "Not enough session data yet to assess (no assistant messages yet)".to_string(),
+            1 => "Not enough session data yet to assess (1 assistant message so far — vitals warm up over the first ~5 turns)".to_string(),
+            n => format!(
+                "Not enough session data yet to assess ({n} assistant messages so far — vitals warm up over the first ~5 turns)"
+            ),
+        };
     }
     if overall_state == "green" {
         if message_count < 5 {
