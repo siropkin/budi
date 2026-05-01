@@ -160,7 +160,7 @@ budi db import               # import historical transcripts (one-time backfill)
 budi update                  # update to latest release
 ```
 
-All commands support `--period today|week|month|all` and `--format json`. See the [full CLI reference](#full-cli-reference) below.
+Data commands accept `--period today|week|month|all` (or relative like `7d`, `2w`, `1m`) and `--format json` for scripting. See the [full CLI reference](#full-cli-reference) below.
 
 ## Status line
 
@@ -295,13 +295,17 @@ budi sessions latest               # detail + vitals for the most recent session
 ```bash
 budi doctor                        # check health: daemon, tailer, schema, transcript visibility
 budi doctor --deep                 # run full SQLite integrity_check (slower)
+budi doctor --format json          # JSON output for scripting
 budi pricing                       # pricing manifest source, version, fetched-at, model count (read-only)
+budi pricing status                # same as bare `budi pricing` (long form)
 budi pricing sync                  # fetch the latest LiteLLM manifest into the local cache
 budi pricing --format json         # same data in JSON
 budi cloud init                    # generate ~/.config/budi/cloud.toml from a commented template
 budi cloud init --api-key KEY      # write the key + enable sync in one step
 budi cloud status                  # cloud sync readiness + last-synced-at + queued records
 budi cloud sync                    # push queued local rollups to the cloud now
+budi cloud sync --full             # drop watermarks then re-upload everything (cloud reset && cloud sync in one step)
+budi cloud sync --full --yes       # same, non-interactive (CI / scripts)
 budi cloud reset                   # reset watermarks so the next sync re-uploads everything (org switch / data wipe)
 budi autostart status              # check daemon autostart service
 budi autostart install             # install the autostart service
@@ -319,7 +323,7 @@ budi uninstall                     # remove status line, config, and data
 budi uninstall --keep-data         # uninstall but keep analytics database
 ```
 
-All data commands support `--period today|week|month|all` and `--format json`.
+Data views accept `--period today|week|month|all` (or relative like `7d`, `2w`, `1m`) and `--format json` for scripting. Side-effecting commands (`init`, `update`, `uninstall`, `db check`, `cloud init`, `integrations install`) do not take `--format json`.
 
 </details>
 
