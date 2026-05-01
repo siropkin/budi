@@ -1042,7 +1042,9 @@ mod tests {
     #[test]
     fn refresh_unions_user_prefs_with_default_recommended_components() {
         let mut prefs = IntegrationPreferences::default();
-        prefs.enabled.insert(IntegrationComponent::ClaudeCodeStatusline);
+        prefs
+            .enabled
+            .insert(IntegrationComponent::ClaudeCodeStatusline);
         prefs.enabled.insert(IntegrationComponent::CursorExtension);
 
         // Simulate the in-memory union step (the disk side is exercised
@@ -1055,16 +1057,22 @@ mod tests {
         }
 
         assert!(
-            prefs.enabled.contains(&IntegrationComponent::ClaudeCodeBudiSkill),
+            prefs
+                .enabled
+                .contains(&IntegrationComponent::ClaudeCodeBudiSkill),
             "refresh must add the default-recommended /budi skill component for upgraders \
              whose saved prefs predate #603"
         );
         assert!(
-            prefs.enabled.contains(&IntegrationComponent::ClaudeCodeStatusline),
+            prefs
+                .enabled
+                .contains(&IntegrationComponent::ClaudeCodeStatusline),
             "refresh must NOT drop pre-existing enabled components"
         );
         assert!(
-            prefs.enabled.contains(&IntegrationComponent::CursorExtension),
+            prefs
+                .enabled
+                .contains(&IntegrationComponent::CursorExtension),
             "refresh must NOT drop pre-existing enabled components"
         );
     }
