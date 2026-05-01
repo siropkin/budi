@@ -972,6 +972,110 @@ pub async fn analytics_sessions(
     Ok(Json(result))
 }
 
+/// Query params for `GET /analytics/sessions/resolve` (#603). The CLI
+/// passes its process cwd so the daemon can encode it to Claude
+/// Code's `~/.claude/projects/<encoded>/` form and walk for the
+/// most-recent transcript.
+#[derive(serde::Deserialize)]
+pub struct ResolveSessionParams {
+    pub token: String,
+    pub cwd: Option<String>,
+}
+
+/// `GET /analytics/sessions/resolve?token=<token>&cwd=<path>` —
+/// server-side resolution for the `current` and `latest` literal
+/// session tokens.
+///
+/// Response shape:
+/// ```json
+/// {
+///   "session_id": "<uuid>",
+///   "source": "current" | "latest",
+///   "fallback_reason": null | "<one-line stderr-friendly note>"
+/// }
+/// ```
+///
+/// - `token=current` walks `~/.claude/projects/<encoded-cwd>/` for
+///   the newest `*.jsonl` and returns its filename stem. If that
+///   directory is missing or empty, falls back to `latest` and sets
+///   `fallback_reason`. Per #603 the CLI surfaces that string on
+///   stderr so non-Claude users still get something useful.
+/// - `token=latest` returns the newest session id from the DB.
+/// - Any other token → 400 Bad Request.
+/// - Empty workspace (no sessions at all anywhere) → 404 Not Found.
+pub async fn analytics_resolve_session(
+    Query(params): Query<ResolveSessionParams>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    let token = params.token.trim().to_lowercase();
+    if token != "current" && token != "latest" {
+        return Err(bad_request(format!(
+            "unknown session token '{}'; expected 'current' or 'latest'",
+            params.token
+        )));
+    }
+
+    let mut fallback_reason: Option<String> = None;
+    let mut source = token.clone();
+
+    if token == "current" {
+        let home = budi_core::config::home_dir().map_err(internal_error)?;
+        let cwd_str = params.cwd.unwrap_or_default();
+        if cwd_str.is_empty() {
+            fallback_reason =
+                Some("no cwd provided — falling back to latest session".to_string());
+            source = "latest".to_string();
+        } else {
+            let cwd = std::path::PathBuf::from(&cwd_str);
+            if let Some(sid) = budi_core::session_resolve::find_current_session_id(&home, &cwd) {
+                return Ok(Json(json!({
+                    "session_id": sid,
+                    "source": "current",
+                    "fallback_reason": serde_json::Value::Null,
+                })));
+            }
+            fallback_reason = Some(format!(
+                "no Claude Code transcripts under ~/.claude/projects/ for cwd {cwd_str} — falling back to latest session",
+            ));
+            source = "latest".to_string();
+        }
+    }
+
+    // Either the caller asked for `latest`, or the `current` lookup
+    // came up dry and we fell back. Hit the DB for the newest session.
+    let latest = tokio::task::spawn_blocking(move || {
+        let db_path = analytics::db_path()?;
+        let conn = analytics::open_db(&db_path)?;
+        let paginated = analytics::session_list(
+            &conn,
+            &analytics::SessionListParams {
+                since: None,
+                until: None,
+                search: None,
+                sort_by: Some("started_at"),
+                sort_asc: false,
+                limit: 1,
+                offset: 0,
+                ticket: None,
+                activity: None,
+            },
+        )?;
+        Ok::<_, anyhow::Error>(paginated.sessions.into_iter().next().map(|s| s.id))
+    })
+    .await
+    .map_err(|e| internal_error(anyhow::anyhow!("{e}")))?
+    .map_err(internal_error)?;
+
+    let Some(sid) = latest else {
+        return Err(not_found("no sessions found"));
+    };
+
+    Ok(Json(json!({
+        "session_id": sid,
+        "source": source,
+        "fallback_reason": fallback_reason,
+    })))
+}
+
 /// Resolve a session ID prefix to its full ID, returning appropriate HTTP errors.
 ///
 /// Error mapping (#519):

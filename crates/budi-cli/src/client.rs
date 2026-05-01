@@ -197,6 +197,25 @@ pub struct SyncStatusResponse {
     pub progress: Option<SyncProgress>,
 }
 
+/// Typed mirror of the daemon's `/analytics/sessions/resolve` envelope
+/// (#603). Returned by `DaemonClient::resolve_session_token` so the
+/// CLI can render the optional `fallback_reason` on stderr without
+/// digging through raw JSON.
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct ResolvedSession {
+    pub session_id: String,
+    /// `"current"` if the cwd-encoded transcript dir resolved
+    /// directly; `"latest"` if we fell back to the newest DB session.
+    #[serde(default)]
+    #[allow(dead_code)]
+    pub source: String,
+    /// Human-readable note about a fallback path (`current` → `latest`,
+    /// or `current` with no cwd). The CLI surfaces this verbatim on
+    /// stderr per the #603 acceptance criteria.
+    #[serde(default)]
+    pub fallback_reason: Option<String>,
+}
+
 /// Thin HTTP client that talks to budi-daemon.
 #[derive(Clone)]
 pub struct DaemonClient {
@@ -960,6 +979,29 @@ impl DaemonClient {
                 "{}/analytics/sessions/{}/tags",
                 self.base_url, session_id
             ))
+            .send()
+            .map_err(describe_send_error)?;
+        let resp = check_response(resp)?;
+        Ok(resp.json()?)
+    }
+
+    /// `GET /analytics/sessions/resolve?token=<token>&cwd=<path>` —
+    /// server-side resolution for the `current` and `latest` literal
+    /// session tokens (#603). Returns the resolved session id plus
+    /// an optional `fallback_reason` line the CLI prints on stderr.
+    pub fn resolve_session_token(
+        &self,
+        token: &str,
+        cwd: Option<&str>,
+    ) -> Result<ResolvedSession> {
+        let mut params: Vec<(&str, &str)> = vec![("token", token)];
+        if let Some(c) = cwd {
+            params.push(("cwd", c));
+        }
+        let resp = self
+            .client
+            .get(format!("{}/analytics/sessions/resolve", self.base_url))
+            .query(&params)
             .send()
             .map_err(describe_send_error)?;
         let resp = check_response(resp)?;
