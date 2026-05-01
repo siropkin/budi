@@ -34,6 +34,14 @@ pub fn cmd_uninstall(keep_data: bool, yes: bool) -> Result<()> {
     } else {
         cleanup_legacy_proxy_residue(green, yellow, reset);
 
+        // Remove the auto-installed `/budi` Claude Code skill (#603).
+        print!("Removing /budi Claude Code skill... ");
+        match remove_budi_skill() {
+            Ok(true) => println!("{green}✓{reset} removed"),
+            Ok(false) => println!("none found"),
+            Err(e) => println!("{yellow}warning: {e}{reset}"),
+        }
+
         // 2-6. Remove Claude Code integrations (single file pass)
         match remove_all_from_claude_code(&home) {
             Ok((hooks, otel, mcp, statusline)) => {
@@ -327,6 +335,30 @@ fn remove_all_from_claude_code(home: &str) -> Result<(bool, bool, bool, bool)> {
     }
 
     Ok((hooks_removed, otel_removed, mcp_removed, statusline_removed))
+}
+
+/// Remove `~/.claude/skills/budi/SKILL.md` (and the empty `budi/` dir
+/// when it has no other entries). Idempotent — returns `false` when
+/// the file did not exist.
+fn remove_budi_skill() -> Result<bool> {
+    let skill_path = match super::integrations::claude_budi_skill_path() {
+        Ok(p) => p,
+        Err(_) => return Ok(false),
+    };
+    if !skill_path.exists() {
+        return Ok(false);
+    }
+    fs::remove_file(&skill_path)
+        .with_context(|| format!("Failed to remove {}", skill_path.display()))?;
+    if let Some(parent) = skill_path.parent()
+        && parent.exists()
+        && fs::read_dir(parent)
+            .map(|mut iter| iter.next().is_none())
+            .unwrap_or(false)
+    {
+        let _ = fs::remove_dir(parent);
+    }
+    Ok(true)
 }
 
 fn remove_cursor_hooks(home: &str) -> Result<bool> {

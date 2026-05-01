@@ -21,6 +21,7 @@ pub enum IntegrationComponent {
     #[value(skip)]
     ClaudeCodeOtel,
     ClaudeCodeStatusline,
+    ClaudeCodeBudiSkill,
     #[value(skip)]
     CursorHooks,
     CursorExtension,
@@ -32,6 +33,7 @@ impl IntegrationComponent {
             Self::ClaudeCodeHooks => "Claude Code hooks",
             Self::ClaudeCodeOtel => "Claude Code OTEL",
             Self::ClaudeCodeStatusline => "Claude Code status line",
+            Self::ClaudeCodeBudiSkill => "Claude Code /budi skill",
             Self::CursorHooks => "Cursor hooks",
             Self::CursorExtension => "Cursor extension",
         }
@@ -182,6 +184,7 @@ pub fn cmd_integrations(action: crate::IntegrationAction) -> Result<()> {
 pub fn default_recommended_components() -> BTreeSet<IntegrationComponent> {
     [
         IntegrationComponent::ClaudeCodeStatusline,
+        IntegrationComponent::ClaudeCodeBudiSkill,
         IntegrationComponent::CursorExtension,
     ]
     .into_iter()
@@ -191,6 +194,7 @@ pub fn default_recommended_components() -> BTreeSet<IntegrationComponent> {
 pub fn all_components() -> BTreeSet<IntegrationComponent> {
     [
         IntegrationComponent::ClaudeCodeStatusline,
+        IntegrationComponent::ClaudeCodeBudiSkill,
         IntegrationComponent::CursorExtension,
     ]
     .into_iter()
@@ -235,6 +239,7 @@ pub fn detect_component_state(
         IntegrationComponent::ClaudeCodeHooks => claude_hooks_installed(),
         IntegrationComponent::ClaudeCodeOtel => claude_otel_installed(config),
         IntegrationComponent::ClaudeCodeStatusline => claude_statusline_installed(),
+        IntegrationComponent::ClaudeCodeBudiSkill => claude_budi_skill_installed(),
         IntegrationComponent::CursorHooks => cursor_hooks_installed(),
         IntegrationComponent::CursorExtension => is_cursor_extension_installed(),
     };
@@ -293,6 +298,29 @@ pub fn install_selected(
         let reset = super::ansi("\x1b[0m");
         eprintln!("{yellow}  Warning:{reset} Cursor hooks: {e}");
         report.warnings.push(format!("Cursor hooks: {e}"));
+    }
+
+    if filtered_selected.contains(&IntegrationComponent::ClaudeCodeBudiSkill) {
+        match install_claude_budi_skill() {
+            Ok(BudiSkillApply::Created) => {
+                let path = claude_budi_skill_path()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_else(|_| "~/.claude/skills/budi/SKILL.md".to_string());
+                println!("  /budi skill: installed at {path}");
+            }
+            Ok(BudiSkillApply::AlreadyInstalled) => {
+                println!("  /budi skill: already installed");
+            }
+            Ok(BudiSkillApply::Skipped) => {
+                println!("  /budi skill: skipped (Claude Code not installed)");
+            }
+            Err(e) => {
+                let yellow = super::ansi("\x1b[33m");
+                let reset = super::ansi("\x1b[0m");
+                eprintln!("{yellow}  Warning:{reset} /budi skill: {e}");
+                report.warnings.push(format!("/budi skill: {e}"));
+            }
+        }
     }
 
     if filtered_selected.contains(&IntegrationComponent::CursorExtension) {
@@ -757,6 +785,79 @@ pub fn is_cursor_extension_installed() -> bool {
             .unwrap_or(false),
         None => false,
     }
+}
+
+/// Path to the auto-installed `/budi` Claude Code skill file.
+pub fn claude_budi_skill_path() -> Result<PathBuf> {
+    let home = budi_core::config::home_dir()?;
+    Ok(home
+        .join(".claude")
+        .join("skills")
+        .join("budi")
+        .join("SKILL.md"))
+}
+
+/// Canonical contents of `~/.claude/skills/budi/SKILL.md`. Kept as a
+/// constant so the install path and the e2e regression guard agree on
+/// the byte-for-byte contents (idempotent re-install must leave a
+/// pre-existing file with these bytes untouched).
+pub const BUDI_SKILL_CONTENTS: &str = "---\n\
+name: budi\n\
+description: \"Show live session vitals — context bloat, cache hit rate, retry loops, cost acceleration — for the current Claude Code session. Buddy is back, but now it's budi.\"\n\
+---\n\
+\n\
+When the user types `/budi` in Claude Code, run `budi sessions current` in the\n\
+project root and surface the output verbatim.\n";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BudiSkillApply {
+    /// Skill file did not exist and was created (or existed with
+    /// stale/non-matching bytes and was overwritten).
+    Created,
+    /// Skill file already had the canonical bytes — no write performed
+    /// so user edits, if any, stay byte-stable.
+    AlreadyInstalled,
+    /// `~/.claude` is missing — Claude Code is not installed on this
+    /// machine. Caller surfaces a friendly note instead of writing
+    /// outside the documented integration scope.
+    Skipped,
+}
+
+/// Idempotently install `~/.claude/skills/budi/SKILL.md`.
+///
+/// Returns `Skipped` when `~/.claude` is missing (Claude Code is not
+/// installed). Returns `AlreadyInstalled` when the file's bytes already
+/// match the canonical contents — this is the byte-stable repeat-install
+/// branch the e2e guard pins so user edits to the skill file never get
+/// silently clobbered.
+fn install_claude_budi_skill() -> Result<BudiSkillApply> {
+    let home = budi_core::config::home_dir()?;
+    let claude_dir = home.join(".claude");
+    if !claude_dir.is_dir() {
+        return Ok(BudiSkillApply::Skipped);
+    }
+    let skill_path = claude_budi_skill_path()?;
+
+    if let Ok(existing) = fs::read_to_string(&skill_path)
+        && existing == BUDI_SKILL_CONTENTS
+    {
+        return Ok(BudiSkillApply::AlreadyInstalled);
+    }
+
+    if let Some(parent) = skill_path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("Failed to create {}", parent.display()))?;
+    }
+    fs::write(&skill_path, BUDI_SKILL_CONTENTS)
+        .with_context(|| format!("Failed to write {}", skill_path.display()))?;
+    Ok(BudiSkillApply::Created)
+}
+
+pub fn claude_budi_skill_installed() -> bool {
+    let Ok(path) = claude_budi_skill_path() else {
+        return false;
+    };
+    path.is_file()
 }
 
 pub fn claude_statusline_installed() -> bool {

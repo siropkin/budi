@@ -154,6 +154,7 @@ fn install_default_integrations(config: &config::BudiConfig) {
 
     if !claude_code_installed() {
         selected.remove(&super::integrations::IntegrationComponent::ClaudeCodeStatusline);
+        selected.remove(&super::integrations::IntegrationComponent::ClaudeCodeBudiSkill);
     }
 
     if selected.is_empty() {

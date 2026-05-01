@@ -180,6 +180,10 @@ slots = ["1d", "7d", "30d"]   # default quiet preset
 
 Available slots: `1d`, `7d`, `30d`, `session`, `branch`, `project`, `health`.
 
+## `/budi` Claude Code skill
+
+`budi init` also drops a tiny Claude Code skill at `~/.claude/skills/budi/SKILL.md`. From inside Claude Code, type `/budi` to surface live vitals — context bloat, cache hit rate, retry loops, cost acceleration — for the **current** session in this project, not the global "latest" one. The skill resolves to the right session even when multiple Claude Code windows are open across projects, because resolution is scoped to your current working directory rather than global recency. The terminal equivalent is `budi sessions current`. Pass `--no-integrations` to `budi init` to opt out, or `budi integrations install --with claude-code-budi-skill` to install later.
+
 ## Cloud sync (optional)
 
 Disabled by default. Get set up in two commands:

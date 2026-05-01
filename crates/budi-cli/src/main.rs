@@ -17,7 +17,7 @@ const HEALTH_TIMEOUT_SECS: u64 = 3;
 #[command(about = "budi — AI cost analytics. Know where your tokens and money go.")]
 #[command(version)]
 #[command(
-    after_help = "Get started:\n  budi init\n\nCommon commands:\n  budi stats              Show today's cost summary\n  budi stats models       Cost breakdown by model\n  budi stats branches     Cost breakdown by branch\n  budi sessions           List recent sessions with cost and vitals\n  budi sessions <id>      Session detail: cost, models, vitals, tags\n  budi sessions latest    Detail + vitals for the most recent session\n  budi status             Quick check: daemon and today's spend\n  budi doctor             Full diagnostic: daemon, tailer, schema, transcript visibility\n  budi cloud status       Cloud sync readiness and last-synced-at\n  budi cloud sync         Push queued local data to the cloud now\n  budi autostart status   Check daemon autostart service\n  budi db import          Import historical transcripts from disk\n  budi db import --force  Re-ingest all data from scratch (use after upgrades)\n  budi db check           Verify schema; report drift (read-only)\n  budi db check --fix     Verify + auto-repair drift and run migrations\n\nMore info: https://github.com/siropkin/budi"
+    after_help = "Get started:\n  budi init\n\nCommon commands:\n  budi stats              Show today's cost summary\n  budi stats models       Cost breakdown by model\n  budi stats branches     Cost breakdown by branch\n  budi sessions           List recent sessions with cost and vitals\n  budi sessions <id>      Session detail: cost, models, vitals, tags\n  budi sessions latest    Detail + vitals for the most recent session\n  budi sessions current   Vitals for the active Claude Code session in this cwd (used by /budi)\n  budi status             Quick check: daemon and today's spend\n  budi doctor             Full diagnostic: daemon, tailer, schema, transcript visibility\n  budi cloud status       Cloud sync readiness and last-synced-at\n  budi cloud sync         Push queued local data to the cloud now\n  budi autostart status   Check daemon autostart service\n  budi db import          Import historical transcripts from disk\n  budi db import --force  Re-ingest all data from scratch (use after upgrades)\n  budi db check           Verify schema; report drift (read-only)\n  budi db check --fix     Verify + auto-repair drift and run migrations\n\nMore info: https://github.com/siropkin/budi"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -119,10 +119,13 @@ Examples:
   budi sessions --activity bugfix  Sessions classified as bug-fix work
   budi sessions <session-id>       Show detail + vitals for a specific session
   budi sessions latest             Show detail + vitals for the most recent session
+  budi sessions current            Show vitals for the active Claude Code session in the current cwd
   budi sessions --format json      JSON output for scripting")]
     Sessions {
-        /// Session ID for detail view, or `latest` for the most recent
-        /// session. Omit for the session list.
+        /// Session ID for detail view, or one of the literal tokens
+        /// `latest` (newest session in the DB) / `current` (active
+        /// Claude Code session for this cwd, used by the auto-installed
+        /// `/budi` skill). Omit for the session list.
         #[arg()]
         session_id: Option<String>,
         /// Time period for session list (today, week, month, all, or relative like 1d, 7d, 1m)
@@ -1586,6 +1589,35 @@ mod tests {
             }
             _ => panic!("expected sessions command"),
         }
+    }
+
+    #[test]
+    fn cli_sessions_accepts_current_as_session_id() {
+        // `budi sessions current` (#603) is the cwd-scoped sibling of
+        // `latest`. It backs the auto-installed `/budi` Claude Code
+        // skill and resolves to the active session for this cwd
+        // server-side.
+        let cli = Cli::try_parse_from(["budi", "sessions", "current"])
+            .expect("budi sessions current should parse");
+        match cli.command {
+            Commands::Sessions { session_id, .. } => {
+                assert_eq!(session_id.as_deref(), Some("current"));
+            }
+            _ => panic!("expected sessions command"),
+        }
+    }
+
+    #[test]
+    fn help_advertises_sessions_current_for_budi_skill() {
+        // `/budi` skill calls `budi sessions current`; the help
+        // surface should mention it so users discovering the
+        // command from a terminal see the correspondence.
+        let mut command = Cli::command();
+        let help = command.render_help().to_string();
+        assert!(
+            help.contains("budi sessions current"),
+            "top-level help should advertise `budi sessions current` for the /budi skill"
+        );
     }
 
     #[test]

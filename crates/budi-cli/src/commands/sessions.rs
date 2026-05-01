@@ -180,8 +180,8 @@ pub fn cmd_session_detail(session_id: &str, json_output: bool) -> Result<()> {
         "Could not reach budi daemon. Run `budi init` to set up, or `budi doctor` to diagnose.",
     )?;
 
-    let resolved_id = if session_id == "latest" {
-        resolve_latest_session_id(&client)?
+    let resolved_id = if session_id == "latest" || session_id == "current" {
+        resolve_session_token(&client, session_id)?
     } else {
         session_id.to_string()
     };
@@ -306,18 +306,34 @@ pub fn cmd_session_detail(session_id: &str, json_output: bool) -> Result<()> {
     Ok(())
 }
 
-/// Resolve the most recent session ID by asking the daemon for the
-/// newest session in the all-time window. Used by `budi sessions latest`
-/// to fold what was previously `budi vitals` (no args) into the
-/// canonical detail view.
-fn resolve_latest_session_id(client: &DaemonClient) -> Result<String> {
-    let resp = client.sessions(None, None, None, None, None, 1, 0)?;
-    let s = resp
-        .sessions
-        .into_iter()
-        .next()
-        .ok_or_else(|| anyhow::anyhow!("No sessions yet — run an AI agent and try again."))?;
-    Ok(s.id)
+/// Resolve a literal session token (`latest` or `current`) into a
+/// concrete session id by asking the daemon's
+/// `/analytics/sessions/resolve` endpoint (#603).
+///
+/// `current` includes the CLI's cwd as a query param so the daemon
+/// can walk `~/.claude/projects/<encoded-cwd>/` for the most-recent
+/// transcript. When the daemon falls back to `latest` (no transcripts
+/// for this cwd) it returns a `fallback_reason` we mirror verbatim
+/// on stderr so the user understands why their `/budi` invocation
+/// surfaced a different session than they expected.
+fn resolve_session_token(client: &DaemonClient, token: &str) -> Result<String> {
+    let cwd = std::env::current_dir().ok();
+    let cwd_str = cwd.as_ref().and_then(|p| p.to_str());
+    let resolved = client.resolve_session_token(token, cwd_str).map_err(|e| {
+        // The daemon returns 404 when there are no sessions at
+        // all — wrap that into the same friendly nudge we used
+        // to print client-side so the failure mode is unchanged
+        // for fresh users.
+        if format!("{e:#}").contains("no sessions found") {
+            anyhow::anyhow!("No sessions yet — run an AI agent and try again.")
+        } else {
+            e
+        }
+    })?;
+    if let Some(ref reason) = resolved.fallback_reason {
+        eprintln!("budi: {reason}");
+    }
+    Ok(resolved.session_id)
 }
 
 /// Render the four-vital health block for a session. Inlined into
