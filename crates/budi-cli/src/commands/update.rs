@@ -161,13 +161,31 @@ pub fn cmd_update(yes: bool, version: Option<String>) -> Result<()> {
         }
     }
 
-    // Refresh opted-in integrations (or currently detected integrations for older installs).
+    // #613: re-exec the just-installed CLI for the integration refresh so
+    // any new IntegrationComponents (e.g. `/budi` skill from #603) or
+    // seeded files (e.g. `statusline.toml` from #600) that landed in this
+    // release actually run for upgrading users. The in-process call here
+    // would otherwise execute the PRE-install CLI's logic and silently
+    // skip the new components — the gap that #613 closes. Falls back to
+    // the in-process path if the re-exec can't be launched (defensive:
+    // don't fail `budi update` over an integrations hiccup).
     let (repo_root, config) = resolve_current_config();
-    let report = crate::commands::integrations::refresh_enabled_integrations(&config);
-    if !report.warnings.is_empty() {
-        eprintln!("Integration refresh warnings:");
-        for warning in report.warnings {
-            eprintln!("  - {warning}");
+    let new_budi: PathBuf = prepared
+        .as_ref()
+        .map(|p| p.budi_dst.clone())
+        .unwrap_or_else(|| PathBuf::from("budi"));
+    let re_exec_ok = Command::new(&new_budi)
+        .args(["integrations", "refresh"])
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if !re_exec_ok {
+        let report = crate::commands::integrations::refresh_enabled_integrations(&config);
+        if !report.warnings.is_empty() {
+            eprintln!("Integration refresh warnings:");
+            for warning in report.warnings {
+                eprintln!("  - {warning}");
+            }
         }
     }
 

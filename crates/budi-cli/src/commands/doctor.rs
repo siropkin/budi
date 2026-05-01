@@ -1,5 +1,6 @@
+use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use anyhow::{Context, Result};
 use budi_core::config;
@@ -311,6 +312,38 @@ struct DaemonCheck {
     started_this_run: bool,
 }
 
+/// #612: best-effort gap-duration string derived from the daemon log's
+/// last-modified timestamp. Surfaces as a parenthetical in the auto-
+/// recovery WARN so users see roughly how long ingestion was paused.
+/// Returns an empty string when the log isn't present (e.g. fresh
+/// install, Linux/Windows where supervisor logs go elsewhere) so the
+/// outer message stays clean.
+fn daemon_outage_summary(_repo_root: Option<&Path>) -> String {
+    let path = match budi_core::autostart::service_log_path() {
+        Some(p) => p,
+        None => return String::new(),
+    };
+    let modified = match fs::metadata(&path).and_then(|m| m.modified()) {
+        Ok(t) => t,
+        Err(_) => return String::new(),
+    };
+    let elapsed = match SystemTime::now().duration_since(modified) {
+        Ok(d) => d,
+        Err(_) => return String::new(),
+    };
+    let secs = elapsed.as_secs();
+    let pretty = if secs < 90 {
+        format!("{secs}s")
+    } else if secs < 90 * 60 {
+        format!("{}m", secs / 60)
+    } else if secs < 36 * 3600 {
+        format!("{}h", secs / 3600)
+    } else {
+        format!("{}d", secs / 86400)
+    };
+    format!(" — last log entry ~{pretty} ago")
+}
+
 fn check_daemon_health(repo_root: Option<&Path>, config: &config::BudiConfig) -> DaemonCheck {
     let base_url = config.daemon_base_url();
     let daemon_bin_override = std::env::var_os("BUDI_DAEMON_BIN");
@@ -340,11 +373,24 @@ fn check_daemon_health(repo_root: Option<&Path>, config: &config::BudiConfig) ->
 
     match ensure_daemon_running(repo_root, config) {
         Ok(()) if daemon_health(config) => DaemonCheck {
-            result: CheckResult::pass(
+            // #612: when doctor brings the daemon up itself, surface that as
+            // a WARN (not PASS) so a user investigating ingestion gaps can
+            // see that the daemon was NOT running on first probe — and how
+            // long the previous outage lasted. Pre-fix, this was reported
+            // as a uniform PASS, masking outages and making `All checks
+            // passed.` appear after we just rescued the daemon.
+            result: CheckResult::warn(
                 "daemon health",
                 format!(
-                    "started successfully and is responding on {base_url} (binary: {})",
-                    daemon_bin.display()
+                    "auto-recovered: was NOT running on first probe; doctor started it on {base_url} (binary: {}){}",
+                    daemon_bin.display(),
+                    daemon_outage_summary(repo_root),
+                ),
+                Some(
+                    "Previous outage may indicate a supervisor problem (see #611 for the macOS \
+                     launchd kickstart fix). If this recurs, run `budi autostart status` to \
+                     verify the supervisor is actually managing the daemon."
+                        .to_string(),
                 ),
             ),
             started_this_run: true,
