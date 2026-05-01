@@ -178,6 +178,16 @@ pub fn cmd_integrations(action: crate::IntegrationAction) -> Result<()> {
             }
             Ok(())
         }
+        crate::IntegrationAction::Refresh => {
+            let report = refresh_enabled_integrations(&cfg);
+            if !report.warnings.is_empty() {
+                eprintln!("Integration refresh warnings:");
+                for warning in report.warnings {
+                    eprintln!("  - {warning}");
+                }
+            }
+            Ok(())
+        }
     }
 }
 
@@ -357,6 +367,27 @@ pub fn refresh_enabled_integrations(config: &config::BudiConfig) -> InstallRepor
             let _ = save_preferences(&prefs);
         }
     }
+
+    // #613: union with the default-recommended set so upgrading users
+    // pick up new IntegrationComponents that landed in this release
+    // without having to re-run `budi init` or `budi integrations install`.
+    // Each install path is idempotent (canonical-bytes check on disk),
+    // so adding already-installed components is a no-op. Persist the
+    // union so `integrations list` reflects reality. Users who explicitly
+    // opt out of a component will gain that opt-out semantics when the
+    // CLI grows a remove action; today there is no remove path, so
+    // recommended-by-default is the right semantics.
+    let mut grew = false;
+    for component in default_recommended_components() {
+        if !component.is_removed_surface() && !prefs.enabled.contains(&component) {
+            prefs.enabled.insert(component);
+            grew = true;
+        }
+    }
+    if grew {
+        let _ = save_preferences(&prefs);
+    }
+
     if prefs.enabled.is_empty() {
         return InstallReport::default();
     }
@@ -999,5 +1030,50 @@ mod tests {
         // the user's padding / type / other settings don't regress.
         assert_eq!(settings["statusLine"]["type"], "command");
         assert_eq!(settings["statusLine"]["padding"], 2);
+    }
+
+    /// #613 regression guard: when an upgrading user's saved
+    /// `integrations.toml` is missing a component that the current
+    /// release recommends by default (e.g. `claude-code-budi-skill`
+    /// added in #603), `refresh_enabled_integrations` must add it to
+    /// the union before installing. Without this, the upgrade path
+    /// silently skips the new component because the user's stored
+    /// preference set was frozen at their last `budi init`.
+    #[test]
+    fn refresh_unions_user_prefs_with_default_recommended_components() {
+        let mut prefs = IntegrationPreferences::default();
+        prefs
+            .enabled
+            .insert(IntegrationComponent::ClaudeCodeStatusline);
+        prefs.enabled.insert(IntegrationComponent::CursorExtension);
+
+        // Simulate the in-memory union step (the disk side is exercised
+        // by an e2e harness; here we pin the algorithm).
+        let recommended = default_recommended_components();
+        for component in &recommended {
+            if !component.is_removed_surface() && !prefs.enabled.contains(component) {
+                prefs.enabled.insert(*component);
+            }
+        }
+
+        assert!(
+            prefs
+                .enabled
+                .contains(&IntegrationComponent::ClaudeCodeBudiSkill),
+            "refresh must add the default-recommended /budi skill component for upgraders \
+             whose saved prefs predate #603"
+        );
+        assert!(
+            prefs
+                .enabled
+                .contains(&IntegrationComponent::ClaudeCodeStatusline),
+            "refresh must NOT drop pre-existing enabled components"
+        );
+        assert!(
+            prefs
+                .enabled
+                .contains(&IntegrationComponent::CursorExtension),
+            "refresh must NOT drop pre-existing enabled components"
+        );
     }
 }

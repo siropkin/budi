@@ -217,6 +217,19 @@ pub fn restart_daemon_for_version_upgrade(
         return Ok(());
     }
 
+    #[cfg(target_os = "macos")]
+    if try_launchctl_kickstart()
+        && wait_for_daemon_health(
+            config,
+            startup_timeout_retries(),
+            Duration::from_millis(500),
+            Duration::from_millis(150),
+        )
+        && daemon_version_equals(config, expected)
+    {
+        return Ok(());
+    }
+
     ensure_daemon_running_with_binary(repo_root, config, daemon_bin_override)
 }
 
@@ -236,6 +249,32 @@ fn try_systemd_user_restart() -> bool {
     }
     Command::new("systemctl")
         .args(["--user", "restart", "budi-daemon"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+/// #611: when a launchd LaunchAgent is registered, route the post-update
+/// restart through `launchctl kickstart -k gui/$UID/dev.getbudi.budi-daemon`
+/// so the fresh daemon is reparented to launchd. Without this, the macOS
+/// branch falls into the raw-spawn fallback and the LaunchAgent stays in
+/// `state = not running` after a clean exit (KeepAlive.SuccessfulExit=false),
+/// silently orphaning the supervisor and producing ingestion gaps until
+/// the next login. Sibling to `try_systemd_user_restart` for Linux (#582).
+#[cfg(target_os = "macos")]
+fn try_launchctl_kickstart() -> bool {
+    if matches!(
+        budi_core::autostart::service_status(),
+        budi_core::autostart::ServiceStatus::NotInstalled
+    ) {
+        return false;
+    }
+    let uid = unsafe { libc::getuid() };
+    let target = format!("gui/{}/dev.getbudi.budi-daemon", uid);
+    Command::new("launchctl")
+        .args(["kickstart", "-k", &target])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status()

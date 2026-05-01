@@ -383,6 +383,14 @@ enum IntegrationAction {
         #[arg(long, default_value_t = false)]
         yes: bool,
     },
+    /// Re-apply the user's enabled integrations + any newly-default components.
+    ///
+    /// #613: this is the post-install hook that `budi update` re-execs against
+    /// the freshly-installed CLI so any new IntegrationComponents (e.g. the
+    /// `/budi` skill added in #603) or seeded files (e.g. `statusline.toml`
+    /// from #600) actually land for upgrading users. Idempotent and silent
+    /// on already-installed surfaces.
+    Refresh,
 }
 
 #[derive(Debug, Subcommand)]
