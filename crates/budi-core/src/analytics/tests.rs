@@ -4225,7 +4225,13 @@ fn health_all_na_is_insufficient_data() {
     assert!(h.vitals.thrashing.is_none());
     assert!(h.vitals.cost_acceleration.is_none());
     assert_eq!(h.state, "insufficient_data");
-    assert_eq!(h.tip, "Not enough session data yet to assess");
+    // #602: tip surfaces the assistant message count + warm-up hint so the
+    // user can tell data is flowing rather than the vitals being broken.
+    assert_eq!(
+        h.tip,
+        "Not enough session data yet to assess (3 assistant messages so far — vitals warm up over the first ~5 turns)"
+    );
+    assert_eq!(h.message_count, 3);
 }
 
 #[test]
@@ -4585,7 +4591,34 @@ fn health_insufficient_data_when_all_vitals_unscored() {
     assert!(h.vitals.cache_efficiency.is_none());
     assert!(h.vitals.cost_acceleration.is_none());
     assert_eq!(h.state, "insufficient_data");
-    assert_eq!(h.tip, "Not enough session data yet to assess");
+    // #602: tip surfaces the assistant message count so the user knows data
+    // is flowing into the warm-up window.
+    assert_eq!(
+        h.tip,
+        "Not enough session data yet to assess (2 assistant messages so far — vitals warm up over the first ~5 turns)"
+    );
+}
+
+// --- Coverage: insufficient_data tip with zero assistant messages (#602) ---
+
+#[test]
+fn health_insufficient_data_tip_for_empty_session() {
+    // Session row with no assistant messages — the resolver finds the session
+    // but session_messages returns nothing. The tip should call out the empty
+    // state explicitly rather than reusing the count-based hint.
+    let conn = test_db();
+    conn.execute(
+        "INSERT INTO sessions (id, provider, started_at) VALUES ('s1', 'claude_code', '2026-03-14')",
+        [],
+    ).unwrap();
+
+    let h = session_health(&conn, Some("s1")).unwrap();
+    assert_eq!(h.message_count, 0);
+    assert_eq!(h.state, "insufficient_data");
+    assert_eq!(
+        h.tip,
+        "Not enough session data yet to assess (no assistant messages yet)"
+    );
 }
 
 // --- Coverage: cache_efficiency yellow ---
