@@ -989,11 +989,7 @@ impl DaemonClient {
     /// server-side resolution for the `current` and `latest` literal
     /// session tokens (#603). Returns the resolved session id plus
     /// an optional `fallback_reason` line the CLI prints on stderr.
-    pub fn resolve_session_token(
-        &self,
-        token: &str,
-        cwd: Option<&str>,
-    ) -> Result<ResolvedSession> {
+    pub fn resolve_session_token(&self, token: &str, cwd: Option<&str>) -> Result<ResolvedSession> {
         let mut params: Vec<(&str, &str)> = vec![("token", token)];
         if let Some(c) = cwd {
             params.push(("cwd", c));

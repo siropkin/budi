@@ -319,19 +319,17 @@ pub fn cmd_session_detail(session_id: &str, json_output: bool) -> Result<()> {
 fn resolve_session_token(client: &DaemonClient, token: &str) -> Result<String> {
     let cwd = std::env::current_dir().ok();
     let cwd_str = cwd.as_ref().and_then(|p| p.to_str());
-    let resolved = client
-        .resolve_session_token(token, cwd_str)
-        .map_err(|e| {
-            // The daemon returns 404 when there are no sessions at
-            // all — wrap that into the same friendly nudge we used
-            // to print client-side so the failure mode is unchanged
-            // for fresh users.
-            if format!("{e:#}").contains("no sessions found") {
-                anyhow::anyhow!("No sessions yet — run an AI agent and try again.")
-            } else {
-                e
-            }
-        })?;
+    let resolved = client.resolve_session_token(token, cwd_str).map_err(|e| {
+        // The daemon returns 404 when there are no sessions at
+        // all — wrap that into the same friendly nudge we used
+        // to print client-side so the failure mode is unchanged
+        // for fresh users.
+        if format!("{e:#}").contains("no sessions found") {
+            anyhow::anyhow!("No sessions yet — run an AI agent and try again.")
+        } else {
+            e
+        }
+    })?;
     if let Some(ref reason) = resolved.fallback_reason {
         eprintln!("budi: {reason}");
     }

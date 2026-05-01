@@ -790,7 +790,11 @@ pub fn is_cursor_extension_installed() -> bool {
 /// Path to the auto-installed `/budi` Claude Code skill file.
 pub fn claude_budi_skill_path() -> Result<PathBuf> {
     let home = budi_core::config::home_dir()?;
-    Ok(home.join(".claude").join("skills").join("budi").join("SKILL.md"))
+    Ok(home
+        .join(".claude")
+        .join("skills")
+        .join("budi")
+        .join("SKILL.md"))
 }
 
 /// Canonical contents of `~/.claude/skills/budi/SKILL.md`. Kept as a

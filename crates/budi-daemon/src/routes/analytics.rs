@@ -1021,8 +1021,7 @@ pub async fn analytics_resolve_session(
         let home = budi_core::config::home_dir().map_err(internal_error)?;
         let cwd_str = params.cwd.unwrap_or_default();
         if cwd_str.is_empty() {
-            fallback_reason =
-                Some("no cwd provided — falling back to latest session".to_string());
+            fallback_reason = Some("no cwd provided — falling back to latest session".to_string());
             source = "latest".to_string();
         } else {
             let cwd = std::path::PathBuf::from(&cwd_str);
