@@ -305,6 +305,65 @@ pub fn load_statusline_config() -> StatuslineConfig {
     toml::from_str(&raw).unwrap_or_default()
 }
 
+/// Outcome of a call to [`seed_statusline_config_if_needed`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SeedStatuslineOutcome {
+    /// Wrote a fresh `statusline.toml` with the quiet `cost` preset and
+    /// commented examples for `coach` / `full` / custom formats.
+    Generated,
+    /// File already exists — no-op so user edits aren't clobbered.
+    AlreadySet,
+}
+
+/// Default seeded contents for `~/.config/budi/statusline.toml`.
+///
+/// Mirrors the default `StatuslineConfig` (`slots = ["1d", "7d", "30d"]`)
+/// so a `cat ~/.config/budi/statusline.toml` after `budi init` shows
+/// users *exactly* what's running, plus the discoverability comments
+/// for the `coach` / `full` presets and the custom-format escape hatch.
+pub const STATUSLINE_TOML_TEMPLATE: &str = "\
+# budi statusline configuration.
+# Active layout: rolling 1d / 7d / 30d cost (the quiet default).
+slots = [\"1d\", \"7d\", \"30d\"]
+
+# Try a different preset:
+# preset = \"coach\"  # session cost + health vitals + tip
+# preset = \"full\"   # session + health + 1d
+#
+# Or build a custom format:
+# format = \"{health} {project} | {session} | {1d} 1d | {7d} 7d\"
+#
+# Available slots: 1d, 7d, 30d, session, branch, project, provider, health
+# Docs: https://github.com/siropkin/budi#status-line
+";
+
+/// Idempotently seed `~/.config/budi/statusline.toml` with the default
+/// `cost` preset and commented examples for the other presets.
+///
+/// `budi init` calls this after installing the Claude Code statusline so
+/// users have a real file to edit (#600). Without it, the README told
+/// users to customize via `~/.config/budi/statusline.toml` but the file
+/// only existed once they passed `--statusline-preset`, leaving fresh
+/// installs with nothing to discover.
+///
+/// Idempotent: returns `AlreadySet` on every call after the first
+/// without touching the file (preserves user edits). Caller is
+/// responsible for the `~/.claude` / `--no-integrations` install gates;
+/// we only own the create-if-missing rule for the file itself.
+pub fn seed_statusline_config_if_needed() -> Result<SeedStatuslineOutcome> {
+    let path = statusline_config_path()?;
+    if path.exists() {
+        return Ok(SeedStatuslineOutcome::AlreadySet);
+    }
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("Failed to create {}", parent.display()))?;
+    }
+    fs::write(&path, STATUSLINE_TOML_TEMPLATE)
+        .with_context(|| format!("Failed to write {}", path.display()))?;
+    Ok(SeedStatuslineOutcome::Generated)
+}
+
 /// A single tag rule from `~/.config/budi/tags.toml`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TagRule {
