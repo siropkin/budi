@@ -1,5 +1,60 @@
 # Changelog
 
+## 8.3.16 — 2026-05-01
+
+8.3.16 is a same-day patch release on top of 8.3.15 that closes three
+"the update path is fragile" gaps surfaced during the 8.3.15 release-day
+smoke test. Headline: **8.3.15 features didn't actually reach upgrading
+users** because the in-process integration refresh during `budi update`
+ran the PRE-install CLI's logic. This release fixes that, plus the two
+sibling lifecycle bugs the smoke test uncovered.
+
+### Fixed
+
+- **macOS daemon survives `budi update` (#611 / PR #614)** —
+  `restart_daemon_for_version_upgrade` had a Linux systemd-user branch
+  (from #582 in v8.3.14) but no macOS equivalent. Pre-fix, the macOS
+  branch fell into the raw-spawn fallback and the daemon ran outside
+  launchd; once that CLI-child later exited cleanly (terminal close,
+  second `budi update`, OS signal), launchd's
+  `KeepAlive.SuccessfulExit=false` left the LaunchAgent orphaned at
+  `state = not running` until next login — silently producing
+  multi-hour ingestion gaps. Added `try_launchctl_kickstart` that runs
+  `launchctl kickstart -k gui/$UID/dev.getbudi.budi-daemon` when the
+  LaunchAgent plist is registered, mirroring the Linux systemd path.
+  Confirmed via repro on a developer box: ~22 h gap between the
+  v8.3.13 → v8.3.14 update and the next CLI invocation that revived
+  the daemon.
+- **`budi update` actually delivers new integrations to upgrading users
+  (#613 / PR #614)** — pre-fix, the post-install integration refresh
+  ran in-process against the OLD (pre-update) CLI binary. Any new
+  `IntegrationComponent` or seeded file added in a release silently
+  skipped upgraders: 8.3.15's `/budi` skill (#603) and seeded
+  `statusline.toml` (#600) didn't reach existing installs at all.
+  Update now re-execs the freshly-installed CLI via the new
+  `budi integrations refresh` subcommand; the in-process call remains
+  as a defensive fallback if the re-exec can't be launched.
+  `refresh_enabled_integrations` also unions the user's stored
+  `integrations.toml` with `default_recommended_components()` so
+  components added in newer releases install idempotently for
+  upgraders without a manual `budi integrations install --with …`.
+- **`budi doctor` no longer hides daemon outages behind a green PASS
+  (#612 / PR #614)** — pre-fix, when `doctor` had to auto-start a dead
+  daemon to run its diagnostic, it reported the result as `PASS daemon
+  health: started successfully`, making `All checks passed.` print
+  immediately after rescuing the daemon from a multi-hour outage. Now
+  reports WARN (`auto-recovered: was NOT running on first probe; doctor
+  started it`) and surfaces the approximate gap duration from the
+  daemon log's mtime (e.g. `~22h ago`), pointing at #611 as the likely
+  root cause on macOS.
+
+### Non-blocking, carried forward
+
+- **Cloud Overview cost / token totals diverge from local CLI** (#10) — same as 8.3.15; presentation-layer aggregation difference, not data loss.
+- **RC-4 Part B** (#504) — Cursor Usage API auth root-cause; Part A shipped with `v8.3.1`.
+- **ADR-0090 supersede** — pending one release cycle of live validation on the now-working `cursorDiskKV` bubbles path before the Usage API §1 surface can be retired.
+- **Detached daemon log capture** — first post-`budi update` daemon's startup lines don't land in `~/Library/Logs/budi-daemon.log` until the next launchctl kickstart. Should be largely closed by #611 in 8.3.16; observability-only carry-forward from v8.3.6 / v8.3.7 if the no-autostart raw-spawn branch still hits it.
+
 ## 8.3.15 — 2026-05-01
 
 8.3.15 is a discoverability + Claude Code integration polish release
