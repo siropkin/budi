@@ -1,5 +1,88 @@
 # Changelog
 
+## 8.3.15 — 2026-05-01
+
+8.3.15 is a discoverability + Claude Code integration polish release
+that closes out the 8.3.15 milestone. The headline is **`/budi`**, an
+auto-installed Claude Code skill that surfaces session vitals for the
+*current* cwd — the answer to "buddy is back, but now it's budi" — and
+its server-side `budi sessions current` resolver. The rest is the
+8.3.14-aftermath sweep: the silent statusline install path now
+self-documents (seeded `statusline.toml` + a one-line hint in `init`
+output), the README catches up to the 8.3.14 surface drift, and the
+`session_health` insufficient-data tip tells users *how many*
+assistant messages they actually have. No wire / data-shape changes;
+no ADR amendments.
+
+### Added
+
+- **`/budi` Claude Code skill + `budi sessions current` resolver
+  (#603 / PR #609)** — Anthropic shipped `/buddy` as April Fools 2026
+  and pulled it on April 9. We're shipping the real product
+  opportunity in the gap: a tiny Claude Code skill at
+  `~/.claude/skills/budi/SKILL.md` that returns Prompt Growth, Cache
+  Reuse, Retry Loops, and Cost Acceleration for the *current* session
+  — auto-installed alongside the Claude Code statusline. New
+  server-side token `budi sessions current` resolves the active
+  Claude Code session for the CLI's cwd (encodes `/` → `-`, looks
+  under `~/.claude/projects/<encoded-cwd>/`, returns the live
+  `session_id`); sibling to the existing `latest` token. Help surface
+  advertises both.
+- **Seeded `~/.config/budi/statusline.toml` on first install (#600 /
+  PR #605)** — pre-fix, the file the README told users to edit
+  didn't exist after `budi init`, leaving customization a
+  discoverability dead end. The init / `integrations install` path
+  now writes the file idempotently with the active `cost` preset and
+  commented examples for `coach` / `full` / custom slots, so users
+  can `cat` / tab-complete to it and discover the presets without
+  hunting the README.
+- **Statusline customization hint in `budi init` output (#604 / PR
+  #608)** — companion to the seeding fix: the previously silent
+  statusline install now prints a single dim line on first install
+  pointing at `~/.config/budi/statusline.toml` and the `coach`
+  preset. Suppressed on repeat `budi init`, on `--no-integrations`,
+  and when an existing budi marker indicates the user is already
+  onboarded.
+
+### Changed
+
+- **`session_health` insufficient-data tip surfaces assistant-message
+  count (#602 / PR #607)** — when vitals haven't ramped yet because
+  the rolling window is too small, the tip now tells users *how
+  many* assistant messages they have (and how many they need)
+  instead of the opaque "INSUFFICIENT DATA" verdict alone. Removes
+  the failure mode where a user mid-session reads "insufficient
+  data" as "the feature is broken and not updating."
+
+### Documentation
+
+- **README pass for 8.3.14-era surface drift (#601 / PR #606)** —
+  swept stale references to the verbs and flags 8.3.14 removed
+  (`budi vitals` / `budi health` / `db migrate` / `db repair` /
+  `init --cleanup` / `pricing status --refresh` / per-flag
+  `stats --by-*`) across `README.md`, `SOUL.md`, and `docs/`, and
+  re-checked the troubleshooting and full CLI reference sections
+  against the actual binary's `--help` output.
+
+### Closed without code change
+
+- **Friendly redirects for removed verbs (#599)** — closed
+  completed without a shipped redirect dispatcher. Today, `budi
+  vitals` / `budi health` / `db migrate` / `db repair` hard-fail at
+  the clap layer (the existing parse-rejection from 8.3.14, with
+  unit-test guard `cli_no_longer_exposes_vitals_or_health_top_level`
+  in `crates/budi-cli/src/main.rs`); the explicit "this verb moved
+  to X" hint message did not land in 8.3.15 and is implicitly
+  carried forward as polish if the misleading clap suggestion
+  resurfaces in user reports.
+
+### Non-blocking, carried forward
+
+- **Cloud Overview cost / token totals diverge from local CLI** (#10) — same as 8.3.14; presentation-layer aggregation difference, not data loss.
+- **RC-4 Part B** (#504) — Cursor Usage API auth root-cause; Part A shipped with `v8.3.1`.
+- **ADR-0090 supersede** — pending one release cycle of live validation on the now-working `cursorDiskKV` bubbles path before the Usage API §1 surface can be retired.
+- **Detached daemon log capture** — first post-`budi update` daemon's startup lines don't land in `~/Library/Logs/budi-daemon.log` until the next launchctl kickstart. Observability-only; carried from v8.3.6 / v8.3.7.
+
 ## 8.3.14 — 2026-04-30
 
 8.3.14 is a CLI ergonomics + Linux-daemon stability release that
