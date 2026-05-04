@@ -94,6 +94,10 @@ fn build_router(app_state: AppState) -> Router {
         .route("/analytics/projects", get(a::analytics_projects))
         .route("/analytics/non_repo", get(a::analytics_non_repo))
         .route("/analytics/cost", get(a::analytics_cost))
+        .route(
+            "/analytics/status_snapshot",
+            get(a::analytics_status_snapshot),
+        )
         .route("/analytics/models", get(a::analytics_models))
         .route(
             "/analytics/filter-options",

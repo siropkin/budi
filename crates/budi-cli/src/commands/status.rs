@@ -50,7 +50,8 @@ fn cmd_status_text() -> Result<()> {
 
     println!("  {dim}-{reset} {bold}Proxy{reset}    removed in 8.2 (tailer is live)");
 
-    // Today's cost summary
+    // Today's cost summary — single snapshot call (#619) so cost,
+    // messages, and providers come from one DB connection.
     let client = match DaemonClient::connect() {
         Ok(c) => c,
         Err(_) => {
@@ -60,29 +61,29 @@ fn cmd_status_text() -> Result<()> {
     };
 
     let (since, _until) = period_date_range(StatsPeriod::Today);
-    let summary = client.summary(since.as_deref(), None, None).ok();
-    let cost = client.cost(since.as_deref(), None, None).ok();
-    let providers = client.providers(since.as_deref(), None).ok();
+    let snap = client.status_snapshot(since.as_deref(), None, None).ok();
 
-    if let (Some(summary), Some(cost)) = (&summary, &cost) {
+    if let Some(snap) = &snap {
         println!();
         println!(
             "  {bold}Today{reset}    {yellow}{}{reset}  ({} messages, {} in, {} out)",
-            format_cost_cents(cost.total_cost * 100.0),
-            summary.total_messages,
-            format_tokens(summary.total_input_tokens),
-            format_tokens(summary.total_output_tokens),
+            format_cost_cents(snap.cost.total_cost * 100.0),
+            snap.summary.total_messages,
+            format_tokens(snap.summary.total_input_tokens),
+            format_tokens(snap.summary.total_output_tokens),
         );
-        if let Some(providers) = &providers
-            && !providers.is_empty()
-        {
-            let names: Vec<&str> = providers.iter().map(|p| p.display_name.as_str()).collect();
+        if !snap.providers.is_empty() {
+            let names: Vec<&str> = snap
+                .providers
+                .iter()
+                .map(|p| p.display_name.as_str())
+                .collect();
             println!("  {bold}Agents{reset}   {}", names.join(", "));
         }
     }
 
     // First-run friendly hint when setup looks healthy but no activity recorded yet today.
-    let no_activity_today = summary.as_ref().is_some_and(|s| s.total_messages == 0);
+    let no_activity_today = snap.as_ref().is_some_and(|s| s.summary.total_messages == 0);
     if no_activity_today {
         println!();
         println!(
@@ -128,22 +129,14 @@ fn cmd_status_json() -> Result<()> {
         match DaemonClient::connect() {
             Ok(client) => {
                 let (since, _until) = period_date_range(StatsPeriod::Today);
-                let summary = client.summary(since.as_deref(), None, None).ok();
-                let cost = client.cost(since.as_deref(), None, None).ok();
-                let providers = client.providers(since.as_deref(), None).ok();
-
-                match (summary, cost) {
-                    (Some(summary), Some(cost)) => Some(TodayJson {
-                        cost_cents: cost.total_cost * 100.0,
-                        messages: summary.total_messages,
-                        providers: providers
-                            .unwrap_or_default()
-                            .into_iter()
-                            .map(|p| p.provider)
-                            .collect(),
-                    }),
-                    _ => None,
-                }
+                client
+                    .status_snapshot(since.as_deref(), None, None)
+                    .ok()
+                    .map(|snap| TodayJson {
+                        cost_cents: snap.cost.total_cost * 100.0,
+                        messages: snap.summary.total_messages,
+                        providers: snap.providers.into_iter().map(|p| p.provider).collect(),
+                    })
             }
             Err(_) => None,
         }
