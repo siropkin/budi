@@ -3812,13 +3812,9 @@ pub fn status_snapshot(
     provider: Option<&str>,
 ) -> Result<StatusSnapshot> {
     let filters = DimensionFilters::default();
-    let summary =
-        usage_summary_with_filters(conn, since, until, provider, &filters)?;
-    let cost = crate::cost::estimate_cost_with_filters(
-        conn, since, until, provider, &filters,
-    )?;
-    let providers =
-        provider_stats_with_filters(conn, since, until, &filters)?;
+    let summary = usage_summary_with_filters(conn, since, until, provider, &filters)?;
+    let cost = crate::cost::estimate_cost_with_filters(conn, since, until, provider, &filters)?;
+    let providers = provider_stats_with_filters(conn, since, until, &filters)?;
     Ok(StatusSnapshot {
         summary,
         cost,
