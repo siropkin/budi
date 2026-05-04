@@ -16,6 +16,7 @@ use crate::daemon::daemon_client_with_timeout;
 pub const CLAUDE_USER_SETTINGS: &str = ".claude/settings.json";
 
 use super::format_cost as fmt_cost;
+use super::normalize_provider;
 
 /// Detect the current git branch from a directory.
 fn detect_git_branch(dir: &str) -> Option<String> {
@@ -322,6 +323,14 @@ fn nudge_legacy_statusline_tokens_inner(
 }
 
 pub fn cmd_statusline(format: StatuslineFormat, provider: Option<String>) -> Result<()> {
+    // #615: validate --provider up front against the same canonical set
+    // as `budi stats` so an unknown value errors with a helpful list
+    // instead of silently rendering $0.00. Aliases (`copilot`,
+    // `anthropic`) resolve to their canonical form here too.
+    let provider = provider
+        .map(|p| normalize_provider(&p))
+        .transpose()?;
+
     let stdin_json = if io::stdin().is_terminal() {
         None
     } else {
@@ -1063,5 +1072,23 @@ mod tests {
         assert!(!out.is_empty());
         assert!(marker.exists());
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn cmd_statusline_rejects_unknown_provider_before_io() {
+        // #615: an unknown `--provider` value must error with the same
+        // helpful list `budi stats --provider <unknown>` produces, not
+        // fall through and render a silent zero. The validation runs
+        // before any daemon I/O so the test is hermetic — no fixture
+        // daemon required.
+        let err = cmd_statusline(
+            crate::StatuslineFormat::Json,
+            Some("doesnotexist".to_string()),
+        )
+        .expect_err("unknown provider must error");
+        let msg = err.to_string();
+        assert!(msg.contains("doesnotexist"), "error: {msg}");
+        assert!(msg.contains("Available providers"), "error: {msg}");
+        assert!(msg.contains("claude_code"), "error: {msg}");
     }
 }

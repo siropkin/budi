@@ -212,6 +212,39 @@ pub fn format_cost(dollars: f64) -> String {
     }
 }
 
+/// Resolve a user-supplied `--provider` value to its canonical DB name.
+///
+/// Centralized so every command that takes `--provider` shares one
+/// contract: unknown values error with a helpful list, and aliases
+/// (`copilot` → `copilot_cli`, `anthropic` → `claude_code`) resolve to
+/// the canonical form used in SQLite. Prompt-style commands that want to
+/// stay quiet on a typo can map this error to a soft fallback themselves
+/// (#615).
+pub fn normalize_provider(input: &str) -> Result<String> {
+    const KNOWN_PROVIDERS: &[&str] = &["claude_code", "cursor", "codex", "copilot_cli", "openai"];
+
+    if KNOWN_PROVIDERS.contains(&input) {
+        return Ok(input.to_string());
+    }
+
+    match input {
+        "copilot" => Ok("copilot_cli".to_string()),
+        "anthropic" => Ok("claude_code".to_string()),
+        _ => {
+            let all: Vec<&str> = KNOWN_PROVIDERS
+                .iter()
+                .copied()
+                .chain(["copilot", "anthropic"])
+                .collect();
+            anyhow::bail!(
+                "Unknown provider '{}'. Available providers: {}",
+                input,
+                all.join(", ")
+            );
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -312,6 +345,47 @@ mod tests {
         let before = v.clone();
         round_cents_to_integer(&mut v);
         assert_eq!(v, before);
+    }
+
+    // --- normalize_provider (#615) -----------------------------------
+
+    #[test]
+    fn normalize_provider_accepts_canonical_names() {
+        // Every canonical name routed through the shared helper round-
+        // trips unchanged so callers can pass the result straight to the
+        // SQL `provider` column.
+        for name in ["claude_code", "cursor", "codex", "copilot_cli", "openai"] {
+            assert_eq!(normalize_provider(name).unwrap(), name);
+        }
+    }
+
+    #[test]
+    fn normalize_provider_resolves_user_aliases() {
+        assert_eq!(normalize_provider("copilot").unwrap(), "copilot_cli");
+        assert_eq!(normalize_provider("anthropic").unwrap(), "claude_code");
+    }
+
+    #[test]
+    fn normalize_provider_rejects_unknown_with_helpful_list() {
+        // #615: unknown values must error consistently for every command
+        // that takes `--provider` (currently `budi stats` and
+        // `budi statusline`). The error mentions the unknown value AND
+        // every accepted name so users can fix typos in shell configs
+        // without re-reading the docs.
+        let err = normalize_provider("doesnotexist").expect_err("must error");
+        let msg = err.to_string();
+        assert!(msg.contains("doesnotexist"), "error: {msg}");
+        for expected in [
+            "claude_code",
+            "cursor",
+            "codex",
+            "copilot_cli",
+            "openai",
+            "copilot",
+            "anthropic",
+        ] {
+            assert!(msg.contains(expected), "error '{msg}' missing '{expected}'");
+        }
     }
 
     #[test]

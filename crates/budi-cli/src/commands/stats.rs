@@ -6,7 +6,7 @@ use chrono::{Local, Months, NaiveDate, TimeZone};
 use crate::StatsPeriod;
 use crate::client::DaemonClient;
 
-use super::ansi;
+use super::{ansi, normalize_provider};
 
 // ─── Shared Breakdown Rendering (#449) ───────────────────────────────────────
 //
@@ -2206,35 +2206,6 @@ fn display_dimension(view: BreakdownView, value: &str) -> String {
         view.untagged_label().to_string()
     } else {
         value.to_string()
-    }
-}
-
-/// Resolve a user-supplied provider name to its canonical DB value.
-///
-/// Canonical names: `claude_code`, `cursor`, `codex`, `copilot_cli`, `openai`.
-/// Accepted aliases: `copilot` → `copilot_cli`, `anthropic` → `claude_code`.
-fn normalize_provider(input: &str) -> Result<String> {
-    const KNOWN_PROVIDERS: &[&str] = &["claude_code", "cursor", "codex", "copilot_cli", "openai"];
-
-    if KNOWN_PROVIDERS.contains(&input) {
-        return Ok(input.to_string());
-    }
-
-    match input {
-        "copilot" => Ok("copilot_cli".to_string()),
-        "anthropic" => Ok("claude_code".to_string()),
-        _ => {
-            let all: Vec<&str> = KNOWN_PROVIDERS
-                .iter()
-                .copied()
-                .chain(["copilot", "anthropic"])
-                .collect();
-            anyhow::bail!(
-                "Unknown provider '{}'. Available providers: {}",
-                input,
-                all.join(", ")
-            );
-        }
     }
 }
 
