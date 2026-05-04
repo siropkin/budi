@@ -315,6 +315,28 @@ pub async fn analytics_cost(
     Ok(Json(result))
 }
 
+/// `GET /analytics/status_snapshot` — summary + cost + providers from one
+/// connection so `budi status` sees a single consistent snapshot (#619).
+pub async fn analytics_status_snapshot(
+    Query(params): Query<SummaryParams>,
+) -> Result<Json<analytics::StatusSnapshot>, (StatusCode, Json<serde_json::Value>)> {
+    let result = tokio::task::spawn_blocking(move || {
+        let db_path = analytics::db_path()?;
+        let conn = analytics::open_db(&db_path)?;
+        analytics::status_snapshot(
+            &conn,
+            params.since.as_deref(),
+            params.until.as_deref(),
+            params.provider.as_deref(),
+        )
+    })
+    .await
+    .map_err(|e| internal_error(anyhow::anyhow!("{e}")))?
+    .map_err(internal_error)?;
+
+    Ok(Json(result))
+}
+
 #[derive(serde::Deserialize)]
 pub struct ActivityChartParams {
     pub since: Option<String>,

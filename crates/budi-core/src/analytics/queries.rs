@@ -3789,6 +3789,44 @@ pub fn provider_stats_with_filters(
 }
 
 // ---------------------------------------------------------------------------
+// Status Snapshot (#619)
+// ---------------------------------------------------------------------------
+
+/// Single-connection snapshot of summary + cost + providers for the
+/// `budi status` command.  Querying all three from one connection
+/// eliminates the within-command race where the tailer commits between
+/// the individual HTTP calls that `status` used to make.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct StatusSnapshot {
+    pub summary: UsageSummary,
+    pub cost: crate::cost::CostEstimate,
+    pub providers: Vec<ProviderStats>,
+}
+
+/// Query summary, cost, and providers from a single connection so
+/// the `budi status` display is internally consistent.
+pub fn status_snapshot(
+    conn: &Connection,
+    since: Option<&str>,
+    until: Option<&str>,
+    provider: Option<&str>,
+) -> Result<StatusSnapshot> {
+    let filters = DimensionFilters::default();
+    let summary =
+        usage_summary_with_filters(conn, since, until, provider, &filters)?;
+    let cost = crate::cost::estimate_cost_with_filters(
+        conn, since, until, provider, &filters,
+    )?;
+    let providers =
+        provider_stats_with_filters(conn, since, until, &filters)?;
+    Ok(StatusSnapshot {
+        summary,
+        cost,
+        providers,
+    })
+}
+
+// ---------------------------------------------------------------------------
 // Cache Efficiency
 // ---------------------------------------------------------------------------
 

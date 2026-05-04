@@ -10,8 +10,8 @@ use anyhow::{Context, Result};
 use budi_core::analytics::{
     ActivityCost, ActivityCostDetail, BranchCost, BreakdownPage, FileCost, FileCostDetail,
     ModelUsage, PaginatedSessions, ProviderStats, ProviderSyncStats, RepoUsage, SessionHealth,
-    SessionListEntry, SessionTag, SyncProgress, TagCost, TicketCost, TicketCostDetail,
-    UsageSummary,
+    SessionListEntry, SessionTag, StatusSnapshot, SyncProgress, TagCost, TicketCost,
+    TicketCostDetail, UsageSummary,
 };
 use budi_core::config::{self, BudiConfig};
 use budi_core::cost::CostEstimate;
@@ -528,6 +528,33 @@ impl DaemonClient {
         let resp = self
             .client
             .get(format!("{}/analytics/cost", self.base_url))
+            .query(&params)
+            .send()
+            .map_err(describe_send_error)?;
+        let resp = check_response(resp)?;
+        Ok(resp.json()?)
+    }
+
+    /// Single-call snapshot of summary + cost + providers (#619).
+    pub fn status_snapshot(
+        &self,
+        since: Option<&str>,
+        until: Option<&str>,
+        provider: Option<&str>,
+    ) -> Result<StatusSnapshot> {
+        let mut params = Vec::new();
+        if let Some(s) = since {
+            params.push(("since", s));
+        }
+        if let Some(u) = until {
+            params.push(("until", u));
+        }
+        if let Some(p) = provider {
+            params.push(("provider", p));
+        }
+        let resp = self
+            .client
+            .get(format!("{}/analytics/status_snapshot", self.base_url))
             .query(&params)
             .send()
             .map_err(describe_send_error)?;

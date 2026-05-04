@@ -6426,3 +6426,39 @@ fn backfill_preserves_already_populated_repo_and_branch() {
     );
     assert_eq!(branch.as_deref(), Some("authoritative-branch"));
 }
+
+/// #619: `status_snapshot` returns summary, cost, and providers from one
+/// connection so `budi status` cannot observe a mid-ingest state where
+/// the pieces disagree.
+#[test]
+fn status_snapshot_returns_consistent_data() {
+    let conn = test_db();
+    conn.execute(
+        "INSERT INTO messages (id, role, timestamp, model, provider, input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens, cost_cents)
+         VALUES ('m1', 'assistant', '2026-05-04T10:00:00Z', 'claude-sonnet-4-6', 'claude_code', 100000, 50000, 0, 0, 195.0)",
+        [],
+    ).unwrap();
+    conn.execute(
+        "INSERT INTO messages (id, role, timestamp, model, provider, input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens, cost_cents)
+         VALUES ('m2', 'user', '2026-05-04T10:00:01Z', 'claude-sonnet-4-6', 'claude_code', 0, 0, 0, 0, 0.0)",
+        [],
+    ).unwrap();
+
+    let snap = status_snapshot(&conn, Some("2026-05-04"), None, None).unwrap();
+
+    assert_eq!(snap.summary.total_messages, 2);
+    assert_eq!(snap.summary.total_assistant_messages, 1);
+    assert!(snap.cost.total_cost > 0.0);
+    assert_eq!(snap.providers.len(), 1);
+    assert_eq!(snap.providers[0].provider, "claude_code");
+    assert_eq!(snap.providers[0].total_messages, 2);
+}
+
+#[test]
+fn status_snapshot_empty_window() {
+    let conn = test_db();
+    let snap = status_snapshot(&conn, Some("2026-05-04"), None, None).unwrap();
+    assert_eq!(snap.summary.total_messages, 0);
+    assert_eq!(snap.cost.total_cost, 0.0);
+    assert!(snap.providers.is_empty());
+}
