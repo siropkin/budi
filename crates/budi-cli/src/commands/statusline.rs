@@ -327,9 +327,7 @@ pub fn cmd_statusline(format: StatuslineFormat, provider: Option<String>) -> Res
     // as `budi stats` so an unknown value errors with a helpful list
     // instead of silently rendering $0.00. Aliases (`copilot`,
     // `anthropic`) resolve to their canonical form here too.
-    let provider = provider
-        .map(|p| normalize_provider(&p))
-        .transpose()?;
+    let provider = provider.map(|p| normalize_provider(&p)).transpose()?;
 
     let stdin_json = if io::stdin().is_terminal() {
         None
