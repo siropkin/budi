@@ -540,7 +540,7 @@ pub fn ingest_messages_with_sync(
             {
                 seen_sessions.insert((sid.clone(), msg.provider.clone()));
                 if let Some(ref cat) = msg.prompt_category {
-                    session_categories.entry(sid).or_insert_with(|| cat.clone());
+                    session_categories.insert(sid, cat.clone());
                 }
             }
         }
@@ -579,8 +579,7 @@ pub fn ingest_messages_with_sync(
         }
         for (sid, category) in &session_categories {
             tx.execute(
-                "UPDATE sessions SET prompt_category = ?2
-                 WHERE id = ?1 AND (prompt_category IS NULL OR prompt_category = '')",
+                "UPDATE sessions SET prompt_category = ?2 WHERE id = ?1",
                 params![sid, category],
             )?;
         }

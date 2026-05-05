@@ -6462,3 +6462,99 @@ fn status_snapshot_empty_window() {
     assert_eq!(snap.cost.total_cost, 0.0);
     assert!(snap.providers.is_empty());
 }
+
+#[test]
+fn session_prompt_category_tracks_latest_value() {
+    let mut conn = test_db();
+
+    let u1 = ParsedMessage {
+        uuid: "u1".to_string(),
+        session_id: Some("s1".to_string()),
+        timestamp: "2026-03-14T18:13:42Z".parse().unwrap(),
+        cwd: None,
+        role: "user".to_string(),
+        model: None,
+        input_tokens: 0,
+        output_tokens: 0,
+        cache_creation_tokens: 0,
+        cache_read_tokens: 0,
+        git_branch: None,
+        repo_id: None,
+        provider: "claude_code".to_string(),
+        cost_cents: None,
+        session_title: None,
+        parent_uuid: None,
+        user_name: None,
+        machine_name: None,
+        cost_confidence: "n/a".to_string(),
+        pricing_source: None,
+        request_id: None,
+        speed: None,
+        cache_creation_1h_tokens: 0,
+        web_search_requests: 0,
+        prompt_category: Some("bugfix".to_string()),
+        prompt_category_source: None,
+        prompt_category_confidence: None,
+        tool_names: Vec::new(),
+        tool_use_ids: Vec::new(),
+        tool_files: Vec::new(),
+        tool_outcomes: Vec::new(),
+    };
+    ingest_messages(&mut conn, &[u1], Some(&[Vec::new()])).unwrap();
+
+    let cat: String = conn
+        .query_row(
+            "SELECT prompt_category FROM sessions WHERE id = 's1'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(cat, "bugfix");
+
+    let u2 = ParsedMessage {
+        uuid: "u2".to_string(),
+        session_id: Some("s1".to_string()),
+        timestamp: "2026-03-14T18:14:00Z".parse().unwrap(),
+        cwd: None,
+        role: "user".to_string(),
+        model: None,
+        input_tokens: 0,
+        output_tokens: 0,
+        cache_creation_tokens: 0,
+        cache_read_tokens: 0,
+        git_branch: None,
+        repo_id: None,
+        provider: "claude_code".to_string(),
+        cost_cents: None,
+        session_title: None,
+        parent_uuid: None,
+        user_name: None,
+        machine_name: None,
+        cost_confidence: "n/a".to_string(),
+        pricing_source: None,
+        request_id: None,
+        speed: None,
+        cache_creation_1h_tokens: 0,
+        web_search_requests: 0,
+        prompt_category: Some("feature".to_string()),
+        prompt_category_source: None,
+        prompt_category_confidence: None,
+        tool_names: Vec::new(),
+        tool_use_ids: Vec::new(),
+        tool_files: Vec::new(),
+        tool_outcomes: Vec::new(),
+    };
+    ingest_messages(&mut conn, &[u2], Some(&[Vec::new()])).unwrap();
+
+    let cat: String = conn
+        .query_row(
+            "SELECT prompt_category FROM sessions WHERE id = 's1'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        cat, "feature",
+        "session should track the latest prompt_category"
+    );
+}
