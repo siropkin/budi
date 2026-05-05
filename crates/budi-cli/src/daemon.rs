@@ -256,6 +256,13 @@ fn try_systemd_user_restart() -> bool {
         .unwrap_or(false)
 }
 
+/// #611: build the launchctl domain-target for kickstarting the daemon.
+#[cfg(target_os = "macos")]
+fn launchctl_kickstart_target() -> String {
+    let uid = unsafe { libc::getuid() };
+    format!("gui/{}/dev.getbudi.budi-daemon", uid)
+}
+
 /// #611: when a launchd LaunchAgent is registered, route the post-update
 /// restart through `launchctl kickstart -k gui/$UID/dev.getbudi.budi-daemon`
 /// so the fresh daemon is reparented to launchd. Without this, the macOS
@@ -271,8 +278,7 @@ fn try_launchctl_kickstart() -> bool {
     ) {
         return false;
     }
-    let uid = unsafe { libc::getuid() };
-    let target = format!("gui/{}/dev.getbudi.budi-daemon", uid);
+    let target = launchctl_kickstart_target();
     Command::new("launchctl")
         .args(["kickstart", "-k", &target])
         .stdout(Stdio::null())
@@ -734,6 +740,42 @@ mod tests {
              (parent pgid {parent_pgid}, child pgid {child_pgid}) — without \
              this, `budi update` on Linux leaves no daemon running once the \
              user closes their terminal (#582)"
+        );
+    }
+
+    /// #611 regression guard: the launchctl kickstart target must use the
+    /// `gui/{uid}/dev.getbudi.budi-daemon` format that `launchctl kickstart`
+    /// expects for per-user LaunchAgents. If the label or domain changes,
+    /// this test fires.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn launchctl_kickstart_target_format() {
+        let target = super::launchctl_kickstart_target();
+        let uid = unsafe { libc::getuid() };
+        assert_eq!(target, format!("gui/{uid}/dev.getbudi.budi-daemon"));
+    }
+
+    /// #611 regression guard: when no LaunchAgent is registered,
+    /// `try_launchctl_kickstart` must return `false` so the caller falls
+    /// through to the raw `setsid` spawn. Sibling to
+    /// `detach_from_session_starts_new_process_group`.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn try_launchctl_kickstart_skips_when_not_installed() {
+        use budi_core::autostart::{ServiceStatus, service_status};
+
+        if !matches!(service_status(), ServiceStatus::NotInstalled) {
+            // LaunchAgent is installed on this machine — the function will
+            // attempt a real kickstart, so we can only verify it doesn't
+            // panic.  The no-autostart assertion below is the primary guard.
+            let _ = super::try_launchctl_kickstart();
+            return;
+        }
+        assert!(
+            !super::try_launchctl_kickstart(),
+            "try_launchctl_kickstart must return false when the LaunchAgent \
+             plist is not installed — without this, `budi update` would skip \
+             the raw-spawn fallback and leave no daemon running (#611)"
         );
     }
 }
