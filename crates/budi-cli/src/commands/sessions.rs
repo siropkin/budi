@@ -214,6 +214,10 @@ pub fn cmd_session_detail(session_id: &str, json_output: bool) -> Result<()> {
         if let Some(map) = obj.as_object_mut() {
             map.insert("tags".to_string(), serde_json::to_value(&tags)?);
             if let Some(h) = health {
+                map.insert(
+                    "health_state".to_string(),
+                    serde_json::Value::String(h.state.clone()),
+                );
                 map.insert("health".to_string(), serde_json::to_value(&h)?);
             }
         }
