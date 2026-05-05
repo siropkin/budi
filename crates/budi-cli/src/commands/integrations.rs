@@ -965,6 +965,31 @@ fn is_legacy_cursor_hook(entry: &Value) -> bool {
 mod tests {
     use super::*;
 
+    static HOME_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    struct HomeGuard {
+        prev: Option<String>,
+        _lock: std::sync::MutexGuard<'static, ()>,
+    }
+
+    impl HomeGuard {
+        fn new(home: &std::path::Path) -> Self {
+            let lock = HOME_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+            let prev = std::env::var("HOME").ok();
+            unsafe { std::env::set_var("HOME", home) };
+            Self { prev, _lock: lock }
+        }
+    }
+
+    impl Drop for HomeGuard {
+        fn drop(&mut self) {
+            match &self.prev {
+                Some(h) => unsafe { std::env::set_var("HOME", h) },
+                None => unsafe { std::env::remove_var("HOME") },
+            }
+        }
+    }
+
     #[test]
     fn apply_statusline_adds_new_statusline_when_missing() {
         let mut settings = json!({});
@@ -1113,17 +1138,11 @@ mod tests {
         .expect("write v8.3.14 integrations.toml");
 
         // Redirect HOME to the temp dir for the duration of this test.
-        let prev_home = std::env::var("HOME").ok();
-        unsafe { std::env::set_var("HOME", &tmp) };
+        // HomeGuard serializes via Mutex and restores on drop (#630).
+        let _home_guard = HomeGuard::new(&tmp);
 
         let config = budi_core::config::BudiConfig::default();
         let report = refresh_enabled_integrations(&config);
-
-        // Restore HOME before any assertions so a failure doesn't leak.
-        match prev_home {
-            Some(h) => unsafe { std::env::set_var("HOME", h) },
-            None => unsafe { std::env::remove_var("HOME") },
-        }
 
         // Cursor extension warnings are expected on machines without
         // Cursor installed — filter them out; only fail on unexpected ones.
