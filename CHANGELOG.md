@@ -1,5 +1,70 @@
 # Changelog
 
+## 8.3.17 — 2026-05-05
+
+8.3.17 is a quality-of-life release that fixes five user-facing bugs and
+adds two test-coverage backstops for fixes that landed in 8.3.16.
+Headline: **`budi stats activities` no longer silently drops attribution**
+when assistant messages arrive in a later tailer batch than the user
+messages that classify them. The rest closes out JSON output gaps
+(`sessions --format json` truncation envelope, `id_short`), a
+`budi status` / `budi stats` cost divergence window, inconsistent
+`--provider` validation across commands, and a `budi doctor` display
+bug that masked daemon outages behind a green PASS.
+
+### Fixed
+
+- **`budi stats activities` no longer drops attribution (#616 / PR #622)** —
+  the live tailer processes user and assistant messages in separate
+  batches (500 ms debounce). `propagate_session_context` only propagated
+  `prompt_category` from user → assistant within a single
+  `Pipeline::process()` call, so assistant messages arriving in a later
+  batch never inherited the classification and never received activity
+  tags. Fix: deferred propagation across batch boundaries.
+- **`budi status` Today cost no longer lags `budi stats` (#619 / PR #621)** —
+  `status` read a cached aggregate while `stats` queried live SQL,
+  creating a visible divergence window of seconds after each ingest.
+  New `/analytics/status_snapshot` daemon endpoint queries summary,
+  cost, and providers from a single DB connection, guaranteeing a
+  consistent point-in-time snapshot.
+- **`budi statusline --provider <unknown>` now validates (#615 / PR #620)** —
+  `statusline` silently returned zero cost for unknown providers while
+  `stats` rejected them with a helpful list. Centralized provider
+  parsing so both commands validate against the canonical provider set.
+- **`budi sessions --format json` truncation envelope (#617 / PR #623)** —
+  JSON output now wraps sessions in an envelope with `returned_count`,
+  `truncated`, `limit`, and `window` fields so consumers can tell
+  whether they hit the cap.
+- **`budi doctor` auto-recovery display (#612 / PR #627)** —
+  when `doctor` auto-starts a dead daemon, text output now shows
+  supervisor state (e.g. `supervisor: launchd LaunchAgent: installed
+  (not running)`) alongside the gap duration, instead of masking the
+  outage behind a green PASS.
+
+### Added
+
+- **`id_short` in session JSON output (#618 / PR #624)** —
+  `budi sessions --format json` and `budi sessions <id> --format json`
+  now emit both `id` (full UUID) and `id_short` (8-char prefix).
+
+### Tests
+
+- **macOS launchctl kickstart regression guards (#611 / PR #625)** —
+  extracted `launchctl_kickstart_target()` helper from
+  `try_launchctl_kickstart()` for testability; added unit tests pinning
+  the expected kickstart target format.
+- **Upgrade-path integration refresh e2e (#613 / PR #626)** —
+  simulates upgrading from a v8.3.14 `integrations.toml` (missing the
+  `/budi` skill component) and verifies that `refresh_enabled_integrations`
+  creates `statusline.toml`, `SKILL.md` with canonical bytes, and
+  persists the expanded component set.
+
+### Non-blocking, carried forward
+
+- **Cloud Overview cost / token totals diverge from local CLI** (#10) — presentation-layer aggregation difference, not data loss.
+- **RC-4 Part B** (#504) — Cursor Usage API auth root-cause; Part A shipped with `v8.3.1`.
+- **ADR-0090 supersede** — pending one release cycle of live validation on the now-working `cursorDiskKV` bubbles path before the Usage API §1 surface can be retired.
+
 ## 8.3.16 — 2026-05-01
 
 8.3.16 is a same-day patch release on top of 8.3.15 that closes three
