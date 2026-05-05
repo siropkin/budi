@@ -77,30 +77,10 @@ impl IntegrationInstallComponent {
     }
 }
 
-#[derive(Debug, Clone, Copy, serde::Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum IntegrationStatuslinePreset {
-    Coach,
-    Cost,
-    Full,
-}
-
-impl IntegrationStatuslinePreset {
-    fn as_cli_arg(self) -> &'static str {
-        match self {
-            Self::Coach => "coach",
-            Self::Cost => "cost",
-            Self::Full => "full",
-        }
-    }
-}
-
 #[derive(Debug, serde::Deserialize)]
 pub struct InstallIntegrationsRequest {
     #[serde(default)]
     pub components: Vec<IntegrationInstallComponent>,
-    #[serde(default)]
-    pub statusline_preset: Option<IntegrationStatuslinePreset>,
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -397,11 +377,6 @@ pub async fn admin_install_integrations(
         args.push("--with".to_string());
         args.push(component.as_cli_arg().to_string());
     }
-    if let Some(preset) = req.statusline_preset {
-        args.push("--statusline-preset".to_string());
-        args.push(preset.as_cli_arg().to_string());
-    }
-
     let budi_bin_for_run = budi_bin.clone();
     let args_for_run = args.clone();
     let output = tokio::task::spawn_blocking(move || {

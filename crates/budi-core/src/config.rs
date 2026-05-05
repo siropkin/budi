@@ -179,17 +179,6 @@ pub const STATUSLINE_SLOTS: &[&str] = &[
     "provider", "health",
 ];
 
-/// Named presets for common statusline layouts.
-///
-/// Default is `cost` (rolling `1d` / `7d` / `30d`). `coach` and `full` are
-/// advanced variants documented in the README; they are not in the default
-/// install path per ADR-0088 §4.
-pub const STATUSLINE_PRESETS: &[(&str, &[&str])] = &[
-    ("cost", &["1d", "7d", "30d"]),
-    ("coach", &["session", "health"]),
-    ("full", &["session", "health", "1d"]),
-];
-
 /// Normalize a legacy slot name to its canonical form.
 /// Maps calendar-window aliases (`today` / `week` / `month`) to their rolling
 /// equivalents (`1d` / `7d` / `30d`). Returns the input unchanged for all
@@ -208,21 +197,20 @@ pub fn normalize_statusline_slot(slot: &str) -> &str {
 /// Loaded from `~/.config/budi/statusline.toml`.
 /// Example:
 /// ```toml
-/// preset = "coach"
-/// # Or customize directly:
-/// # slots = ["today", "week", "month", "branch"]
-/// # format = "{today} | {week} | {month}"
+/// slots = ["session", "message", "1d"]
+/// # Or use a custom format:
+/// # format = "{session} | {1d} 1d | {7d} 7d"
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct StatuslineConfig {
-    /// Named preset: "cost" (today/week/month), "coach" (session+health), "full" (session+health+today).
-    /// When set, overrides `slots`. Ignored if `format` is set.
-    pub preset: Option<String>,
-    /// Ordered list of data slots to display. Default: ["today", "week", "month"].
+    /// Deprecated: silently mapped to equivalent `slots` array for migration.
+    #[serde(default, skip_serializing)]
+    preset: Option<String>,
+    /// Ordered list of data slots to display. Default: ["1d", "7d", "30d"].
     pub slots: Vec<String>,
-    /// Optional custom format template. Overrides `slots` and `preset` when set.
-    /// Placeholders: {today}, {week}, {month}, {session}, {message}, {branch}, {project}, {provider}, {health}
+    /// Optional custom format template. Overrides `slots` when set.
+    /// Placeholders: {1d}, {7d}, {30d}, {session}, {message}, {branch}, {project}, {provider}, {health}
     pub format: Option<String>,
 }
 
@@ -237,16 +225,22 @@ impl Default for StatuslineConfig {
 }
 
 impl StatuslineConfig {
-    /// Resolve the effective slots list, considering preset → slots → format priority.
+    /// Resolve the effective slots list.
+    /// Legacy `preset` values are silently mapped to their equivalent slots.
     /// Legacy slot aliases (`today` / `week` / `month`) are normalized to
     /// their canonical rolling-window names (`1d` / `7d` / `30d`).
     pub fn effective_slots(&self) -> Vec<String> {
-        let raw = if let Some(ref preset_name) = self.preset
-            && let Some((_, preset_slots)) = STATUSLINE_PRESETS
-                .iter()
-                .find(|(name, _)| *name == preset_name.as_str())
-        {
-            preset_slots.iter().map(|s| s.to_string()).collect()
+        let raw = if let Some(ref preset_name) = self.preset {
+            match preset_name.as_str() {
+                "cost" => vec!["1d".to_string(), "7d".to_string(), "30d".to_string()],
+                "coach" => vec!["session".to_string(), "health".to_string()],
+                "full" => vec![
+                    "session".to_string(),
+                    "health".to_string(),
+                    "1d".to_string(),
+                ],
+                _ => self.slots.clone(),
+            }
         } else {
             self.slots.clone()
         };
@@ -255,7 +249,7 @@ impl StatuslineConfig {
             .collect()
     }
 
-    /// Resolve which slots are needed (from format template, preset, or explicit slots list).
+    /// Resolve which slots are needed (from format template or effective slots list).
     /// Legacy slot aliases (`today` / `week` / `month`) are normalized to
     /// their canonical rolling-window names (`1d` / `7d` / `30d`).
     pub fn required_slots(&self) -> Vec<String> {
@@ -308,8 +302,8 @@ pub fn load_statusline_config() -> StatuslineConfig {
 /// Outcome of a call to [`seed_statusline_config_if_needed`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SeedStatuslineOutcome {
-    /// Wrote a fresh `statusline.toml` with the quiet `cost` preset and
-    /// commented examples for `coach` / `full` / custom formats.
+    /// Wrote a fresh `statusline.toml` with the default slot layout and
+    /// commented examples for common combinations and custom formats.
     Generated,
     /// File already exists — no-op so user edits aren't clobbered.
     AlreadySet,
@@ -319,16 +313,17 @@ pub enum SeedStatuslineOutcome {
 ///
 /// Mirrors the default `StatuslineConfig` (`slots = ["1d", "7d", "30d"]`)
 /// so a `cat ~/.config/budi/statusline.toml` after `budi init` shows
-/// users *exactly* what's running, plus the discoverability comments
-/// for the `coach` / `full` presets and the custom-format escape hatch.
+/// users *exactly* what's running, plus discoverability comments
+/// for common slot combinations and the custom-format escape hatch.
 pub const STATUSLINE_TOML_TEMPLATE: &str = "\
 # budi statusline configuration.
 # Active layout: rolling 1d / 7d / 30d cost (the quiet default).
 slots = [\"1d\", \"7d\", \"30d\"]
 
-# Try a different preset:
-# preset = \"coach\"  # session cost + health vitals + tip
-# preset = \"full\"   # session + health + 1d
+# Example slot combinations:
+# slots = [\"session\", \"health\"]            # session cost + health vitals
+# slots = [\"session\", \"health\", \"1d\"]      # session + health + 1d
+# slots = [\"session\", \"message\", \"1d\"]     # session + per-message + 1d
 #
 # Or build a custom format:
 # format = \"{health} {project} | {session} | {1d} 1d | {7d} 7d\"
@@ -338,13 +333,10 @@ slots = [\"1d\", \"7d\", \"30d\"]
 ";
 
 /// Idempotently seed `~/.config/budi/statusline.toml` with the default
-/// `cost` preset and commented examples for the other presets.
+/// slot layout and commented examples for other combinations.
 ///
 /// `budi init` calls this after installing the Claude Code statusline so
-/// users have a real file to edit (#600). Without it, the README told
-/// users to customize via `~/.config/budi/statusline.toml` but the file
-/// only existed once they passed `--statusline-preset`, leaving fresh
-/// installs with nothing to discover.
+/// users have a real file to edit (#600).
 ///
 /// Idempotent: returns `AlreadySet` on every call after the first
 /// without touching the file (preserves user edits). Caller is
@@ -1033,23 +1025,27 @@ mod tests {
     }
 
     #[test]
-    fn statusline_preset_overrides_slots() {
-        let config = StatuslineConfig {
-            preset: Some("coach".to_string()),
-            slots: vec!["1d".to_string()],
-            format: None,
-        };
+    fn statusline_legacy_preset_coach_migrates_to_slots() {
+        let config: StatuslineConfig = toml::from_str(r#"preset = "coach""#).unwrap();
         assert_eq!(config.effective_slots(), vec!["session", "health"]);
         assert_eq!(config.required_slots(), vec!["session", "health"]);
     }
 
     #[test]
-    fn statusline_format_overrides_preset() {
-        let config = StatuslineConfig {
-            preset: Some("coach".to_string()),
-            slots: vec![],
-            format: Some("{1d} | {7d}".to_string()),
-        };
+    fn statusline_legacy_preset_full_migrates_to_slots() {
+        let config: StatuslineConfig = toml::from_str(r#"preset = "full""#).unwrap();
+        assert_eq!(config.effective_slots(), vec!["session", "health", "1d"]);
+    }
+
+    #[test]
+    fn statusline_format_overrides_legacy_preset() {
+        let config: StatuslineConfig = toml::from_str(
+            r#"
+preset = "coach"
+format = "{1d} | {7d}"
+"#,
+        )
+        .unwrap();
         assert_eq!(config.required_slots(), vec!["1d", "7d"]);
     }
 
@@ -1092,12 +1088,8 @@ format = "{1d} | {7d} | {branch}"
     }
 
     #[test]
-    fn statusline_cost_preset_uses_rolling_windows() {
-        let config = StatuslineConfig {
-            preset: Some("cost".to_string()),
-            slots: vec![],
-            format: None,
-        };
+    fn statusline_legacy_preset_cost_migrates_to_rolling_windows() {
+        let config: StatuslineConfig = toml::from_str(r#"preset = "cost""#).unwrap();
         assert_eq!(config.effective_slots(), vec!["1d", "7d", "30d"]);
     }
 

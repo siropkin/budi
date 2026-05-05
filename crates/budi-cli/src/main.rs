@@ -8,7 +8,7 @@ mod client;
 mod commands;
 mod daemon;
 
-use crate::commands::integrations::{IntegrationComponent, StatuslinePreset};
+use crate::commands::integrations::IntegrationComponent;
 
 const HEALTH_TIMEOUT_SECS: u64 = 3;
 
@@ -376,9 +376,6 @@ enum IntegrationAction {
         /// Install every available integration
         #[arg(long, default_value_t = false)]
         all: bool,
-        /// Statusline preset for Claude Code status line (coach=session health, cost=period)
-        #[arg(long, value_enum)]
-        statusline_preset: Option<StatuslinePreset>,
         /// Skip prompts and use defaults
         #[arg(long, default_value_t = false)]
         yes: bool,

@@ -174,7 +174,7 @@ fn install_default_integrations(config: &config::BudiConfig) {
         .map(|p| p.exists())
         .unwrap_or(false);
 
-    let report = super::integrations::install_selected(config, &selected, None);
+    let report = super::integrations::install_selected(config, &selected);
 
     let mut prefs = super::integrations::load_preferences();
     prefs
