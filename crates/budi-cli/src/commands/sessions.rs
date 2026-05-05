@@ -4,10 +4,20 @@ use budi_core::pricing::display;
 
 use crate::StatsPeriod;
 use crate::client::DaemonClient;
-use crate::commands::stats::{format_cost_cents, format_tokens, period_date_range, period_label};
+use crate::commands::stats::{format_cost_cents, format_tokens, period_date_range, period_key, period_label};
 
 use super::ansi;
 use super::print_json;
+
+#[derive(serde::Serialize)]
+struct SessionsEnvelope {
+    sessions: Vec<budi_core::analytics::SessionListEntry>,
+    total_count: u64,
+    returned_count: usize,
+    truncated: bool,
+    limit: usize,
+    window: String,
+}
 
 /// Width budget for the model column in the text-view session list. The
 /// canonical display name (`pricing::display::combined_label`) rarely
@@ -50,7 +60,15 @@ pub fn cmd_sessions(
     )?;
 
     if json_output {
-        print_json(&sessions)?;
+        let envelope = SessionsEnvelope {
+            returned_count: sessions.sessions.len(),
+            truncated: sessions.total_count > sessions.sessions.len() as u64,
+            limit,
+            window: period_key(period),
+            total_count: sessions.total_count,
+            sessions: sessions.sessions,
+        };
+        print_json(&envelope)?;
         return Ok(());
     }
 
@@ -545,5 +563,40 @@ mod tests {
     #[test]
     fn truncate_on_char_boundary_zero_max_returns_empty() {
         assert_eq!(truncate_on_char_boundary("anything", 0), "");
+    }
+
+    #[test]
+    fn sessions_envelope_serializes_truncation_metadata() {
+        let envelope = SessionsEnvelope {
+            sessions: vec![],
+            total_count: 115,
+            returned_count: 20,
+            truncated: true,
+            limit: 20,
+            window: "week".to_string(),
+        };
+        let v = serde_json::to_value(&envelope).unwrap();
+        assert_eq!(v["total_count"], 115);
+        assert_eq!(v["returned_count"], 20);
+        assert_eq!(v["truncated"], true);
+        assert_eq!(v["limit"], 20);
+        assert_eq!(v["window"], "week");
+        assert!(v["sessions"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn sessions_envelope_not_truncated_when_all_returned() {
+        let envelope = SessionsEnvelope {
+            sessions: vec![],
+            total_count: 5,
+            returned_count: 5,
+            truncated: false,
+            limit: 20,
+            window: "today".to_string(),
+        };
+        let v = serde_json::to_value(&envelope).unwrap();
+        assert_eq!(v["truncated"], false);
+        assert_eq!(v["returned_count"], 5);
+        assert_eq!(v["total_count"], 5);
     }
 }
