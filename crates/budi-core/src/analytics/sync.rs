@@ -319,6 +319,13 @@ fn sync_with_max_age<F: FnMut(&SyncProgress)>(
             tracing::info!("Backfilled ticket_id tags on {tickets_backfilled} messages");
         }
 
+        let activities_backfilled = backfill_activity_tags(conn);
+        if activities_backfilled > 0 {
+            tracing::info!(
+                "Backfilled activity tags on {activities_backfilled} messages (#616)"
+            );
+        }
+
         let removed_legacy_auto_tags = cleanup_legacy_auto_tags(conn);
         if removed_legacy_auto_tags > 0 {
             tracing::info!(
@@ -490,6 +497,82 @@ fn backfill_ticket_tags(conn: &mut Connection) -> usize {
             }
             count += 1;
         }
+    }
+
+    if tx.commit().is_err() {
+        return 0;
+    }
+    count
+}
+
+/// Backfill `activity` / `activity_source` / `activity_confidence` tags for
+/// assistant messages that were ingested without them.
+///
+/// Root cause (#616): the live tailer processes user and assistant messages
+/// in separate batches (the user entry is written to JSONL before Claude
+/// responds). `propagate_session_context` inside `Pipeline::process` can
+/// only propagate `prompt_category` from user → assistant within a single
+/// batch, so an assistant arriving in a later batch never inherits the
+/// classification and never receives an activity tag.
+///
+/// Fix: after each sync cycle, find recent assistant messages without an
+/// activity tag whose session carries a `prompt_category` (set when the
+/// user message was ingested) and insert the missing tags. The session-
+/// level classification is the best available signal when per-message
+/// prompt text is not stored in the database.
+fn backfill_activity_tags(conn: &mut Connection) -> usize {
+    let rows: Vec<(String, String)> = {
+        let mut stmt = match conn.prepare(
+            "SELECT m.id, s.prompt_category
+             FROM messages m
+             JOIN sessions s ON s.id = m.session_id
+             WHERE m.role = 'assistant'
+               AND m.timestamp >= datetime('now', '-90 days')
+               AND s.prompt_category IS NOT NULL AND s.prompt_category != ''
+               AND NOT EXISTS (
+                 SELECT 1 FROM tags t
+                 WHERE t.message_id = m.id AND t.key = 'activity'
+               )
+             LIMIT 10000",
+        ) {
+            Ok(s) => s,
+            Err(_) => return 0,
+        };
+        stmt.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .ok()
+        .map(|iter| iter.filter_map(|r| r.ok()).collect())
+        .unwrap_or_default()
+    };
+
+    if rows.is_empty() {
+        return 0;
+    }
+
+    let tx = match conn.transaction() {
+        Ok(t) => t,
+        Err(_) => return 0,
+    };
+
+    let mut count = 0usize;
+    for (uuid, category) in &rows {
+        if let Err(e) = tx.execute(
+            "INSERT OR IGNORE INTO tags (message_id, key, value) VALUES (?1, 'activity', ?2)",
+            rusqlite::params![uuid, category],
+        ) {
+            tracing::warn!("backfill_activity_tags: activity insert failed for {uuid}: {e}");
+            continue;
+        }
+        let _ = tx.execute(
+            "INSERT OR IGNORE INTO tags (message_id, key, value) VALUES (?1, 'activity_source', 'rule')",
+            rusqlite::params![uuid],
+        );
+        let _ = tx.execute(
+            "INSERT OR IGNORE INTO tags (message_id, key, value) VALUES (?1, 'activity_confidence', 'medium')",
+            rusqlite::params![uuid],
+        );
+        count += 1;
     }
 
     if tx.commit().is_err() {
@@ -751,8 +834,8 @@ fn truncate_title(text: &str, max_len: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        ProviderSyncStats, SyncProgress, SyncReport, first_legacy_proxy_message_timestamp,
-        read_transcript_tail,
+        ProviderSyncStats, SyncProgress, SyncReport, backfill_activity_tags,
+        first_legacy_proxy_message_timestamp, read_transcript_tail,
     };
 
     fn temp_file_path(test_name: &str) -> std::path::PathBuf {
@@ -867,5 +950,120 @@ mod tests {
 
         let ts = first_legacy_proxy_message_timestamp(&conn).expect("timestamp exists");
         assert_eq!(ts.to_rfc3339(), "2026-04-10T09:00:00+00:00");
+    }
+
+    #[test]
+    fn backfill_activity_tags_fills_from_session_category() {
+        let mut conn = rusqlite::Connection::open_in_memory().expect("open in-memory db");
+        crate::migration::migrate(&conn).expect("migrate schema");
+
+        conn.execute(
+            "INSERT INTO sessions (id, provider, prompt_category)
+             VALUES ('s1', 'claude_code', 'bugfix')",
+            [],
+        )
+        .expect("insert session");
+
+        conn.execute(
+            "INSERT INTO messages
+             (id, session_id, role, timestamp, model, provider,
+              input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
+              cost_cents, cost_confidence)
+             VALUES
+             ('a1', 's1', 'assistant', datetime('now'), 'claude-opus-4-6', 'claude_code',
+              100, 50, 0, 0, 5.0, 'exact')",
+            [],
+        )
+        .expect("insert assistant message");
+
+        let count = backfill_activity_tags(&mut conn);
+        assert_eq!(count, 1, "should backfill exactly one message");
+
+        let tags: Vec<(String, String)> = conn
+            .prepare("SELECT key, value FROM tags WHERE message_id = 'a1' ORDER BY key")
+            .unwrap()
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .filter_map(|r| r.ok())
+            .collect();
+
+        assert_eq!(
+            tags,
+            vec![
+                ("activity".to_string(), "bugfix".to_string()),
+                ("activity_confidence".to_string(), "medium".to_string()),
+                ("activity_source".to_string(), "rule".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn backfill_activity_tags_skips_already_tagged() {
+        let mut conn = rusqlite::Connection::open_in_memory().expect("open in-memory db");
+        crate::migration::migrate(&conn).expect("migrate schema");
+
+        conn.execute(
+            "INSERT INTO sessions (id, provider, prompt_category)
+             VALUES ('s1', 'claude_code', 'bugfix')",
+            [],
+        )
+        .expect("insert session");
+
+        conn.execute(
+            "INSERT INTO messages
+             (id, session_id, role, timestamp, model, provider,
+              input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
+              cost_cents, cost_confidence)
+             VALUES
+             ('a1', 's1', 'assistant', datetime('now'), 'claude-opus-4-6', 'claude_code',
+              100, 50, 0, 0, 5.0, 'exact')",
+            [],
+        )
+        .expect("insert assistant message");
+
+        conn.execute(
+            "INSERT INTO tags (message_id, key, value) VALUES ('a1', 'activity', 'feature')",
+            [],
+        )
+        .expect("insert existing activity tag");
+
+        let count = backfill_activity_tags(&mut conn);
+        assert_eq!(count, 0, "should not backfill already-tagged message");
+
+        let activity: String = conn
+            .query_row(
+                "SELECT value FROM tags WHERE message_id = 'a1' AND key = 'activity'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(activity, "feature", "original tag should be preserved");
+    }
+
+    #[test]
+    fn backfill_activity_tags_skips_sessions_without_category() {
+        let mut conn = rusqlite::Connection::open_in_memory().expect("open in-memory db");
+        crate::migration::migrate(&conn).expect("migrate schema");
+
+        conn.execute(
+            "INSERT INTO sessions (id, provider) VALUES ('s1', 'claude_code')",
+            [],
+        )
+        .expect("insert session without prompt_category");
+
+        conn.execute(
+            "INSERT INTO messages
+             (id, session_id, role, timestamp, model, provider,
+              input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
+              cost_cents, cost_confidence)
+             VALUES
+             ('a1', 's1', 'assistant', datetime('now'), 'claude-opus-4-6', 'claude_code',
+              100, 50, 0, 0, 5.0, 'exact')",
+            [],
+        )
+        .expect("insert assistant message");
+
+        let count = backfill_activity_tags(&mut conn);
+        assert_eq!(count, 0, "should not backfill when session has no category");
     }
 }
