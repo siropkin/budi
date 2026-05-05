@@ -1048,7 +1048,7 @@ mod tests {
         prefs.enabled.insert(IntegrationComponent::CursorExtension);
 
         // Simulate the in-memory union step (the disk side is exercised
-        // by an e2e harness; here we pin the algorithm).
+        // by the e2e test below; here we pin the algorithm).
         let recommended = default_recommended_components();
         for component in &recommended {
             if !component.is_removed_surface() && !prefs.enabled.contains(component) {
@@ -1075,5 +1075,110 @@ mod tests {
                 .contains(&IntegrationComponent::CursorExtension),
             "refresh must NOT drop pre-existing enabled components"
         );
+    }
+
+    /// #613 e2e: simulate an upgrade from a v8.3.14 install and verify
+    /// that `refresh_enabled_integrations` creates the missing
+    /// `statusline.toml` and `SKILL.md` files, and persists the expanded
+    /// component set back to `integrations.toml`.
+    ///
+    /// Uses a temp HOME so the test is hermetic and doesn't touch the
+    /// developer's real `~/.claude` or `~/.config/budi`.
+    #[test]
+    fn e2e_refresh_from_v8_3_14_creates_statusline_and_skill() {
+        let tmp = std::env::temp_dir().join(format!(
+            "budi-e2e-613-{}-{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        let _ = std::fs::remove_dir_all(&tmp);
+
+        // Scaffold a minimal HOME with Claude Code "installed" (the
+        // skill installer gates on `~/.claude` existing).
+        let claude_dir = tmp.join(".claude");
+        std::fs::create_dir_all(&claude_dir).expect("create .claude");
+        let settings_path = claude_dir.join("settings.json");
+        std::fs::write(&settings_path, "{}").expect("write settings.json");
+
+        // v8.3.14-era integrations.toml: only two components, missing
+        // the /budi skill that shipped in v8.3.15 (#603).
+        let config_dir = tmp.join(".config/budi");
+        std::fs::create_dir_all(&config_dir).expect("create .config/budi");
+        let integrations_toml = config_dir.join("integrations.toml");
+        std::fs::write(
+            &integrations_toml,
+            r#"enabled = ["claude-code-statusline", "cursor-extension"]
+"#,
+        )
+        .expect("write v8.3.14 integrations.toml");
+
+        // Redirect HOME to the temp dir for the duration of this test.
+        let prev_home = std::env::var("HOME").ok();
+        unsafe { std::env::set_var("HOME", &tmp) };
+
+        let config = budi_core::config::BudiConfig::default();
+        let report = refresh_enabled_integrations(&config);
+
+        // Restore HOME before any assertions so a failure doesn't leak.
+        match prev_home {
+            Some(h) => unsafe { std::env::set_var("HOME", h) },
+            None => unsafe { std::env::remove_var("HOME") },
+        }
+
+        // Cursor extension warnings are expected on machines without
+        // Cursor installed — filter them out; only fail on unexpected ones.
+        let unexpected: Vec<_> = report
+            .warnings
+            .iter()
+            .filter(|w| !w.contains("Cursor extension"))
+            .collect();
+        assert!(
+            unexpected.is_empty(),
+            "unexpected warnings: {:?}",
+            unexpected
+        );
+
+        // Acceptance 1: statusline.toml seeded.
+        let statusline_toml = config_dir.join("statusline.toml");
+        assert!(
+            statusline_toml.exists(),
+            "statusline.toml must be seeded after refresh"
+        );
+        let sl_contents = std::fs::read_to_string(&statusline_toml).unwrap();
+        assert!(
+            sl_contents.contains("slots"),
+            "statusline.toml must contain the default slots"
+        );
+
+        // Acceptance 2: SKILL.md created with canonical bytes.
+        let skill_md = claude_dir.join("skills/budi/SKILL.md");
+        assert!(
+            skill_md.exists(),
+            "SKILL.md must be installed after refresh"
+        );
+        let skill_contents = std::fs::read_to_string(&skill_md).unwrap();
+        assert_eq!(
+            skill_contents, BUDI_SKILL_CONTENTS,
+            "SKILL.md must have canonical contents"
+        );
+
+        // Acceptance 3: integrations.toml now includes the /budi skill.
+        let updated_raw = std::fs::read_to_string(&integrations_toml).unwrap();
+        let updated: IntegrationPreferences =
+            toml::from_str(&updated_raw).expect("parse updated integrations.toml");
+        assert!(
+            updated
+                .enabled
+                .contains(&IntegrationComponent::ClaudeCodeBudiSkill),
+            "integrations.toml must include claude-code-budi-skill after refresh"
+        );
+        assert!(
+            updated
+                .enabled
+                .contains(&IntegrationComponent::ClaudeCodeStatusline),
+            "refresh must preserve pre-existing components"
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 }
