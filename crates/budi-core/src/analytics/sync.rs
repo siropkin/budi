@@ -321,9 +321,7 @@ fn sync_with_max_age<F: FnMut(&SyncProgress)>(
 
         let activities_backfilled = backfill_activity_tags(conn);
         if activities_backfilled > 0 {
-            tracing::info!(
-                "Backfilled activity tags on {activities_backfilled} messages (#616)"
-            );
+            tracing::info!("Backfilled activity tags on {activities_backfilled} messages (#616)");
         }
 
         let removed_legacy_auto_tags = cleanup_legacy_auto_tags(conn);

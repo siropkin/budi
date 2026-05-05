@@ -6553,5 +6553,8 @@ fn session_prompt_category_tracks_latest_value() {
             |row| row.get(0),
         )
         .unwrap();
-    assert_eq!(cat, "feature", "session should track the latest prompt_category");
+    assert_eq!(
+        cat, "feature",
+        "session should track the latest prompt_category"
+    );
 }
