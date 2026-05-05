@@ -42,8 +42,11 @@ fn detect_git_branch(dir: &str) -> Option<String> {
 /// renders as `crates/budi-cli`. Falls back to the `~`-normalized path
 /// when it has fewer than two segments.
 fn short_display_path(cwd: &str) -> String {
-    let home = std::env::var("HOME").unwrap_or_default();
-    let normalized = if !home.is_empty() && cwd.starts_with(&home) {
+    short_display_path_with_home(cwd, &std::env::var("HOME").unwrap_or_default())
+}
+
+fn short_display_path_with_home(cwd: &str, home: &str) -> String {
+    let normalized = if !home.is_empty() && cwd.starts_with(home) {
         format!("~{}", &cwd[home.len()..])
     } else {
         cwd.to_string()
@@ -720,25 +723,23 @@ mod tests {
     #[test]
     fn short_display_path_normalizes_home_and_truncates() {
         // #546: path shortening contract for the Claude-format prefix.
-        unsafe { std::env::set_var("HOME", "/Users/alice") };
+        // Uses `short_display_path_with_home` to avoid mutating the
+        // global HOME env var (#630).
+        let home = "/Users/alice";
         assert_eq!(
-            short_display_path("/Users/alice/_projects/budi"),
+            short_display_path_with_home("/Users/alice/_projects/budi", home),
             "_projects/budi",
         );
-        // Deeply nested paths drop to the final two segments so the
-        // prefix doesn't blow out the prompt width budget.
         assert_eq!(
-            short_display_path("/Users/alice/_projects/budi/crates/budi-cli"),
+            short_display_path_with_home("/Users/alice/_projects/budi/crates/budi-cli", home),
             "crates/budi-cli",
         );
-        // Outside HOME: no tilde rewrite, still truncated to last two.
         assert_eq!(
-            short_display_path("/opt/homebrew/Cellar/budi/8.3.5"),
+            short_display_path_with_home("/opt/homebrew/Cellar/budi/8.3.5", home),
             "budi/8.3.5",
         );
-        // Shallow paths (<= 2 segments) render intact after tilde rewrite.
-        assert_eq!(short_display_path("/Users/alice"), "~");
-        assert_eq!(short_display_path("/tmp"), "/tmp");
+        assert_eq!(short_display_path_with_home("/Users/alice", home), "~");
+        assert_eq!(short_display_path_with_home("/tmp", home), "/tmp");
     }
 
     #[test]
