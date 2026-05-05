@@ -175,8 +175,8 @@ pub fn load_agents_config() -> Option<AgentsConfig> {
 /// as backward-compatible aliases — they render the same rolling-window
 /// values so existing `~/.config/budi/statusline.toml` files keep working.
 pub const STATUSLINE_SLOTS: &[&str] = &[
-    "1d", "7d", "30d", "today", "week", "month", "session", "branch", "project", "provider",
-    "health",
+    "1d", "7d", "30d", "today", "week", "month", "session", "message", "branch", "project",
+    "provider", "health",
 ];
 
 /// Named presets for common statusline layouts.
@@ -222,7 +222,7 @@ pub struct StatuslineConfig {
     /// Ordered list of data slots to display. Default: ["today", "week", "month"].
     pub slots: Vec<String>,
     /// Optional custom format template. Overrides `slots` and `preset` when set.
-    /// Placeholders: {today}, {week}, {month}, {session}, {branch}, {project}, {provider}, {health}
+    /// Placeholders: {today}, {week}, {month}, {session}, {message}, {branch}, {project}, {provider}, {health}
     pub format: Option<String>,
 }
 
@@ -333,7 +333,7 @@ slots = [\"1d\", \"7d\", \"30d\"]
 # Or build a custom format:
 # format = \"{health} {project} | {session} | {1d} 1d | {7d} 7d\"
 #
-# Available slots: 1d, 7d, 30d, session, branch, project, provider, health
+# Available slots: 1d, 7d, 30d, session, message, branch, project, provider, health
 # Docs: https://github.com/siropkin/budi#status-line
 ";
 
