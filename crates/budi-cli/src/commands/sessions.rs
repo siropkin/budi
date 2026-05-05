@@ -4,7 +4,9 @@ use budi_core::pricing::display;
 
 use crate::StatsPeriod;
 use crate::client::DaemonClient;
-use crate::commands::stats::{format_cost_cents, format_tokens, period_date_range, period_key, period_label};
+use crate::commands::stats::{
+    format_cost_cents, format_tokens, period_date_range, period_key, period_label,
+};
 
 use super::ansi;
 use super::print_json;
