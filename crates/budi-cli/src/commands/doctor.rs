@@ -51,6 +51,7 @@ pub fn cmd_doctor(
     }
     report.record(&daemon.result);
     checks.push(daemon.result.clone());
+    let daemon_outage = daemon.outage;
 
     if daemon.started_this_run {
         // The daemon seeds tail offsets on startup before the backstop loop
@@ -127,9 +128,22 @@ pub fn cmd_doctor(
     }
 
     if json_output {
+        let mut json_checks: Vec<CheckResultJson> =
+            checks.iter().map(CheckResultJson::from).collect();
+        if let (Some(outage), Some(entry)) = (
+            &daemon_outage,
+            json_checks.iter_mut().find(|c| c.name == "daemon health"),
+        ) {
+            entry.auto_recovered = Some(true);
+            entry.previous_outage = Some(PreviousOutageJson {
+                last_log_entry: outage.last_log_entry.clone(),
+                gap_seconds: outage.gap_seconds,
+                supervisor: outage.supervisor.clone(),
+            });
+        }
         let body = DoctorJson {
             all_pass: report.fails == 0 && report.warns == 0,
-            checks: checks.iter().map(CheckResultJson::from).collect(),
+            checks: json_checks,
         };
         super::print_json(&body)?;
         // Exit code matrix matches text mode: warnings are not failures,
@@ -177,6 +191,19 @@ struct CheckResultJson {
     name: String,
     status: &'static str,
     detail: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    auto_recovered: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    previous_outage: Option<PreviousOutageJson>,
+}
+
+#[derive(Debug, Serialize)]
+struct PreviousOutageJson {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    last_log_entry: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    gap_seconds: Option<u64>,
+    supervisor: String,
 }
 
 impl From<&CheckResult> for CheckResultJson {
@@ -189,6 +216,8 @@ impl From<&CheckResult> for CheckResultJson {
                 CheckState::Fail => "fail",
             },
             detail: value.detail.clone(),
+            auto_recovered: None,
+            previous_outage: None,
         }
     }
 }
@@ -310,38 +339,81 @@ impl CheckResult {
 struct DaemonCheck {
     result: CheckResult,
     started_this_run: bool,
+    outage: Option<OutageSummary>,
 }
 
-/// #612: best-effort gap-duration string derived from the daemon log's
-/// last-modified timestamp. Surfaces as a parenthetical in the auto-
-/// recovery WARN so users see roughly how long ingestion was paused.
-/// Returns an empty string when the log isn't present (e.g. fresh
-/// install, Linux/Windows where supervisor logs go elsewhere) so the
-/// outer message stays clean.
-fn daemon_outage_summary(_repo_root: Option<&Path>) -> String {
+struct OutageSummary {
+    last_log_entry: Option<String>,
+    gap_seconds: Option<u64>,
+    supervisor: String,
+}
+
+fn daemon_outage_data() -> OutageSummary {
+    let supervisor = format!(
+        "{}: {}",
+        budi_core::autostart::service_mechanism(),
+        budi_core::autostart::service_status(),
+    );
+
     let path = match budi_core::autostart::service_log_path() {
         Some(p) => p,
-        None => return String::new(),
+        None => {
+            return OutageSummary {
+                last_log_entry: None,
+                gap_seconds: None,
+                supervisor,
+            };
+        }
     };
     let modified = match fs::metadata(&path).and_then(|m| m.modified()) {
         Ok(t) => t,
-        Err(_) => return String::new(),
+        Err(_) => {
+            return OutageSummary {
+                last_log_entry: None,
+                gap_seconds: None,
+                supervisor,
+            };
+        }
     };
     let elapsed = match SystemTime::now().duration_since(modified) {
         Ok(d) => d,
-        Err(_) => return String::new(),
+        Err(_) => {
+            return OutageSummary {
+                last_log_entry: None,
+                gap_seconds: None,
+                supervisor,
+            };
+        }
     };
-    let secs = elapsed.as_secs();
-    let pretty = if secs < 90 {
-        format!("{secs}s")
-    } else if secs < 90 * 60 {
-        format!("{}m", secs / 60)
-    } else if secs < 36 * 3600 {
-        format!("{}h", secs / 3600)
-    } else {
-        format!("{}d", secs / 86400)
-    };
-    format!(" — last log entry ~{pretty} ago")
+
+    let mtime: DateTime<Utc> = modified.into();
+
+    OutageSummary {
+        last_log_entry: Some(mtime.to_rfc3339()),
+        gap_seconds: Some(elapsed.as_secs()),
+        supervisor,
+    }
+}
+
+fn format_outage_display(outage: &OutageSummary) -> String {
+    let mut parts = Vec::new();
+
+    if let Some(secs) = outage.gap_seconds {
+        let pretty = if secs < 90 {
+            format!("{secs}s")
+        } else if secs < 90 * 60 {
+            format!("{}m", secs / 60)
+        } else if secs < 36 * 3600 {
+            format!("{}h", secs / 3600)
+        } else {
+            format!("{}d", secs / 86400)
+        };
+        parts.push(format!("last log entry ~{pretty} ago"));
+    }
+
+    parts.push(format!("supervisor: {}", outage.supervisor));
+
+    format!(" — {}", parts.join("; "))
 }
 
 fn check_daemon_health(repo_root: Option<&Path>, config: &config::BudiConfig) -> DaemonCheck {
@@ -351,6 +423,7 @@ fn check_daemon_health(repo_root: Option<&Path>, config: &config::BudiConfig) ->
         return DaemonCheck {
             result: CheckResult::pass("daemon health", format!("responding on {base_url}")),
             started_this_run: false,
+            outage: None,
         };
     }
 
@@ -367,34 +440,33 @@ fn check_daemon_health(repo_root: Option<&Path>, config: &config::BudiConfig) ->
                     ),
                 ),
                 started_this_run: false,
+                outage: None,
             };
         }
     };
 
     match ensure_daemon_running(repo_root, config) {
-        Ok(()) if daemon_health(config) => DaemonCheck {
-            // #612: when doctor brings the daemon up itself, surface that as
-            // a WARN (not PASS) so a user investigating ingestion gaps can
-            // see that the daemon was NOT running on first probe — and how
-            // long the previous outage lasted. Pre-fix, this was reported
-            // as a uniform PASS, masking outages and making `All checks
-            // passed.` appear after we just rescued the daemon.
-            result: CheckResult::warn(
-                "daemon health",
-                format!(
-                    "auto-recovered: was NOT running on first probe; doctor started it on {base_url} (binary: {}){}",
-                    daemon_bin.display(),
-                    daemon_outage_summary(repo_root),
+        Ok(()) if daemon_health(config) => {
+            let outage = daemon_outage_data();
+            DaemonCheck {
+                result: CheckResult::warn(
+                    "daemon health",
+                    format!(
+                        "auto-recovered: was NOT running on first probe; doctor started it on {base_url} (binary: {}){}",
+                        daemon_bin.display(),
+                        format_outage_display(&outage),
+                    ),
+                    Some(
+                        "Previous outage may indicate a supervisor problem (see #611 for the macOS \
+                         launchd kickstart fix). If this recurs, run `budi autostart status` to \
+                         verify the supervisor is actually managing the daemon."
+                            .to_string(),
+                    ),
                 ),
-                Some(
-                    "Previous outage may indicate a supervisor problem (see #611 for the macOS \
-                     launchd kickstart fix). If this recurs, run `budi autostart status` to \
-                     verify the supervisor is actually managing the daemon."
-                        .to_string(),
-                ),
-            ),
-            started_this_run: true,
-        },
+                started_this_run: true,
+                outage: Some(outage),
+            }
+        }
         Ok(()) => DaemonCheck {
             result: CheckResult::fail(
                 "daemon health",
@@ -408,6 +480,7 @@ fn check_daemon_health(repo_root: Option<&Path>, config: &config::BudiConfig) ->
                 ),
             ),
             started_this_run: true,
+            outage: None,
         },
         Err(e) => DaemonCheck {
             result: CheckResult::fail(
@@ -427,6 +500,7 @@ fn check_daemon_health(repo_root: Option<&Path>, config: &config::BudiConfig) ->
                 ),
             ),
             started_this_run: false,
+            outage: None,
         },
     }
 }
@@ -1563,5 +1637,132 @@ mod tests {
 
         assert_eq!(result.state, CheckState::Fail);
         assert!(result.detail.contains("has not seeded any offsets"));
+    }
+
+    #[test]
+    fn daemon_already_running_is_pass_with_no_outage() {
+        let check = DaemonCheck {
+            result: CheckResult::pass("daemon health", "responding on http://127.0.0.1:7878"),
+            started_this_run: false,
+            outage: None,
+        };
+        assert_eq!(check.result.state, CheckState::Pass);
+        assert!(!check.started_this_run);
+        assert!(check.outage.is_none());
+    }
+
+    #[test]
+    fn daemon_auto_recovered_is_warn_with_outage() {
+        let outage = OutageSummary {
+            last_log_entry: Some("2026-04-30T22:42:35+00:00".to_string()),
+            gap_seconds: Some(79200),
+            supervisor: "launchd LaunchAgent: installed (not running)".to_string(),
+        };
+        let check = DaemonCheck {
+            result: CheckResult::warn(
+                "daemon health",
+                format!(
+                    "auto-recovered: was NOT running on first probe{}",
+                    format_outage_display(&outage),
+                ),
+                None,
+            ),
+            started_this_run: true,
+            outage: Some(outage),
+        };
+
+        assert_eq!(check.result.state, CheckState::Warn);
+        assert!(check.started_this_run);
+        assert!(check.result.detail.contains("auto-recovered"));
+        assert!(check.result.detail.contains("last log entry ~22h ago"));
+        assert!(
+            check
+                .result
+                .detail
+                .contains("supervisor: launchd LaunchAgent")
+        );
+
+        let outage = check.outage.as_ref().unwrap();
+        assert_eq!(outage.gap_seconds, Some(79200));
+        assert!(outage.supervisor.contains("launchd"));
+    }
+
+    #[test]
+    fn daemon_json_includes_auto_recovered_and_previous_outage() {
+        let outage = OutageSummary {
+            last_log_entry: Some("2026-04-30T22:42:35+00:00".to_string()),
+            gap_seconds: Some(79200),
+            supervisor: "launchd LaunchAgent: installed (not running)".to_string(),
+        };
+        let mut entry = CheckResultJson::from(&CheckResult::warn(
+            "daemon health",
+            "auto-recovered: was NOT running",
+            None,
+        ));
+        entry.auto_recovered = Some(true);
+        entry.previous_outage = Some(PreviousOutageJson {
+            last_log_entry: outage.last_log_entry.clone(),
+            gap_seconds: outage.gap_seconds,
+            supervisor: outage.supervisor.clone(),
+        });
+
+        let v = serde_json::to_value(&entry).expect("serialise");
+        let obj = v.as_object().unwrap();
+
+        assert_eq!(obj["auto_recovered"], serde_json::json!(true));
+
+        let po = &obj["previous_outage"];
+        assert_eq!(
+            po["last_log_entry"],
+            serde_json::json!("2026-04-30T22:42:35+00:00")
+        );
+        assert_eq!(po["gap_seconds"], serde_json::json!(79200));
+        assert!(
+            po["supervisor"]
+                .as_str()
+                .unwrap()
+                .contains("launchd LaunchAgent")
+        );
+    }
+
+    #[test]
+    fn daemon_json_omits_outage_fields_when_already_running() {
+        let entry = CheckResultJson::from(&CheckResult::pass(
+            "daemon health",
+            "responding on http://127.0.0.1:7878",
+        ));
+        let v = serde_json::to_value(&entry).expect("serialise");
+        let obj = v.as_object().unwrap();
+
+        assert!(obj.get("auto_recovered").is_none());
+        assert!(obj.get("previous_outage").is_none());
+
+        let mut keys: Vec<&str> = obj.keys().map(String::as_str).collect();
+        keys.sort();
+        assert_eq!(keys, vec!["detail", "name", "status"]);
+    }
+
+    #[test]
+    fn format_outage_display_includes_gap_and_supervisor() {
+        let outage = OutageSummary {
+            last_log_entry: Some("2026-04-30T22:42:35+00:00".to_string()),
+            gap_seconds: Some(7200),
+            supervisor: "launchd LaunchAgent: installed (not running)".to_string(),
+        };
+        let display = format_outage_display(&outage);
+        assert!(display.contains("last log entry ~2h ago"));
+        assert!(display.contains("supervisor: launchd LaunchAgent"));
+    }
+
+    #[test]
+    fn format_outage_display_without_log_shows_only_supervisor() {
+        let outage = OutageSummary {
+            last_log_entry: None,
+            gap_seconds: None,
+            supervisor: "systemd user service: not installed".to_string(),
+        };
+        let display = format_outage_display(&outage);
+        assert!(!display.contains("last log entry"));
+        assert!(display.contains("supervisor: systemd user service"));
     }
 }
