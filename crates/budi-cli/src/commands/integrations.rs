@@ -47,30 +47,10 @@ impl IntegrationComponent {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, Serialize, Deserialize)]
-#[clap(rename_all = "kebab-case")]
-#[serde(rename_all = "kebab-case")]
-pub enum StatuslinePreset {
-    Coach,
-    Cost,
-    Full,
-}
-
-impl StatuslinePreset {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Coach => "coach",
-            Self::Cost => "cost",
-            Self::Full => "full",
-        }
-    }
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct IntegrationPreferences {
     pub enabled: BTreeSet<IntegrationComponent>,
-    pub statusline_preset: Option<StatuslinePreset>,
 }
 
 #[derive(Debug, Default)]
@@ -108,12 +88,7 @@ pub fn cmd_integrations(action: crate::IntegrationAction) -> Result<()> {
             println!("Install later with `budi integrations install --with <name>`");
             Ok(())
         }
-        crate::IntegrationAction::Install {
-            with,
-            all,
-            statusline_preset,
-            yes,
-        } => {
+        crate::IntegrationAction::Install { with, all, yes } => {
             let mut selected = if all {
                 all_components()
             } else if !with.is_empty() {
@@ -130,12 +105,6 @@ pub fn cmd_integrations(action: crate::IntegrationAction) -> Result<()> {
                 }
                 return Ok(());
             }
-
-            // Default statusline is the quiet `1d` / `7d` / `30d` cost view
-            // (ADR-0088 §4). `coach` / `full` remain opt-in advanced variants
-            // documented in the README — we no longer prompt for a preset
-            // during onboarding so the default path stays simple.
-            let preset = statusline_preset;
 
             if !yes && io::stdin().is_terminal() {
                 println!("Will install:");
@@ -154,7 +123,7 @@ pub fn cmd_integrations(action: crate::IntegrationAction) -> Result<()> {
                 }
             }
 
-            let mut report = install_selected(&cfg, &selected, preset);
+            let mut report = install_selected(&cfg, &selected);
             report.warnings.extend(removed_surface_notes);
             let mut prefs = load_preferences();
             prefs
@@ -162,9 +131,6 @@ pub fn cmd_integrations(action: crate::IntegrationAction) -> Result<()> {
                 .retain(|component| !component.is_removed_surface());
             for component in &selected {
                 prefs.enabled.insert(*component);
-            }
-            if preset.is_some() {
-                prefs.statusline_preset = preset;
             }
             let _ = save_preferences(&prefs);
 
@@ -276,7 +242,6 @@ pub fn infer_preferences_from_system(config: &config::BudiConfig) -> Integration
 pub fn install_selected(
     config: &config::BudiConfig,
     selected: &BTreeSet<IntegrationComponent>,
-    statusline_preset: Option<StatuslinePreset>,
 ) -> InstallReport {
     let mut filtered_selected = selected.clone();
     let mut report = InstallReport::default();
@@ -292,9 +257,7 @@ pub fn install_selected(
         || filtered_selected.contains(&IntegrationComponent::ClaudeCodeOtel)
         || filtered_selected.contains(&IntegrationComponent::ClaudeCodeStatusline);
 
-    if uses_claude_settings
-        && let Err(e) = install_claude_settings(config, &filtered_selected, statusline_preset)
-    {
+    if uses_claude_settings && let Err(e) = install_claude_settings(config, &filtered_selected) {
         let yellow = super::ansi("\x1b[33m");
         let reset = super::ansi("\x1b[0m");
         eprintln!("{yellow}  Warning:{reset} Claude Code setup failed: {e}");
@@ -391,13 +354,12 @@ pub fn refresh_enabled_integrations(config: &config::BudiConfig) -> InstallRepor
     if prefs.enabled.is_empty() {
         return InstallReport::default();
     }
-    install_selected(config, &prefs.enabled, prefs.statusline_preset)
+    install_selected(config, &prefs.enabled)
 }
 
 fn install_claude_settings(
     config: &config::BudiConfig,
     selected: &BTreeSet<IntegrationComponent>,
-    statusline_preset: Option<StatuslinePreset>,
 ) -> Result<()> {
     let home = budi_core::config::home_dir()?;
     let settings_path = home.join(super::statusline::CLAUDE_USER_SETTINGS);
@@ -432,16 +394,7 @@ fn install_claude_settings(
                 );
             }
         }
-        if let Some(preset) = statusline_preset {
-            set_statusline_preset(preset)?;
-        } else {
-            // #600: when no preset is passed (the `budi init` path), drop a
-            // template `statusline.toml` so users have a real file to edit.
-            // README docs the file as the source of truth; without seeding
-            // a fresh install has nothing to discover. Idempotent — repeat
-            // installs leave user edits byte-stable.
-            seed_statusline_toml()?;
-        }
+        seed_statusline_toml()?;
     }
 
     if selected.contains(&IntegrationComponent::ClaudeCodeHooks) && apply_cc_hooks(&mut settings) {
@@ -507,8 +460,8 @@ pub(crate) fn apply_statusline(settings: &mut Value) -> Result<StatuslineApply> 
 }
 
 /// Idempotently seed `~/.config/budi/statusline.toml` with the default
-/// `cost` preset and commented examples. Called on the no-preset path
-/// (i.e. `budi init`) so users have a real file to edit.
+/// slot layout and commented examples. Called during `budi init` so
+/// users have a real file to edit.
 ///
 /// Prints a single confirmation line on first generation. Stays quiet
 /// on repeat runs so `budi init` doesn't nag once the user already has
@@ -520,31 +473,12 @@ fn seed_statusline_toml() -> Result<()> {
             let dim = super::ansi("\x1b[90m");
             let reset = super::ansi("\x1b[0m");
             println!(
-                "  Status line: {} {dim}(cost preset — edit to customize){reset}",
+                "  Status line: {} {dim}(edit to customize){reset}",
                 path.display()
             );
         }
         config::SeedStatuslineOutcome::AlreadySet => {}
     }
-    Ok(())
-}
-
-pub fn set_statusline_preset(preset: StatuslinePreset) -> Result<()> {
-    let path = config::statusline_config_path()?;
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("Failed to create {}", parent.display()))?;
-    }
-    let mut sl_cfg = config::load_statusline_config();
-    sl_cfg.preset = Some(preset.as_str().to_string());
-    sl_cfg.format = None;
-    let raw = toml::to_string_pretty(&sl_cfg)?;
-    fs::write(&path, raw).with_context(|| format!("Failed writing {}", path.display()))?;
-    println!(
-        "  Status line: preset set to `{}` in {}",
-        preset.as_str(),
-        path.display()
-    );
     Ok(())
 }
 

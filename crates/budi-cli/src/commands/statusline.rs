@@ -214,47 +214,6 @@ fn render_slots(slots: &[String], values: &HashMap<String, String>, sep: &str) -
     }
 }
 
-/// Session-aware rendering for coach/full presets.
-///
-/// Session view: `📊 budi · $0.03 msg · $1.24 session · {extra}`
-/// Falls back to period view when no session data is available.
-///
-/// `budi_label` is pre-formatted (may include ANSI/OSC 8 for Claude format).
-fn render_coach(
-    data: &Value,
-    extra_slots: &[(&str, &HashMap<String, String>)],
-    ansi: bool,
-    budi_label: &str,
-) -> Option<String> {
-    let _state = data.get("health_state")?.as_str()?;
-
-    let (dim, reset) = if ansi {
-        ("\x1b[90m", "\x1b[0m")
-    } else {
-        ("", "")
-    };
-
-    let session_cost = data.get("session_cost").and_then(|v| v.as_f64())?;
-
-    let mut parts: Vec<String> = vec![format!("📊 {budi_label}")];
-
-    // Last message cost (if available)
-    if let Some(msg_cost) = data.get("last_message_cost").and_then(|v| v.as_f64()) {
-        parts.push(format!("{} msg", fmt_cost(msg_cost)));
-    }
-
-    parts.push(format!("{} session", fmt_cost(session_cost)));
-
-    for (slot_name, values) in extra_slots {
-        if let Some(v) = values.get(*slot_name) {
-            parts.push(format!("{v} {slot_name}"));
-        }
-    }
-
-    let sep = format!(" {dim}·{reset} ");
-    Some(parts.join(&sep))
-}
-
 /// Legacy custom-template tokens whose values silently shifted from calendar
 /// to rolling semantics in 8.2 (ADR-0088 §4). Users with a custom
 /// `statusline.toml` referencing these keep rendering, but the underlying
@@ -471,15 +430,7 @@ pub fn cmd_statusline(format: StatuslineFormat, provider: Option<String>) -> Res
         .unwrap_or_else(|| json!({}));
 
     let values = build_slot_values(&statusline_data);
-    let has_health = statusline_data.get("health_state").is_some();
-
-    // Extra slots for coach rendering (slots beyond session+health, e.g. "today" in "full" preset)
     let effective = sl_config.effective_slots();
-    let extra: Vec<(&str, &HashMap<String, String>)> = effective
-        .iter()
-        .filter(|s| *s != "session" && *s != "health")
-        .map(|s| (s.as_str(), &values))
-        .collect();
 
     let cloud_base = budi_core::config::DEFAULT_CLOUD_ENDPOINT;
     let budi_url = if session_id.is_some() {
@@ -490,31 +441,18 @@ pub fn cmd_statusline(format: StatuslineFormat, provider: Option<String>) -> Res
 
     match format {
         StatuslineFormat::Json => {
-            // #445 item 4: surface integer cents so downstream
-            // consumers (Cursor extension, cloud dashboard, starship
-            // templates) never see 10-digit fractional-cent floats.
             let _ = super::print_json_compact(&statusline_data);
         }
         StatuslineFormat::Custom => {
             if let Some(ref template) = sl_config.format {
                 nudge_legacy_statusline_tokens(template);
                 println!("{}", render_template(template, &values));
-            } else if has_health {
-                let line = render_coach(&statusline_data, &extra, false, "budi")
-                    .unwrap_or_else(|| render_slots(&effective, &values, " · "));
-                println!("{line}");
             } else {
                 println!("{}", render_slots(&effective, &values, " · "));
             }
         }
         StatuslineFormat::Starship => {
-            let line = if has_health {
-                render_coach(&statusline_data, &extra, false, "budi")
-                    .unwrap_or_else(|| render_slots(&effective, &values, " · "))
-            } else {
-                render_slots(&effective, &values, " · ")
-            };
-            println!("{line}");
+            println!("{}", render_slots(&effective, &values, " · "));
         }
         StatuslineFormat::Claude => {
             let budi_link = format!(
@@ -548,17 +486,8 @@ pub fn cmd_statusline(format: StatuslineFormat, provider: Option<String>) -> Res
                 format!("{budi_link} {dim}·{reset} {joined}")
             };
 
-            let body = if has_health {
-                render_coach(&statusline_data, &extra, true, &budi_link)
-                    .unwrap_or_else(|| render_cost_line(&effective))
-            } else {
-                render_cost_line(&effective)
-            };
+            let body = render_cost_line(&effective);
 
-            // #546: prepend Claude-Code-default-equivalent context
-            // (model · short_cwd · branch) so installing
-            // `statusLine.command = "budi statusline"` doesn't
-            // subtract information from the user's prompt footer.
             match render_context_prefix(
                 model_name.as_deref(),
                 short_cwd.as_deref(),
