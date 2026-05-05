@@ -270,6 +270,18 @@ pub fn period_label(period: StatsPeriod) -> String {
     }
 }
 
+pub fn period_key(period: StatsPeriod) -> String {
+    match period {
+        StatsPeriod::Today => "today".to_string(),
+        StatsPeriod::Week => "week".to_string(),
+        StatsPeriod::Month => "month".to_string(),
+        StatsPeriod::All => "all".to_string(),
+        StatsPeriod::Days(n) => format!("{n}d"),
+        StatsPeriod::Weeks(n) => format!("{n}w"),
+        StatsPeriod::Months(n) => format!("{n}m"),
+    }
+}
+
 /// Convert a local NaiveDate at midnight to a UTC RFC3339 string.
 /// This matches the statusline endpoint's date handling so that
 /// CLI and dashboard/statusline produce identical time ranges.
@@ -2300,6 +2312,17 @@ mod tests {
         assert_eq!(period_label(StatsPeriod::Days(7)), "Last 7 days");
         assert_eq!(period_label(StatsPeriod::Weeks(2)), "Last 2 weeks");
         assert_eq!(period_label(StatsPeriod::Months(3)), "Last 3 months");
+    }
+
+    #[test]
+    fn period_key_returns_canonical_cli_form() {
+        assert_eq!(period_key(StatsPeriod::Today), "today");
+        assert_eq!(period_key(StatsPeriod::Week), "week");
+        assert_eq!(period_key(StatsPeriod::Month), "month");
+        assert_eq!(period_key(StatsPeriod::All), "all");
+        assert_eq!(period_key(StatsPeriod::Days(7)), "7d");
+        assert_eq!(period_key(StatsPeriod::Weeks(2)), "2w");
+        assert_eq!(period_key(StatsPeriod::Months(1)), "1m");
     }
 
     #[test]
