@@ -1,5 +1,48 @@
 # Changelog
 
+## 8.3.18 — 2026-05-05
+
+8.3.18 adds first-class `session` and `message` statusline slots, cleans
+up legacy rendering machinery, and fixes two consistency bugs.
+Headline: **statusline slots are now fully composable** — `session` and
+`message` work like any other slot (`1d`, `7d`, `30d`), and the old
+`preset` / `render_coach` codepath with its hard-coded 📊 emoji is gone.
+
+### Added
+
+- **`session` and `message` as first-class statusline slots (#631 / PR #635)** —
+  users can now place `session` and `message` in their `slots` array
+  like any rolling-window slot. `session` shows current-session cost;
+  `message` shows last-message cost. Both read from the daemon response
+  and convert cents → dollars through the standard slot pipeline.
+
+### Changed
+
+- **Remove `preset` / `render_coach` machinery and 📊 emoji (#632 / PR #636)** —
+  the statusline had two rendering paths: normal slots and a special
+  `render_coach()` codepath triggered by `preset = "coach"`. This
+  created dead code, config confusion, and a hard-coded emoji.
+  All presets now expand to regular slot arrays at config load time;
+  `render_coach` and the 📊 prefix are removed.
+
+### Fixed
+
+- **`budi sessions latest --format json` `health_state` consistency (#629 / PR #633)** —
+  the list view (`budi sessions --format json`) emitted `health_state`
+  (a string) while the detail view (`budi sessions latest --format json`)
+  only emitted `health` (an object). The detail view now includes both
+  fields for consistency.
+- **Flaky `e2e_refresh_from_v8_3_14` test under parallel execution (#630 / PR #634)** —
+  the test temporarily overrode the `HOME` environment variable, which
+  raced with other tests sharing the process-wide env. Fix: isolated
+  the HOME override to eliminate the race condition.
+
+### Non-blocking, carried forward
+
+- **Cloud Overview cost / token totals diverge from local CLI** (#10) — presentation-layer aggregation difference, not data loss.
+- **RC-4 Part B** (#504) — Cursor Usage API auth root-cause; Part A shipped with `v8.3.1`.
+- **ADR-0090 supersede** — pending one release cycle of live validation on the now-working `cursorDiskKV` bubbles path before the Usage API §1 surface can be retired.
+
 ## 8.3.17 — 2026-05-05
 
 8.3.17 is a quality-of-life release that fixes five user-facing bugs and
