@@ -161,6 +161,9 @@ fn build_slot_values(data: &Value) -> HashMap<String, String> {
     if let Some(v) = data.get("session_cost").and_then(|v| v.as_f64()) {
         vals.insert("session".to_string(), fmt_cost(v));
     }
+    if let Some(v) = data.get("session_msg_cost").and_then(|v| v.as_f64()) {
+        vals.insert("message".to_string(), fmt_cost(v / 100.0));
+    }
     if let Some(v) = data.get("branch_cost").and_then(|v| v.as_f64()) {
         vals.insert("branch".to_string(), fmt_cost(v));
     }
@@ -405,8 +408,9 @@ pub fn cmd_statusline(format: StatuslineFormat, provider: Option<String>) -> Res
     if let Some(ref p) = effective_provider {
         query_params.push(("provider", p.clone()));
     }
-    let needs_session =
-        needed.contains(&"session".to_string()) || needed.contains(&"health".to_string());
+    let needs_session = needed.contains(&"session".to_string())
+        || needed.contains(&"message".to_string())
+        || needed.contains(&"health".to_string());
     if let Some(ref sid) = session_id
         && needs_session
     {
@@ -885,6 +889,52 @@ mod tests {
         assert_eq!(vals.get("branch").unwrap(), "$12.50");
         assert_eq!(vals.get("provider").unwrap(), "claude_code");
         assert!(!vals.contains_key("session")); // not in response
+    }
+
+    #[test]
+    fn build_slot_values_includes_session_and_message() {
+        let data = json!({
+            "cost_1d": 10.0,
+            "cost_7d": 50.0,
+            "cost_30d": 200.0,
+            "session_cost": 6.23,
+            "session_msg_cost": 8.0,
+        });
+        let vals = build_slot_values(&data);
+        assert_eq!(vals.get("session").unwrap(), "$6.23");
+        assert_eq!(vals.get("message").unwrap(), "$0.08");
+        assert!(!vals.contains_key("health"));
+    }
+
+    #[test]
+    fn build_slot_values_message_absent_without_session_msg_cost() {
+        let data = json!({
+            "cost_1d": 1.0,
+            "cost_7d": 5.0,
+            "cost_30d": 20.0,
+            "session_cost": 1.0,
+        });
+        let vals = build_slot_values(&data);
+        assert!(vals.contains_key("session"));
+        assert!(!vals.contains_key("message"));
+    }
+
+    #[test]
+    fn render_slots_session_and_message() {
+        let mut values = HashMap::new();
+        values.insert("session".to_string(), "$6.23".to_string());
+        values.insert("message".to_string(), "$0.08".to_string());
+        values.insert("1d".to_string(), "$114".to_string());
+
+        let slots = vec![
+            "session".to_string(),
+            "message".to_string(),
+            "1d".to_string(),
+        ];
+        assert_eq!(
+            render_slots(&slots, &values, " · "),
+            "$6.23 session · $0.08 message · $114 1d"
+        );
     }
 
     #[test]
