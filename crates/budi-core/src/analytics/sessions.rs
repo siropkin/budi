@@ -194,11 +194,22 @@ pub fn session_visibility(conn: &Connection) -> Result<Vec<SessionVisibilityWind
 
 pub const CURSOR_LAG_HINT: &str = "Cursor cost data may lag up to ~10 minutes";
 
+/// Length of the short session-id prefix exposed in both the text view
+/// and the `id_short` JSON field. Eight hex characters gives ~4 billion
+/// combinations — unambiguous at the scale Budi targets.
+pub const SHORT_ID_LEN: usize = 8;
+
+fn short_id(id: &str) -> String {
+    id.chars().take(SHORT_ID_LEN).collect()
+}
+
 /// Session list entry for the Sessions page.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SessionListEntry {
     #[serde(alias = "session_id")]
     pub id: String,
+    #[serde(default)]
+    pub id_short: String,
     pub started_at: Option<String>,
     pub ended_at: Option<String>,
     pub duration_ms: Option<i64>,
@@ -577,8 +588,10 @@ pub fn session_list_with_filters(
     let mut stmt = conn.prepare(&sql)?;
     let sessions: Vec<SessionListEntry> = stmt
         .query_map(param_refs.as_slice(), |row| {
+            let id: String = row.get(1)?;
             Ok(SessionListEntry {
-                id: row.get(1)?,
+                id_short: short_id(&id),
+                id,
                 started_at: row.get(2)?,
                 ended_at: row.get(3)?,
                 duration_ms: row.get(4)?,
@@ -742,8 +755,10 @@ pub fn session_detail(conn: &Connection, session_id: &str) -> Result<Option<Sess
          FROM session_agg",
         params![session_id],
         |row| {
+            let id: String = row.get(0)?;
             Ok(SessionListEntry {
-                id: row.get(0)?,
+                id_short: short_id(&id),
+                id,
                 started_at: row.get(1)?,
                 ended_at: row.get(2)?,
                 duration_ms: row.get(3)?,

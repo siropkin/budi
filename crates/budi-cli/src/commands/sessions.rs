@@ -29,13 +29,7 @@ struct SessionsEnvelope {
 /// terminal alongside repo + cost columns.
 const MODEL_COL_WIDTH: usize = 28;
 
-/// Short-UUID prefix length rendered by `budi sessions` by default
-/// (#445). `--full-uuid` surfaces the 36-char identifier for scripting
-/// and for `budi sessions <id>` lookup. Eight hex chars is long enough
-/// to remain unambiguous at the < 1M session scale Budi is designed
-/// around; the fresh-user smoke pass showed 36 chars dominating the
-/// visible row width.
-const SHORT_UUID_LEN: usize = 8;
+use budi_core::analytics::SHORT_ID_LEN;
 
 pub fn cmd_sessions(
     period: StatsPeriod,
@@ -476,7 +470,7 @@ fn render_session_id(id: &str, full_uuid: bool) -> String {
     if full_uuid {
         return id.to_string();
     }
-    id.chars().take(SHORT_UUID_LEN).collect()
+    id.chars().take(SHORT_ID_LEN).collect::<String>()
 }
 
 /// Truncate `s` to at most `max` characters (not bytes), appending an
@@ -511,7 +505,7 @@ mod tests {
         let id = "1d027675-4ad0-43b2-b396-88b6ee28f7ba";
         let rendered = render_session_id(id, false);
         assert_eq!(rendered, "1d027675");
-        assert_eq!(rendered.len(), SHORT_UUID_LEN);
+        assert_eq!(rendered.len(), SHORT_ID_LEN);
     }
 
     #[test]
@@ -529,7 +523,7 @@ mod tests {
         let id = "café-1234-5678-abcd";
         let rendered = render_session_id(id, false);
         // Eight chars — `c`, `a`, `f`, `é`, `-`, `1`, `2`, `3`.
-        assert_eq!(rendered.chars().count(), SHORT_UUID_LEN);
+        assert_eq!(rendered.chars().count(), SHORT_ID_LEN);
     }
 
     #[test]
