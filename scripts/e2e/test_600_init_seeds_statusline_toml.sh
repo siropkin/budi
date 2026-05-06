@@ -63,8 +63,8 @@ fi
 echo "[e2e] OK: scenario 1 — statusline.toml not seeded without ~/.claude"
 
 # Scenario 2: ~/.claude present, no prior config — init must seed
-# `~/.config/budi/statusline.toml` with the cost preset template and
-# the discoverability comments for `coach` / `full` / custom format.
+# `~/.config/budi/statusline.toml` with the default slot layout and
+# the discoverability comments for example slot combos / custom format.
 echo "[e2e] scenario 2: ~/.claude present — init seeds statusline.toml"
 rm -rf "$HOME/.config"
 mkdir -p "$HOME/.claude"
@@ -85,9 +85,12 @@ if ! grep -qE '^slots = \["1d", "7d", "30d"\]$' "$STATUSLINE_TOML"; then
   cat "$STATUSLINE_TOML" >&2
   exit 1
 fi
-# Pin the discoverability comments so users hunting for `coach` / `full`
-# can find them in the same place the README points at.
-for marker in 'preset = "coach"' 'preset = "full"' 'format = ' 'Available slots:'; do
+# Pin the discoverability comments so users hunting for example slot
+# combos and the custom `format =` template can find them in the same
+# place the README points at. The legacy `preset = "coach" / "full"`
+# markers were removed when the `preset` machinery was retired in
+# 8.3.18 (#632) and the vestigial `health` slot was dropped (#640).
+for marker in '# slots = ["session", "message"]' '# slots = ["session", "message", "1d"]' 'format = ' 'Available slots:'; do
   if ! grep -qF "$marker" "$STATUSLINE_TOML"; then
     echo "[e2e] FAIL: $STATUSLINE_TOML missing marker: $marker" >&2
     cat "$STATUSLINE_TOML" >&2
@@ -102,8 +105,8 @@ if ! grep -qF "$STATUSLINE_TOML" "$TMPDIR_ROOT/init-2.log"; then
   cat "$TMPDIR_ROOT/init-2.log" >&2
   exit 1
 fi
-if ! grep -qF "cost preset — edit to customize" "$TMPDIR_ROOT/init-2.log"; then
-  echo "[e2e] FAIL: init did not print the (cost preset — edit to customize) hint" >&2
+if ! grep -qF "(edit to customize)" "$TMPDIR_ROOT/init-2.log"; then
+  echo "[e2e] FAIL: init did not print the ((edit to customize)) hint" >&2
   cat "$TMPDIR_ROOT/init-2.log" >&2
   exit 1
 fi
@@ -132,7 +135,7 @@ if [[ "$SHA_BEFORE" != "$SHA_AFTER" ]]; then
 fi
 # The confirmation line should *not* fire on the repeat run — that
 # would nag the user every `budi init` after the first.
-if grep -qF "cost preset — edit to customize" "$TMPDIR_ROOT/init-2b.log"; then
+if grep -qF "(edit to customize)" "$TMPDIR_ROOT/init-2b.log"; then
   echo "[e2e] FAIL: repeat init re-printed the seeding hint" >&2
   cat "$TMPDIR_ROOT/init-2b.log" >&2
   exit 1
