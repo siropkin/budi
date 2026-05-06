@@ -224,7 +224,7 @@ fn print_statusline_discoverability_hint() {
     let reset = super::ansi("\x1b[0m");
     println!("  Status line: cost preset {dim}(rolling 1d / 7d / 30d){reset}");
     println!(
-        "    Customize: ~/.config/budi/statusline.toml {dim}— try `budi integrations install --statusline-preset coach` for live session vitals{reset}"
+        "    Customize: ~/.config/budi/statusline.toml {dim}— edit `slots = [...]` to add session / message / branch / project / provider{reset}"
     );
 }
 
