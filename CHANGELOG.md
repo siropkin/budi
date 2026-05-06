@@ -1,5 +1,65 @@
 # Changelog
 
+## 8.3.19 — 2026-05-05
+
+8.3.19 is a quality-of-life release that improves statusline ergonomics
+outside the Claude Code stdin envelope, lights up per-session model
+attribution on the cloud sync envelope, and finishes the 8.3.18 doc /
+slot-removal cleanup.
+
+### Added
+
+- **`budi statusline --slots <list>` flag and auto-resolve current session (#639 / PR #643)** —
+  `--slots` overrides `~/.config/budi/statusline.toml` for a single
+  invocation (comma-separated, with `today/week/month` normalized to
+  `1d/7d/30d`). When `session` or `message` slots are required but
+  stdin didn't carry a `session_id` (manual TTY invocation, custom
+  drivers, non–Claude-Code agents), the renderer falls back to the
+  daemon's `/analytics/sessions/resolve?token=current` endpoint scoped
+  to cwd, so the coach and full presets stop silently dropping back to
+  rolling-window slots outside the Claude Code stdin envelope. Errors
+  on the resolve path are swallowed so the prompt-hot path keeps
+  rendering.
+- **Per-session `primary_model` on the cloud-sync envelope (#638 / PR #642)** —
+  `SessionSummaryRecord` now carries an optional `primary_model` field,
+  defined as the model that consumed the largest share of
+  `input + output` tokens for the session, with ties broken by
+  latest-used. Field is omitted (not empty-string) when the session has
+  zero scored messages so the cloud column stays NULL rather than
+  guessing. ADR-0083 §2 updated to match.
+
+### Changed
+
+- **Docs / config audit pass for 8.3.18 statusline changes (#640 / PR #644)** —
+  `SOUL.md`, `CHANGELOG.md`, `crates/budi-core/src/config.rs`, and
+  `docs/statusline-contract.md` updated to reflect the current slot
+  vocabulary (`1d`, `7d`, `30d`, `session`, `message`, `branch`,
+  `project`, `provider`), the `health` slot removal, and the
+  legacy-`coach`/`full` preset migration. Removed a stale reference to
+  the retired `STATUSLINE_PRESETS` constant and a `{health}` placeholder
+  from the `StatuslineConfig::format` docstring.
+
+### Fixed
+
+- **Stale `health` slot / preset references missed in 8.3.18 (#641 / PR #645)** —
+  follow-up audit on the 8.3.18 statusline changes turned up three
+  real stragglers: `crates/budi-cli/src/commands/init.rs:227` still
+  hinted at the removed `--statusline-preset coach` flag,
+  `scripts/e2e/test_600_init_seeds_statusline_toml.sh` pinned
+  `preset = "coach"` / `preset = "full"` markers and a confirmation
+  grep that no longer matched the current template, and `SOUL.md:518`
+  claimed the `coach` preset still rendered "health icon + session
+  cost + tip". All three updated; the e2e test now passes (was failing
+  on master). Daemon `health_state` / `health_tip` fields are kept on
+  purpose — they are part of the documented 8.x statusline contract
+  and consumed by the Cursor extension.
+
+### Non-blocking, carried forward
+
+- **Cloud Overview cost / token totals diverge from local CLI** (#10) — presentation-layer aggregation difference, not data loss.
+- **RC-4 Part B** (#504) — Cursor Usage API auth root-cause; Part A shipped with `v8.3.1`.
+- **ADR-0090 supersede** — pending one release cycle of live validation on the now-working `cursorDiskKV` bubbles path before the Usage API §1 surface can be retired.
+
 ## 8.3.18 — 2026-05-05
 
 8.3.18 adds first-class `session` and `message` statusline slots, cleans
