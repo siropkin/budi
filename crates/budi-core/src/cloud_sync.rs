@@ -90,6 +90,12 @@ pub struct SessionSummaryRecord {
     pub total_input_tokens: i64,
     pub total_output_tokens: i64,
     pub total_cost_cents: f64,
+    /// Model that consumed the largest share of `input + output` tokens for
+    /// the session, ties broken by latest-used (#638). Omitted when the
+    /// session has zero scored messages — the cloud column is nullable for
+    /// exactly that case (budi-cloud#140).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub primary_model: Option<String>,
 }
 
 /// Server response from `POST /v1/ingest` (ADR-0083 §5).
@@ -426,13 +432,20 @@ pub fn fetch_session_summaries(
     conn: &Connection,
     since: Option<&str>,
 ) -> Result<Vec<SessionSummaryRecord>> {
+    // #638: `pm` picks the per-session "primary" model — argmax over
+    // `input + output` tokens with latest-message-timestamp as the tie
+    // breaker, matching the contract locked in budi-cloud#140. Window
+    // function over the same per-(session, model) aggregation, restricted
+    // to scored assistant rows so sessions whose only model rows are NULL
+    // fall through to `primary_model = NULL`.
     let query = if since.is_some() {
         "SELECT s.id, s.provider, s.started_at, s.ended_at, s.duration_ms,
                 s.repo_id, s.git_branch,
                 COALESCE(m.msg_count, 0),
                 COALESCE(m.total_input, 0),
                 COALESCE(m.total_output, 0),
-                COALESCE(m.total_cost, 0.0)
+                COALESCE(m.total_cost, 0.0),
+                pm.model
          FROM sessions s
          LEFT JOIN (
              SELECT session_id,
@@ -444,6 +457,23 @@ pub fn fetch_session_summaries(
              WHERE role = 'assistant'
              GROUP BY session_id
          ) m ON m.session_id = s.id
+         LEFT JOIN (
+             SELECT session_id, model
+             FROM (
+                 SELECT session_id, model,
+                        SUM(input_tokens + output_tokens) as model_tokens,
+                        MAX(timestamp) as last_ts,
+                        ROW_NUMBER() OVER (
+                            PARTITION BY session_id
+                            ORDER BY SUM(input_tokens + output_tokens) DESC,
+                                     MAX(timestamp) DESC
+                        ) as rn
+                 FROM messages
+                 WHERE role = 'assistant' AND model IS NOT NULL
+                 GROUP BY session_id, model
+             ) ranked
+             WHERE rn = 1
+         ) pm ON pm.session_id = s.id
          WHERE s.started_at > ?1 OR s.ended_at > ?1
             OR (s.ended_at IS NULL AND s.started_at IS NOT NULL)
          ORDER BY s.started_at"
@@ -453,7 +483,8 @@ pub fn fetch_session_summaries(
                 COALESCE(m.msg_count, 0),
                 COALESCE(m.total_input, 0),
                 COALESCE(m.total_output, 0),
-                COALESCE(m.total_cost, 0.0)
+                COALESCE(m.total_cost, 0.0),
+                pm.model
          FROM sessions s
          LEFT JOIN (
              SELECT session_id,
@@ -465,6 +496,23 @@ pub fn fetch_session_summaries(
              WHERE role = 'assistant'
              GROUP BY session_id
          ) m ON m.session_id = s.id
+         LEFT JOIN (
+             SELECT session_id, model
+             FROM (
+                 SELECT session_id, model,
+                        SUM(input_tokens + output_tokens) as model_tokens,
+                        MAX(timestamp) as last_ts,
+                        ROW_NUMBER() OVER (
+                            PARTITION BY session_id
+                            ORDER BY SUM(input_tokens + output_tokens) DESC,
+                                     MAX(timestamp) DESC
+                        ) as rn
+                 FROM messages
+                 WHERE role = 'assistant' AND model IS NOT NULL
+                 GROUP BY session_id, model
+             ) ranked
+             WHERE rn = 1
+         ) pm ON pm.session_id = s.id
          WHERE s.started_at IS NOT NULL
          ORDER BY s.started_at"
     };
@@ -503,6 +551,7 @@ fn map_session_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionSummaryRe
         total_input_tokens: row.get(8)?,
         total_output_tokens: row.get(9)?,
         total_cost_cents: row.get(10)?,
+        primary_model: row.get(11)?,
     })
 }
 
@@ -1179,6 +1228,143 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    // #638: helper for the primary_model tests below — seeds a session
+    // and a configurable batch of assistant messages.
+    fn seed_session_with_messages(
+        conn: &Connection,
+        session_id: &str,
+        rows: &[(&str, Option<&str>, &str, i64, i64)],
+    ) {
+        conn.execute(
+            "INSERT INTO sessions (id, provider, started_at, ended_at, duration_ms, repo_id, git_branch)
+             VALUES (?1, 'claude_code', '2026-04-10T09:00:00Z', '2026-04-10T10:00:00Z', 3600000,
+                     'sha256:pm', 'main')",
+            params![session_id],
+        )
+        .unwrap();
+        for (msg_id, model, ts, input, output) in rows {
+            conn.execute(
+                "INSERT INTO messages (id, session_id, role, timestamp, model, provider, repo_id, git_branch,
+                                       input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens, cost_cents)
+                 VALUES (?1, ?2, 'assistant', ?3, ?4, 'anthropic', 'sha256:pm', 'main', ?5, ?6, 0, 0, 0.1)",
+                params![msg_id, session_id, ts, model, input, output],
+            )
+            .unwrap();
+        }
+    }
+
+    /// #638: argmax over `input + output` tokens picks the high-token
+    /// model even when it has fewer messages.
+    #[test]
+    fn primary_model_picks_argmax_by_tokens() {
+        let dir = std::env::temp_dir().join("budi-cloud-sync-pm-argmax");
+        std::fs::create_dir_all(&dir).ok();
+        let db_path = dir.join("test.db");
+        let _ = std::fs::remove_file(&db_path);
+
+        let conn = crate::analytics::open_db_with_migration(&db_path).unwrap();
+        // One Opus message (10k tokens) outweighs ten Haiku messages (100 tokens each).
+        let mut rows: Vec<(&str, Option<&str>, &str, i64, i64)> = vec![(
+            "opus-1",
+            Some("claude-opus-4-7"),
+            "2026-04-10T09:30:00Z",
+            5_000,
+            5_000,
+        )];
+        let haiku_ids: Vec<String> = (0..10).map(|i| format!("haiku-{i}")).collect();
+        for id in &haiku_ids {
+            rows.push((
+                id.as_str(),
+                Some("claude-haiku-4-5"),
+                "2026-04-10T09:45:00Z",
+                50,
+                50,
+            ));
+        }
+        seed_session_with_messages(&conn, "sess-pm-argmax", &rows);
+
+        let summaries = fetch_session_summaries(&conn, None).unwrap();
+        let s = summaries
+            .iter()
+            .find(|s| s.session_id == "sess-pm-argmax")
+            .expect("session present");
+        assert_eq!(s.primary_model.as_deref(), Some("claude-opus-4-7"));
+    }
+
+    /// #638: when two models tie on token count, the model with the
+    /// latest message timestamp wins.
+    #[test]
+    fn primary_model_tie_broken_by_latest_used() {
+        let dir = std::env::temp_dir().join("budi-cloud-sync-pm-tie");
+        std::fs::create_dir_all(&dir).ok();
+        let db_path = dir.join("test.db");
+        let _ = std::fs::remove_file(&db_path);
+
+        let conn = crate::analytics::open_db_with_migration(&db_path).unwrap();
+        // Opus and Sonnet each consume exactly 1000 tokens; Sonnet's
+        // latest message lands later, so Sonnet must win.
+        seed_session_with_messages(
+            &conn,
+            "sess-pm-tie",
+            &[
+                (
+                    "opus-1",
+                    Some("claude-opus-4-7"),
+                    "2026-04-10T09:10:00Z",
+                    500,
+                    500,
+                ),
+                (
+                    "sonnet-1",
+                    Some("claude-sonnet-4-6"),
+                    "2026-04-10T09:50:00Z",
+                    500,
+                    500,
+                ),
+            ],
+        );
+
+        let summaries = fetch_session_summaries(&conn, None).unwrap();
+        let s = summaries
+            .iter()
+            .find(|s| s.session_id == "sess-pm-tie")
+            .expect("session present");
+        assert_eq!(s.primary_model.as_deref(), Some("claude-sonnet-4-6"));
+    }
+
+    /// #638: a session with zero scored messages must omit `primary_model`
+    /// entirely — the cloud column is nullable for exactly this case, and
+    /// the daemon must not guess.
+    #[test]
+    fn primary_model_omitted_for_session_without_scored_messages() {
+        let dir = std::env::temp_dir().join("budi-cloud-sync-pm-empty");
+        std::fs::create_dir_all(&dir).ok();
+        let db_path = dir.join("test.db");
+        let _ = std::fs::remove_file(&db_path);
+
+        let conn = crate::analytics::open_db_with_migration(&db_path).unwrap();
+        conn.execute(
+            "INSERT INTO sessions (id, provider, started_at, ended_at, duration_ms, repo_id, git_branch)
+             VALUES ('sess-pm-empty', 'claude_code', '2026-04-10T09:00:00Z', '2026-04-10T10:00:00Z', 3600000,
+                     'sha256:pm', 'main')",
+            [],
+        )
+        .unwrap();
+
+        let summaries = fetch_session_summaries(&conn, None).unwrap();
+        let s = summaries
+            .iter()
+            .find(|s| s.session_id == "sess-pm-empty")
+            .expect("session present");
+        assert!(s.primary_model.is_none());
+
+        // Serialization must drop the field entirely so the cloud row stays NULL.
+        let json = serde_json::to_value(s).unwrap();
+        assert!(json.get("primary_model").is_none());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn build_envelope_requires_config() {
         let dir = std::env::temp_dir().join("budi-cloud-sync-test-envelope");
@@ -1581,6 +1767,7 @@ mod tests {
             total_input_tokens: 10,
             total_output_tokens: 20,
             total_cost_cents: 0.1,
+            primary_model: None,
         }
     }
 

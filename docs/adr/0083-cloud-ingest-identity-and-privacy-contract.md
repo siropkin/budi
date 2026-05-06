@@ -138,11 +138,19 @@ A scrubbed per-session summary (no content, no paths):
   "message_count": 47,
   "total_input_tokens": 125000,
   "total_output_tokens": 89000,
-  "total_cost_cents": 3.42
+  "total_cost_cents": 3.42,
+  "primary_model": "claude-sonnet-4-20250514"
 }
 ```
 
 Session summaries are derived by aggregating messages per session. They include only computed totals, never per-message detail.
+
+`primary_model` is optional (8.3.19, #638). It records the model that
+consumed the largest share of `input + output` tokens for the session,
+with ties broken by the latest message timestamp. Sessions with zero
+scored messages omit the field entirely so the cloud column stays
+`NULL` rather than being guessed (paired with budi-cloud#140's
+`session_summaries.main_model` column).
 
 ### 3. Identity Model
 
