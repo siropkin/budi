@@ -8,6 +8,8 @@
 
 > **Amended by [ADR-0089](./0089-reverse-proxy-first-jsonl-tailing-as-sole-live-path.md) (2026-04-17).** §2's table row naming the proxy as "Sole live ingestion path (ADR-0082)" is replaced: in 8.2+, the tailer is the sole live ingestion path (ADR-0089); it filesystem-watches agent transcripts and there is no proxy. §5's language about "rule-based activity/ticket/branch/file/outcome signals inside the proxy + pipeline" is replaced with "inside the pipeline, over JSONL tailed from agent transcripts." The rest of this ADR — persona priority (§1), local vs cloud boundary (§2 remainder), round order (§3), statusline contract (§4), classification intent (§5 intent), cloud scope for 8.1 (§6), and deprecation policy (§7) — stands as written. The 8.1 surfaces referenced here all shipped against the proxy path because 8.1 predates the pivot; 8.2 R1/R2 execute the reversal.
 
+> **Amended by [#648](https://github.com/siropkin/budi/issues/648) (2026-05-06).** §7 originally read as "no surface ever blends multiple providers." That rule was written when Cursor was the only host extension and the active provider was unambiguous. With VS Code coverage in 8.4, a single editor window can run Copilot Chat, Continue, and Cline simultaneously, and showing only one is misleading. §7 is amended to introduce a **host-scoped vs. provider-scoped** distinction: provider-scoped surfaces (cloud dashboard, per-provider drill-downs, the Claude Code statusline) keep the no-blending rule; host-scoped surfaces (the VS Code/Cursor extension status bar) may aggregate over the providers detected in that host, with a tooltip listing contributing providers and click-through routing to a single provider's view. Cloud dashboard behavior does not change. The amendment exists to unblock R1.3 ([#650](https://github.com/siropkin/budi/issues/650), multi-provider statusline endpoint) and R1.4 ([#651](https://github.com/siropkin/budi/issues/651), Copilot Chat provider). §4 is unchanged: the default Claude Code statusline remains provider-scoped and quiet.
+
 ## Context
 
 ADR-0081 locked the 8.0 product contract — proxy-first ingestion, a clear split between `budi-core` / `budi-cursor` / `budi-cloud`, and the first stable release. ADR-0086 locked the repo extraction boundaries, and ADR-0083 / ADR-0087 locked cloud identity, privacy, and deployment.
@@ -128,15 +130,41 @@ Classification should improve through **simple, explainable, local-first methods
 - **Onboarding (#228):** Scope is strictly local: install / init / doctor / first-run success. The cross-surface local→cloud linking UX is **not** part of #228 — it is owned by #235 in R3. This split is intentional: keep R2 about "does Budi feel good on one machine?" and keep R3 about "does Budi feel good across machine and cloud?".
 - **Statusline (#224):** See §4. Default stays quiet, provider-scoped, `1d` / `7d` / `30d`.
 
-### 7. Surface alignment rules for R3
+### 7. Surface alignment rules for R3 (amended for 8.4)
 
-- **Cloud dashboard (#235):** Adopts the same `1d` / `7d` / `30d` window contract as local. Owns the local→cloud linking flow end-to-end:
+**Host-scoped vs. provider-scoped surfaces.** Every user-visible surface in 8.x is one of:
+
+- **Provider-scoped** — shows usage for exactly one provider. No blending or aggregation across providers, regardless of how many providers ran on the same host. Cloud dashboard, per-provider drill-downs, and the Claude Code statusline are provider-scoped.
+- **Host-scoped** — represents the developer's view inside a specific editor host (VS Code, Cursor). May aggregate over the providers detected in that host. The tooltip lists the contributing providers; click-through still routes to a single provider's dashboard view (the "active" one in the 1d window).
+
+The 8.1 rule "no surface ever blends multiple providers" applies only to provider-scoped surfaces. The host-scoped carve-out (added in 8.4) exists because a VS Code user routinely runs Copilot Chat, Continue, and Cline simultaneously in one editor window and needs an honest "what is this editor costing me today?" roll-up. Cursor was originally single-provider, so the distinction was invisible in 8.1; in 8.4 it becomes explicit so VS Code and Cursor share one host-scoped contract instead of two near-identical surfaces.
+
+**Example matrix of shipped surfaces (8.x):**
+
+| Surface | Scope | Notes |
+|---------|-------|-------|
+| Claude Code statusline (default) | provider-scoped | Claude Code usage only. Quiet default per §4. |
+| `budi statusline --format json` (single `?provider=`) | provider-scoped | Single-provider response. |
+| `budi statusline --format json` with `?provider=a,b,c` (R1.3, [#650](https://github.com/siropkin/budi/issues/650)) | host-scoped | Aggregated response across the listed providers; per-provider breakdown included for click-through. |
+| Cursor extension status bar (#232) | host-scoped | Cursor host has one provider (`cursor.com`) today, so it renders as single-provider, but the contract is host-scoped and ready for additional providers. |
+| VS Code extension status bar (8.4) | host-scoped | Aggregates over detected providers via the multi-provider statusline endpoint. Copilot Chat (R1.4, [#651](https://github.com/siropkin/budi/issues/651)) is the first; Continue, Cline, etc. plug into the same shape in 9.0. |
+| Cloud dashboard (#235) | provider-scoped | Unchanged by this amendment. No blended provider totals. |
+| Per-provider drill-down views | provider-scoped | Unchanged. |
+| `budi stats`, `budi sessions`, etc. | provider-scoped | CLI dimensions stay filtered/grouped by provider. |
+
+**Cloud dashboard (#235):** Adopts the same `1d` / `7d` / `30d` window contract as local. Owns the local→cloud linking flow end-to-end:
   - Discoverable linking after signup (not a multi-step hunt through settings).
   - Auto initial sync on successful link (a freshly linked account is never indistinguishable from a broken one).
   - Sync freshness indicator in the dashboard UI.
   - Empty-vs-stalled differentiation (initial sync in progress vs no data yet vs sync error).
-- **Cursor extension (#232):** Consumes the shared provider-scoped status contract from §4. Cursor surfaces show Cursor usage only — they do not blend multi-provider totals.
-- **Broader AI coding tool coverage is NOT 8.1 scope.** Do not add Gemini CLI, Windsurf, Cline, Aider, Roo Code, or Continue in 8.1. These are 8.2 scope under #294 (#161, #295).
+
+The cloud dashboard remains provider-scoped under this amendment. Aggregated multi-provider dashboard tiles are explicitly out of scope for 8.4 (see [#647](https://github.com/siropkin/budi/issues/647) "out of scope").
+
+**Cursor extension (#232):** Host-scoped. Consumes the multi-provider statusline endpoint (R1.3, [#650](https://github.com/siropkin/budi/issues/650)) so the same code path serves Cursor and VS Code. Today only `cursor.com` is detected in the Cursor host, so the rendered total equals that single provider's total; no migration in user-visible behavior.
+
+**VS Code extension (8.4):** Host-scoped. Aggregates over all providers detected inside the VS Code host via the multi-provider statusline endpoint (R1.3, [#650](https://github.com/siropkin/budi/issues/650)). Copilot Chat (R1.4, [#651](https://github.com/siropkin/budi/issues/651)) is the first plug-in provider; doctor coverage for installed VS Code AI extensions is R1.6 ([#653](https://github.com/siropkin/budi/issues/653)).
+
+**Broader AI coding tool coverage is NOT 8.1 scope.** Do not add Gemini CLI, Windsurf, Cline, Aider, Roo Code, or Continue in 8.1. The same deferral now applies to 8.4 except for Copilot Chat, which is the single non-Cursor provider in 8.4 (re-scoped from 8.2 per [#647](https://github.com/siropkin/budi/issues/647)). The remaining providers are 9.0 scope under #295.
 
 ### 8. Explicit deferrals
 
