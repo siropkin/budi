@@ -49,7 +49,13 @@ pub const DEFAULT_DAEMON_HOST: &str = "127.0.0.1";
 pub const DEFAULT_DAEMON_PORT: u16 = 7878;
 
 /// Known agent identifiers used in `agents.toml`.
-pub const KNOWN_AGENTS: &[&str] = &["claude-code", "codex-cli", "cursor", "copilot-cli"];
+pub const KNOWN_AGENTS: &[&str] = &[
+    "claude-code",
+    "codex-cli",
+    "cursor",
+    "copilot-cli",
+    "copilot-chat",
+];
 
 /// Per-agent enablement entry.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -72,6 +78,8 @@ pub struct AgentsConfig {
     pub cursor: AgentEntry,
     #[serde(rename = "copilot-cli")]
     pub copilot_cli: AgentEntry,
+    #[serde(rename = "copilot-chat")]
+    pub copilot_chat: AgentEntry,
 }
 
 impl AgentsConfig {
@@ -81,6 +89,7 @@ impl AgentsConfig {
             "codex" | "codex_cli" => self.codex_cli.enabled,
             "cursor" => self.cursor.enabled,
             "copilot_cli" => self.copilot_cli.enabled,
+            "copilot_chat" => self.copilot_chat.enabled,
             _ => false,
         }
     }
@@ -92,6 +101,7 @@ impl AgentsConfig {
             codex_cli: AgentEntry { enabled: true },
             cursor: AgentEntry { enabled: true },
             copilot_cli: AgentEntry { enabled: true },
+            copilot_chat: AgentEntry { enabled: true },
         }
     }
 
@@ -102,6 +112,7 @@ impl AgentsConfig {
             "codex-cli" => "Codex CLI",
             "cursor" => "Cursor",
             "copilot-cli" => "Copilot CLI",
+            "copilot-chat" => "Copilot Chat",
             _ => "Unknown",
         }
     }
@@ -1110,11 +1121,13 @@ format = "{1d} | {7d} | {branch}"
         assert!(!config.codex_cli.enabled);
         assert!(!config.cursor.enabled);
         assert!(!config.copilot_cli.enabled);
+        assert!(!config.copilot_chat.enabled);
         assert!(!config.is_agent_enabled("claude_code"));
         assert!(!config.is_agent_enabled("codex"));
         assert!(!config.is_agent_enabled("codex_cli"));
         assert!(!config.is_agent_enabled("cursor"));
         assert!(!config.is_agent_enabled("copilot_cli"));
+        assert!(!config.is_agent_enabled("copilot_chat"));
     }
 
     #[test]
@@ -1125,6 +1138,7 @@ format = "{1d} | {7d} | {branch}"
         assert!(config.is_agent_enabled("codex_cli"));
         assert!(config.is_agent_enabled("cursor"));
         assert!(config.is_agent_enabled("copilot_cli"));
+        assert!(config.is_agent_enabled("copilot_chat"));
     }
 
     #[test]
@@ -1140,6 +1154,7 @@ format = "{1d} | {7d} | {branch}"
             codex_cli: AgentEntry { enabled: true },
             cursor: AgentEntry { enabled: false },
             copilot_cli: AgentEntry { enabled: false },
+            copilot_chat: AgentEntry { enabled: false },
         };
         let raw = toml::to_string_pretty(&config).unwrap();
         assert!(raw.contains("[claude-code]"));

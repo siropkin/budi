@@ -135,6 +135,7 @@ pub fn all_providers() -> Vec<Box<dyn Provider>> {
         Box::new(crate::providers::claude_code::ClaudeCodeProvider),
         Box::new(crate::providers::codex::CodexProvider),
         Box::new(crate::providers::copilot::CopilotProvider),
+        Box::new(crate::providers::copilot_chat::CopilotChatProvider),
         Box::new(crate::providers::cursor::CursorProvider),
     ]
 }
