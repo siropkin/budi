@@ -1191,7 +1191,7 @@ fn statusline_stats_with_provider_filter_scopes_all_numeric_fields() {
         since_7d,
         since_30d,
         &StatuslineParams {
-            provider: Some("claude_code".to_string()),
+            provider: vec!["claude_code".to_string()],
             session_id: Some("claude-sess".to_string()),
             branch: Some("main".to_string()),
             project_dir: Some("/proj/a".to_string()),
@@ -1200,6 +1200,7 @@ fn statusline_stats_with_provider_filter_scopes_all_numeric_fields() {
     )
     .unwrap();
     assert_eq!(claude.provider_scope.as_deref(), Some("claude_code"));
+    assert!(claude.contributing_providers.is_empty());
     assert_eq!(claude.cost_1d, 5.0);
     assert_eq!(claude.cost_7d, 5.0);
     assert_eq!(claude.cost_30d, 5.0);
@@ -1214,7 +1215,7 @@ fn statusline_stats_with_provider_filter_scopes_all_numeric_fields() {
         since_7d,
         since_30d,
         &StatuslineParams {
-            provider: Some("cursor".to_string()),
+            provider: vec!["cursor".to_string()],
             branch: Some("main".to_string()),
             project_dir: Some("/proj/a".to_string()),
             ..Default::default()
@@ -1225,6 +1226,213 @@ fn statusline_stats_with_provider_filter_scopes_all_numeric_fields() {
     assert_eq!(cursor.branch_cost, Some(7.0));
     assert_eq!(cursor.project_cost, Some(7.0));
     assert_eq!(cursor.active_provider.as_deref(), Some("cursor"));
+    assert!(cursor.contributing_providers.is_empty());
+}
+
+/// R1.3 (#650): the statusline endpoint accepts a comma-separated provider
+/// list and aggregates the result for host-scoped surfaces (the VS Code /
+/// Cursor extension status bar). Provider-scoped surfaces (single
+/// `?provider=`) keep their byte-identical 8.1 contract; multi-provider
+/// requests sum across the listed providers and advertise their scope via
+/// `contributing_providers`.
+#[test]
+fn statusline_stats_aggregates_across_multiple_providers() {
+    let mut conn = test_db();
+
+    let mk = |uuid: &str, session: &str, provider: &str, cost_cents: f64, ts: &str| ParsedMessage {
+        uuid: uuid.to_string(),
+        session_id: Some(session.to_string()),
+        timestamp: ts.parse().unwrap(),
+        cwd: Some("/proj/a".to_string()),
+        role: "assistant".to_string(),
+        model: Some("m".to_string()),
+        input_tokens: 100,
+        output_tokens: 50,
+        cache_creation_tokens: 0,
+        cache_read_tokens: 0,
+        git_branch: Some("main".to_string()),
+        repo_id: Some("repo-1".to_string()),
+        provider: provider.to_string(),
+        cost_cents: Some(cost_cents),
+        session_title: None,
+        parent_uuid: None,
+        user_name: None,
+        machine_name: None,
+        cost_confidence: "exact".to_string(),
+        pricing_source: None,
+        request_id: None,
+        speed: None,
+        cache_creation_1h_tokens: 0,
+        web_search_requests: 0,
+        prompt_category: None,
+        prompt_category_source: None,
+        prompt_category_confidence: None,
+        tool_names: Vec::new(),
+        tool_use_ids: Vec::new(),
+        tool_files: Vec::new(),
+        tool_outcomes: Vec::new(),
+    };
+
+    let msgs = vec![
+        mk("cur-1", "cur-sess", "cursor", 300.0, "2026-04-15T09:00:00Z"),
+        mk(
+            "cop-1",
+            "cop-sess",
+            "copilot_chat",
+            500.0,
+            "2026-04-15T11:00:00Z",
+        ),
+        mk(
+            "cc-1",
+            "cc-sess",
+            "claude_code",
+            900.0,
+            "2026-04-15T11:30:00Z",
+        ),
+    ];
+    ingest_messages(&mut conn, &msgs, None).unwrap();
+
+    let since_1d = "2026-04-15T00:00:00Z";
+    let since_7d = "2026-04-10T00:00:00Z";
+    let since_30d = "2026-03-20T00:00:00Z";
+
+    // Single-provider (backward-compatible): same shape, single value.
+    let single = statusline_stats(
+        &conn,
+        since_1d,
+        since_7d,
+        since_30d,
+        &StatuslineParams {
+            provider: vec!["cursor".to_string()],
+            branch: Some("main".to_string()),
+            project_dir: Some("/proj/a".to_string()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(single.cost_1d, 3.0);
+    assert_eq!(single.provider_scope.as_deref(), Some("cursor"));
+    assert!(
+        single.contributing_providers.is_empty(),
+        "single-provider responses must omit contributing_providers to keep the 8.1 byte shape"
+    );
+    assert_eq!(single.active_provider.as_deref(), Some("cursor"));
+    assert!(
+        single.cost_lag_hint.is_some(),
+        "cursor in filter → lag hint"
+    );
+
+    // Multi-provider: sums cursor + copilot_chat = 800c = $8.0; excludes
+    // claude_code which is not in the filter.
+    let multi = statusline_stats(
+        &conn,
+        since_1d,
+        since_7d,
+        since_30d,
+        &StatuslineParams {
+            provider: vec!["cursor".to_string(), "copilot_chat".to_string()],
+            branch: Some("main".to_string()),
+            project_dir: Some("/proj/a".to_string()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(multi.cost_1d, 8.0);
+    assert_eq!(multi.cost_7d, 8.0);
+    assert_eq!(multi.cost_30d, 8.0);
+    assert_eq!(multi.branch_cost, Some(8.0));
+    assert_eq!(multi.project_cost, Some(8.0));
+    // active_provider is the most recent inside the filter — copilot_chat at
+    // 11:00 beats cursor at 09:00; claude_code at 11:30 is excluded.
+    assert_eq!(multi.active_provider.as_deref(), Some("copilot_chat"));
+    assert!(
+        multi.provider_scope.is_none(),
+        "multi-provider scope expressed via contributing_providers, not provider_scope"
+    );
+    assert_eq!(
+        multi.contributing_providers,
+        vec!["cursor".to_string(), "copilot_chat".to_string()]
+    );
+    assert!(
+        multi.cost_lag_hint.is_some(),
+        "cursor in multi-filter → lag hint even when copilot_chat is active"
+    );
+
+    // Empty filter (today's `?provider=` or no `?provider=`): unscoped sum.
+    let unscoped = statusline_stats(
+        &conn,
+        since_1d,
+        since_7d,
+        since_30d,
+        &StatuslineParams::default(),
+    )
+    .unwrap();
+    assert_eq!(unscoped.cost_1d, 17.0);
+    assert!(unscoped.provider_scope.is_none());
+    assert!(unscoped.contributing_providers.is_empty());
+
+    // Unknown provider name is treated as a zero-row filter, not an error.
+    let unknown = statusline_stats(
+        &conn,
+        since_1d,
+        since_7d,
+        since_30d,
+        &StatuslineParams {
+            provider: vec!["nonexistent_agent".to_string()],
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(unknown.cost_1d, 0.0);
+    assert_eq!(unknown.cost_30d, 0.0);
+    assert!(unknown.active_provider.is_none());
+
+    // Multi with one unknown still sums the known ones. Order in the filter
+    // is preserved for `contributing_providers` so the tooltip render is
+    // deterministic.
+    let mixed = statusline_stats(
+        &conn,
+        since_1d,
+        since_7d,
+        since_30d,
+        &StatuslineParams {
+            provider: vec!["nonexistent_agent".to_string(), "cursor".to_string()],
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(mixed.cost_1d, 3.0);
+    assert_eq!(
+        mixed.contributing_providers,
+        vec!["nonexistent_agent".to_string(), "cursor".to_string()]
+    );
+}
+
+/// R1.3 (#650): comma-list parsing for the statusline `?provider=` query
+/// param. `?provider=cursor` keeps the 8.1 single-provider behavior;
+/// `?provider=cursor,copilot_chat` is the host-scoped form. Empty / absent
+/// collapse to "no filter" (unscoped). Duplicates and whitespace are
+/// cleaned up so the contributing-providers tooltip doesn't render
+/// "Cursor + Cursor".
+#[test]
+fn statusline_provider_filter_parses_comma_list_forms() {
+    use super::queries::parse_provider_filter;
+
+    assert!(parse_provider_filter(None).is_empty());
+    assert!(parse_provider_filter(Some("")).is_empty());
+    assert_eq!(
+        parse_provider_filter(Some("cursor")),
+        vec!["cursor".to_string()]
+    );
+    assert_eq!(
+        parse_provider_filter(Some("cursor,copilot_chat")),
+        vec!["cursor".to_string(), "copilot_chat".to_string()]
+    );
+    // Whitespace + empty entries dropped, duplicates collapsed in input order.
+    assert_eq!(
+        parse_provider_filter(Some("cursor, ,cursor, copilot_chat")),
+        vec!["cursor".to_string(), "copilot_chat".to_string()]
+    );
 }
 
 #[test]

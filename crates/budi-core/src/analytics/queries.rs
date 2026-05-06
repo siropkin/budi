@@ -3275,6 +3275,13 @@ pub struct StatuslineStats {
     pub project_cost: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub active_provider: Option<String>,
+    /// Providers contributing to the aggregated totals when more than one
+    /// provider was passed in the filter (host-scoped surface, ADR-0088 §7
+    /// post-#648). Empty for unscoped requests and for single-provider
+    /// requests, so the byte shape of the existing single-provider response
+    /// is preserved.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub contributing_providers: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub health_state: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -3302,19 +3309,53 @@ pub struct StatuslineParams {
     /// consumers that can't resolve a repo identity (no git, shell not in a
     /// repo, etc.). See issue #347.
     pub repo_id: Option<String>,
-    /// Optional provider filter. When set, every numeric field
-    /// (`cost_1d/7d/30d`, `session_cost`, `branch_cost`, `project_cost`) and
-    /// `active_provider` are scoped to this provider. Provider-scoped
-    /// surfaces (the Claude Code statusline, the Cursor extension) must set
-    /// this; unscoped blended totals remain available for advanced users and
-    /// for the `budi stats` command.
-    pub provider: Option<String>,
+    /// Optional provider filter. Accepts a comma-separated list — e.g.
+    /// `?provider=cursor` (provider-scoped) or `?provider=cursor,copilot_chat`
+    /// (host-scoped, aggregates the listed providers). Single-value form is
+    /// preserved for backward compatibility with budi-cursor 1.3.x and the
+    /// 8.1+ provider-scoped statusline contract. When the filter is empty
+    /// every numeric field is unscoped (all enabled providers).
+    ///
+    /// Repeated forms (`?provider=a&provider=b`) are not supported by
+    /// axum's default `serde_urlencoded`-backed `Query` extractor — only the
+    /// last value would survive. Callers that need multi-provider must use
+    /// the comma-list form. See ADR-0088 §7 (post-#648).
+    #[serde(default, deserialize_with = "deserialize_provider_filter")]
+    pub provider: Vec<String>,
+}
+
+fn deserialize_provider_filter<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::Deserialize;
+    let raw: Option<String> = Option::deserialize(deserializer)?;
+    Ok(parse_provider_filter(raw.as_deref()))
+}
+
+/// Parse a comma-separated provider filter string into a normalized
+/// `Vec<String>`. Empty / whitespace-only entries are dropped, duplicates
+/// are removed in input order, and `None` collapses to an empty vec.
+pub(crate) fn parse_provider_filter(raw: Option<&str>) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    raw.unwrap_or_default()
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .filter_map(|s| {
+            if seen.insert(s.to_string()) {
+                Some(s.to_string())
+            } else {
+                None
+            }
+        })
+        .collect()
 }
 
 fn assistant_cost_since_from_rollups(
     conn: &Connection,
     since: &str,
-    provider: Option<&str>,
+    providers: &[String],
 ) -> Option<f64> {
     if !rollups_available(conn) {
         return None;
@@ -3323,9 +3364,10 @@ fn assistant_cost_since_from_rollups(
     let mut conditions = vec!["role = 'assistant'".to_string()];
     let mut params: Vec<String> = Vec::new();
     append_rollup_time_filters(&mut conditions, &mut params, &window);
-    if let Some(p) = provider {
-        conditions.push("provider = ?".to_string());
-        params.push(p.to_string());
+    if !providers.is_empty() {
+        let placeholders = vec!["?"; providers.len()].join(", ");
+        conditions.push(format!("provider IN ({placeholders})"));
+        params.extend(providers.iter().cloned());
     }
     let sql = format!(
         "SELECT COALESCE(SUM(cost_cents), 0.0)
@@ -3354,19 +3396,28 @@ pub fn statusline_stats(
     since_30d: &str,
     params: &StatuslineParams,
 ) -> Result<StatuslineStats> {
-    let provider_filter = params.provider.as_deref();
+    let provider_filter: &[String] = &params.provider;
+
+    // Helper: append `provider IN (?, ?, ...)` to `sql` and the matching
+    // bindings, using whatever placeholder syntax the caller is already using.
+    // Skipped when the filter is empty (unscoped — sums across every provider).
+    let push_provider_in = |sql: &mut String, bindings: &mut Vec<String>| {
+        if provider_filter.is_empty() {
+            return;
+        }
+        let placeholders = vec!["?"; provider_filter.len()].join(", ");
+        sql.push_str(&format!(" AND provider IN ({placeholders})"));
+        bindings.extend(provider_filter.iter().cloned());
+    };
 
     let cost_since = |since: &str| -> f64 {
         assistant_cost_since_from_rollups(conn, since, provider_filter).unwrap_or_else(|| {
             let mut sql = String::from(
                 "SELECT COALESCE(SUM(cost_cents), 0.0) FROM messages \
-                     WHERE timestamp >= ?1 AND role = 'assistant'",
+                     WHERE timestamp >= ? AND role = 'assistant'",
             );
             let mut bindings: Vec<String> = vec![since.to_string()];
-            if let Some(p) = provider_filter {
-                sql.push_str(" AND provider = ?2");
-                bindings.push(p.to_string());
-            }
+            push_provider_in(&mut sql, &mut bindings);
             let refs: Vec<&dyn rusqlite::types::ToSql> = bindings
                 .iter()
                 .map(|s| s as &dyn rusqlite::types::ToSql)
@@ -3388,13 +3439,10 @@ pub fn statusline_stats(
     let session_cost = normalized_session_id.as_ref().map(|sid| {
         let mut sql = String::from(
             "SELECT COALESCE(SUM(cost_cents), 0.0) FROM messages \
-             WHERE session_id = ?1 AND role = 'assistant'",
+             WHERE session_id = ? AND role = 'assistant'",
         );
         let mut bindings: Vec<String> = vec![sid.clone()];
-        if let Some(p) = provider_filter {
-            sql.push_str(" AND provider = ?2");
-            bindings.push(p.to_string());
-        }
+        push_provider_in(&mut sql, &mut bindings);
         let refs: Vec<&dyn rusqlite::types::ToSql> = bindings
             .iter()
             .map(|s| s as &dyn rusqlite::types::ToSql)
@@ -3420,10 +3468,7 @@ pub fn statusline_stats(
             sql.push_str(" AND COALESCE(repo_id, '') = ?");
             bindings.push(repo.to_string());
         }
-        if let Some(p) = provider_filter {
-            sql.push_str(" AND provider = ?");
-            bindings.push(p.to_string());
-        }
+        push_provider_in(&mut sql, &mut bindings);
         let refs: Vec<&dyn rusqlite::types::ToSql> = bindings
             .iter()
             .map(|s| s as &dyn rusqlite::types::ToSql)
@@ -3437,13 +3482,10 @@ pub fn statusline_stats(
     let project_cost = params.project_dir.as_ref().map(|dir| {
         let mut sql = String::from(
             "SELECT COALESCE(SUM(cost_cents), 0.0) FROM messages \
-             WHERE cwd = ?1 AND role = 'assistant'",
+             WHERE cwd = ? AND role = 'assistant'",
         );
         let mut bindings: Vec<String> = vec![dir.clone()];
-        if let Some(p) = provider_filter {
-            sql.push_str(" AND provider = ?2");
-            bindings.push(p.to_string());
-        }
+        push_provider_in(&mut sql, &mut bindings);
         let refs: Vec<&dyn rusqlite::types::ToSql> = bindings
             .iter()
             .map(|s| s as &dyn rusqlite::types::ToSql)
@@ -3453,16 +3495,14 @@ pub fn statusline_stats(
             / 100.0
     });
 
-    // Active provider: most recent provider used in the last 24h.
-    // When the request is already provider-scoped, this is just the same
-    // provider when there's recent activity, or None if the window is empty.
+    // Active provider: most recent provider seen in the 1d window, after the
+    // provider filter is applied. Under multi-provider this is the provider
+    // with the most recent traffic — host-scoped click-through routes to its
+    // dashboard (ADR-0088 §7 post-#648).
     let active_provider: Option<String> = {
-        let mut sql = String::from("SELECT provider FROM messages WHERE timestamp >= ?1");
+        let mut sql = String::from("SELECT provider FROM messages WHERE timestamp >= ?");
         let mut bindings: Vec<String> = vec![since_1d.to_string()];
-        if let Some(p) = provider_filter {
-            sql.push_str(" AND provider = ?2");
-            bindings.push(p.to_string());
-        }
+        push_provider_in(&mut sql, &mut bindings);
         sql.push_str(" ORDER BY timestamp DESC LIMIT 1");
         let refs: Vec<&dyn rusqlite::types::ToSql> = bindings
             .iter()
@@ -3484,17 +3524,38 @@ pub fn statusline_stats(
         })
         .unwrap_or((None, None, None));
 
-    let cost_lag_hint = if active_provider.as_deref() == Some("cursor") {
+    // Lag hint fires whenever `cursor` is part of the aggregated totals,
+    // not just when it's the active provider — a host-scoped roll-up that
+    // *includes* Cursor still shows lagging numbers even if Copilot Chat
+    // happened to be the most recent traffic in the 1d window.
+    let cursor_in_filter = provider_filter.iter().any(|p| p == "cursor");
+    let cursor_active = active_provider.as_deref() == Some("cursor");
+    let cost_lag_hint = if cursor_in_filter || cursor_active {
         Some(crate::analytics::CURSOR_LAG_HINT.to_string())
     } else {
         None
+    };
+
+    // `provider_scope` keeps its single-provider semantics: echoed back when
+    // exactly one provider was filtered, omitted otherwise. Multi-provider
+    // requests advertise their scope via `contributing_providers`. Single-
+    // provider responses stay byte-identical to the 8.1 contract.
+    let provider_scope = if provider_filter.len() == 1 {
+        Some(provider_filter[0].clone())
+    } else {
+        None
+    };
+    let contributing_providers = if provider_filter.len() > 1 {
+        provider_filter.to_vec()
+    } else {
+        Vec::new()
     };
 
     Ok(StatuslineStats {
         cost_1d,
         cost_7d,
         cost_30d,
-        provider_scope: params.provider.clone(),
+        provider_scope,
         today_cost: cost_1d,
         week_cost: cost_7d,
         month_cost: cost_30d,
@@ -3502,6 +3563,7 @@ pub fn statusline_stats(
         branch_cost,
         project_cost,
         active_provider,
+        contributing_providers,
         health_state,
         health_tip,
         session_msg_cost,
