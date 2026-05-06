@@ -74,7 +74,7 @@ All parameters are optional. Omit them to get unscoped, context-free totals.
 - Rust types: `budi_core::analytics::queries::{StatuslineStats, StatuslineParams}` in `crates/budi-core/src/analytics/queries.rs`
 - Daemon handler: `analytics_statusline` in `crates/budi-daemon/src/routes/analytics.rs`
 - CLI consumer: `cmd_statusline` in `crates/budi-cli/src/commands/statusline.rs`
-- Config + slot vocabulary: `crates/budi-core/src/config.rs` (`STATUSLINE_SLOTS`, `STATUSLINE_PRESETS`, `normalize_statusline_slot`)
+- Config + slot vocabulary: `crates/budi-core/src/config.rs` (`STATUSLINE_SLOTS`, `normalize_statusline_slot`)
 
 ## Consumer playbook
 
