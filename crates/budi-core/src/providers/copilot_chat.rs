@@ -191,10 +191,10 @@ fn dir_has_publisher_child(parent: &Path) -> bool {
         if !entry.path().is_dir() {
             continue;
         }
-        if let Some(name) = entry.file_name().to_str() {
-            if entry_matches_publisher(name) {
-                return true;
-            }
+        if let Some(name) = entry.file_name().to_str()
+            && entry_matches_publisher(name)
+        {
+            return true;
         }
     }
     false
@@ -210,10 +210,10 @@ fn publisher_subdirs(parent: &Path) -> Vec<PathBuf> {
         if !path.is_dir() {
             continue;
         }
-        if let Some(name) = entry.file_name().to_str() {
-            if entry_matches_publisher(name) {
-                out.push(path);
-            }
+        if let Some(name) = entry.file_name().to_str()
+            && entry_matches_publisher(name)
+        {
+            out.push(path);
         }
     }
     out
@@ -278,10 +278,10 @@ fn push_session_files_recursive(dir: &Path, out: &mut Vec<PathBuf>, depth: u32) 
         let path = entry.path();
         if path.is_dir() {
             push_session_files_recursive(&path, out, depth + 1);
-        } else if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
-            if ext.eq_ignore_ascii_case("json") || ext.eq_ignore_ascii_case("jsonl") {
-                out.push(path);
-            }
+        } else if let Some(ext) = path.extension().and_then(|e| e.to_str())
+            && (ext.eq_ignore_ascii_case("json") || ext.eq_ignore_ascii_case("jsonl"))
+        {
+            out.push(path);
         }
     }
 }
@@ -638,10 +638,10 @@ fn extract_timestamp(record: &serde_json::Value) -> DateTime<Utc> {
             if let Some(ts) = v.as_str().and_then(|s| s.parse::<DateTime<Utc>>().ok()) {
                 return ts;
             }
-            if let Some(ms) = v.as_i64() {
-                if let Some(ts) = DateTime::from_timestamp_millis(ms) {
-                    return ts;
-                }
+            if let Some(ms) = v.as_i64()
+                && let Some(ts) = DateTime::from_timestamp_millis(ms)
+            {
+                return ts;
             }
         }
     }
@@ -650,14 +650,12 @@ fn extract_timestamp(record: &serde_json::Value) -> DateTime<Utc> {
 
 fn session_id_for_path(path: &Path) -> Option<String> {
     // chatSessions/<session-id>.{json,jsonl} — pull the file stem.
-    if let Some(parent) = path.parent() {
-        if let Some(parent_name) = parent.file_name().and_then(|n| n.to_str()) {
-            if parent_name.eq_ignore_ascii_case("chatSessions") {
-                if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
-                    return Some(stem.to_string());
-                }
-            }
-        }
+    if let Some(parent) = path.parent()
+        && let Some(parent_name) = parent.file_name().and_then(|n| n.to_str())
+        && parent_name.eq_ignore_ascii_case("chatSessions")
+        && let Some(stem) = path.file_stem().and_then(|s| s.to_str())
+    {
+        return Some(stem.to_string());
     }
     None
 }
@@ -688,11 +686,15 @@ fn byte_offset_to_line_index(content: &str, offset: usize) -> usize {
     content[..bound].bytes().filter(|&b| b == b'\n').count()
 }
 
+/// `(file_path, sorted_top_level_keys)` signature used to deduplicate
+/// unknown-shape warnings.
+type UnknownShapeSignature = (String, Vec<String>);
+
 fn log_unknown_shape_once(path: &Path, record: &serde_json::Value) {
     use std::collections::HashSet;
     use std::sync::{Mutex, OnceLock};
 
-    static SEEN: OnceLock<Mutex<HashSet<(String, Vec<String>)>>> = OnceLock::new();
+    static SEEN: OnceLock<Mutex<HashSet<UnknownShapeSignature>>> = OnceLock::new();
 
     let mut keys: Vec<String> = match record.as_object() {
         Some(map) => map.keys().cloned().collect(),
@@ -934,7 +936,9 @@ mod tests {
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(tmp.join("workspaceStorage/abc1234")).unwrap();
         // No chatSessions, no GitHub.copilot* under the hash dir.
-        assert!(!any_user_root_has_copilot_marker(&[tmp.clone()]));
+        assert!(!any_user_root_has_copilot_marker(std::slice::from_ref(
+            &tmp
+        )));
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
@@ -943,7 +947,7 @@ mod tests {
         let tmp = std::env::temp_dir().join("budi-copilot-chat-marker-present");
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(tmp.join("workspaceStorage/abc1234/chatSessions")).unwrap();
-        assert!(any_user_root_has_copilot_marker(&[tmp.clone()]));
+        assert!(any_user_root_has_copilot_marker(std::slice::from_ref(&tmp)));
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
@@ -952,7 +956,7 @@ mod tests {
         let tmp = std::env::temp_dir().join("budi-copilot-chat-global-publisher");
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(tmp.join("globalStorage/github.copilot-chat/sessions")).unwrap();
-        assert!(any_user_root_has_copilot_marker(&[tmp.clone()]));
+        assert!(any_user_root_has_copilot_marker(std::slice::from_ref(&tmp)));
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
