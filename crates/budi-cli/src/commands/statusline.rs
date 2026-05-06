@@ -280,7 +280,27 @@ fn nudge_legacy_statusline_tokens_inner(
     }
 }
 
-pub fn cmd_statusline(format: StatuslineFormat, provider: Option<String>) -> Result<()> {
+/// Parse a comma-separated `--slots` value into a normalized list.
+///
+/// Splits on commas, trims whitespace, drops empty entries, and routes
+/// each name through [`config::normalize_statusline_slot`] so the legacy
+/// `today` / `week` / `month` aliases resolve to `1d` / `7d` / `30d`
+/// before they reach the daemon query builder. Unknown slot names are
+/// kept as-is — they'll silently render nothing via `render_slots`'s
+/// missing-key fallback rather than failing the whole prompt.
+fn parse_slots_arg(raw: &str) -> Vec<String> {
+    raw.split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| config::normalize_statusline_slot(s).to_string())
+        .collect()
+}
+
+pub fn cmd_statusline(
+    format: StatuslineFormat,
+    provider: Option<String>,
+    slots: Option<String>,
+) -> Result<()> {
     // #615: validate --provider up front against the same canonical set
     // as `budi stats` so an unknown value errors with a helpful list
     // instead of silently rendering $0.00. Aliases (`copilot`,
@@ -311,7 +331,7 @@ pub fn cmd_statusline(format: StatuslineFormat, provider: Option<String>) -> Res
                 .map(|p| p.display().to_string())
         });
 
-    let session_id = stdin_json.as_ref().and_then(|v| {
+    let mut session_id = stdin_json.as_ref().and_then(|v| {
         v.get("session_id")
             .and_then(|s| s.as_str())
             .map(String::from)
@@ -325,7 +345,18 @@ pub fn cmd_statusline(format: StatuslineFormat, provider: Option<String>) -> Res
     let base = cfg.daemon_base_url();
 
     // Load statusline config (for Claude/Custom formats, and to determine needed query params)
-    let sl_config = config::load_statusline_config();
+    let mut sl_config = config::load_statusline_config();
+    // #639: `--slots` overrides the on-disk config for this invocation.
+    // Drop any preset/custom-format that would otherwise win and replace
+    // the slot list with the parsed args. Empty input (no real slots
+    // after trimming) keeps the on-disk config intact rather than
+    // silently rendering nothing.
+    if let Some(ref raw) = slots {
+        let parsed = parse_slots_arg(raw);
+        if !parsed.is_empty() {
+            sl_config = config::StatuslineConfig::with_slots(parsed);
+        }
+    }
     let needed = sl_config.required_slots();
 
     // #546: always detect branch for the Claude format so the CC-default-
@@ -355,17 +386,15 @@ pub fn cmd_statusline(format: StatuslineFormat, provider: Option<String>) -> Res
         _ => None,
     });
 
-    // Build query params for the daemon
+    let needs_session =
+        needed.contains(&"session".to_string()) || needed.contains(&"message".to_string());
+
+    // Build query params for the daemon. Session id is appended later
+    // (after the daemon client exists) so we can fall back to the
+    // daemon's `current` resolver when stdin didn't carry one (#639).
     let mut query_params: Vec<(&str, String)> = Vec::new();
     if let Some(ref p) = effective_provider {
         query_params.push(("provider", p.clone()));
-    }
-    let needs_session =
-        needed.contains(&"session".to_string()) || needed.contains(&"message".to_string());
-    if let Some(ref sid) = session_id
-        && needs_session
-    {
-        query_params.push(("session_id", sid.clone()));
     }
     if let Some(ref b) = branch {
         query_params.push(("branch", b.clone()));
@@ -411,6 +440,42 @@ pub fn cmd_statusline(format: StatuslineFormat, provider: Option<String>) -> Res
         }
         return Ok(());
     };
+
+    // #639: when stdin didn't carry a `session_id` (manual TTY
+    // invocation, custom statusline drivers, etc.) but the active slot
+    // layout needs one, ask the daemon to resolve the current session
+    // for our cwd. Mirrors `budi sessions current` so coach/full
+    // presets keep working outside the Claude Code stdin envelope.
+    // Errors are swallowed — a prompt-hot path falls through to the
+    // legacy "no session" render rather than failing the prompt.
+    if needs_session && session_id.is_none() {
+        let resolve_url = format!("{}/analytics/sessions/resolve", base);
+        let mut params: Vec<(&str, &str)> = vec![("token", "current")];
+        if let Some(c) = cwd.as_deref() {
+            params.push(("cwd", c));
+        }
+        if let Some(sid) = client
+            .get(&resolve_url)
+            .query(&params)
+            .send()
+            .ok()
+            .filter(|r| r.status().is_success())
+            .and_then(|r| r.json::<Value>().ok())
+            .and_then(|v| {
+                v.get("session_id")
+                    .and_then(|s| s.as_str())
+                    .map(String::from)
+            })
+        {
+            session_id = Some(sid);
+        }
+    }
+    if let Some(ref sid) = session_id
+        && needs_session
+    {
+        query_params.push(("session_id", sid.clone()));
+    }
+
     let statusline_url = format!("{}/analytics/statusline", base);
     let statusline_data: Value = client
         .get(&statusline_url)
@@ -1044,6 +1109,44 @@ mod tests {
     }
 
     #[test]
+    fn parse_slots_arg_strips_whitespace_and_normalizes() {
+        // #639: `--slots` accepts the raw user string. Trim each entry,
+        // drop empties (so trailing commas don't render `""` slots) and
+        // normalize legacy aliases to their rolling-window form so the
+        // override matches the canonical vocabulary.
+        assert_eq!(
+            parse_slots_arg("session,message"),
+            vec!["session".to_string(), "message".to_string()]
+        );
+        assert_eq!(
+            parse_slots_arg(" session , message "),
+            vec!["session".to_string(), "message".to_string()]
+        );
+        assert_eq!(
+            parse_slots_arg("today,week,month"),
+            vec!["1d".to_string(), "7d".to_string(), "30d".to_string()]
+        );
+        assert_eq!(parse_slots_arg(",, 1d ,, ,"), vec!["1d".to_string()]);
+        assert!(parse_slots_arg("").is_empty());
+    }
+
+    #[test]
+    fn slots_override_replaces_config_preset() {
+        // #639: a `--slots` override must clear the on-disk preset and
+        // custom format so the user gets exactly what they asked for,
+        // not a merge of CLI + TOML.
+        let parsed = parse_slots_arg("session,message");
+        let cfg = config::StatuslineConfig::with_slots(parsed);
+        assert_eq!(
+            cfg.effective_slots(),
+            vec!["session".to_string(), "message".to_string()]
+        );
+        // No custom format leaks through, so render_slots — not
+        // render_template — is what runs.
+        assert!(cfg.format.is_none());
+    }
+
+    #[test]
     fn cmd_statusline_rejects_unknown_provider_before_io() {
         // #615: an unknown `--provider` value must error with the same
         // helpful list `budi stats --provider <unknown>` produces, not
@@ -1053,6 +1156,7 @@ mod tests {
         let err = cmd_statusline(
             crate::StatuslineFormat::Json,
             Some("doesnotexist".to_string()),
+            None,
         )
         .expect_err("unknown provider must error");
         let msg = err.to_string();

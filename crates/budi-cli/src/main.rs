@@ -173,6 +173,7 @@ Examples:
   budi statusline                              Default quiet output scoped to the Claude Code surface
   budi statusline --format json                Emit the shared status contract (JSON)
   budi statusline --format json --provider cursor   Consume the same shape for the Cursor surface
+  budi statusline --slots session,message      Override config slots from the command line
   budi statusline --install                    Install budi into the Claude Code status line")]
     Statusline {
         /// Install the status line in ~/.claude/settings.json
@@ -186,6 +187,12 @@ Examples:
         /// Claude Code statusline never shows blended multi-provider totals.
         #[arg(long)]
         provider: Option<String>,
+        /// Comma-separated slot list (e.g. `session,message`). Overrides
+        /// `~/.config/budi/statusline.toml` slots/preset/format for this
+        /// invocation. Known slots: 1d, 7d, 30d, session, message, branch,
+        /// project, provider (legacy: today, week, month).
+        #[arg(long, value_name = "SLOTS")]
+        slots: Option<String>,
     },
     /// Manage optional integrations (install later, list current status)
     Integrations {
@@ -726,11 +733,12 @@ fn main() -> Result<()> {
             install,
             format,
             provider,
+            slots,
         } => {
             if install {
                 commands::statusline::cmd_statusline_install()
             } else {
-                commands::statusline::cmd_statusline(format, provider)
+                commands::statusline::cmd_statusline(format, provider, slots)
             }
         }
         Commands::Sessions {
@@ -1785,6 +1793,32 @@ mod tests {
         match cli.command {
             Commands::Statusline { format, .. } => {
                 assert_eq!(format, StatuslineFormat::Json);
+            }
+            _ => panic!("expected statusline command"),
+        }
+    }
+
+    /// #639: `budi statusline --slots <list>` must parse and surface the
+    /// raw value to the command handler. The handler is responsible for
+    /// trimming/normalizing — this test only locks the clap surface so
+    /// the flag isn't accidentally renamed or dropped.
+    #[test]
+    fn cli_statusline_accepts_slots_flag() {
+        let cli = Cli::try_parse_from(["budi", "statusline", "--slots", "session,message"])
+            .expect("budi statusline --slots session,message should parse");
+        match cli.command {
+            Commands::Statusline { slots, .. } => {
+                assert_eq!(slots.as_deref(), Some("session,message"));
+            }
+            _ => panic!("expected statusline command"),
+        }
+
+        // Default: no `--slots` → None (config file wins).
+        let cli = Cli::try_parse_from(["budi", "statusline"])
+            .expect("budi statusline should parse without --slots");
+        match cli.command {
+            Commands::Statusline { slots, .. } => {
+                assert!(slots.is_none());
             }
             _ => panic!("expected statusline command"),
         }

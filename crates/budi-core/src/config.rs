@@ -225,6 +225,17 @@ impl Default for StatuslineConfig {
 }
 
 impl StatuslineConfig {
+    /// Build a fresh config with an explicit slot list and no preset
+    /// or custom format. Used by `budi statusline --slots <...>` (#639)
+    /// to override the on-disk config for a single invocation.
+    pub fn with_slots(slots: Vec<String>) -> Self {
+        Self {
+            preset: None,
+            slots,
+            format: None,
+        }
+    }
+
     /// Resolve the effective slots list.
     /// Legacy `preset` values are silently mapped to their equivalent slots.
     /// Legacy slot aliases (`today` / `week` / `month`) are normalized to
