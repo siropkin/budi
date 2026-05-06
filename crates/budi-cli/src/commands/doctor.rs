@@ -127,6 +127,20 @@ pub fn cmd_doctor(
         }
     }
 
+    // R1.6 (#653): "Detected providers" section. Lists every Provider where
+    // `is_available()` is true, regardless of `agents.toml` enablement, so a
+    // user troubleshooting "I installed Copilot but the statusline shows
+    // zero" can see at a glance whether the daemon recognises their data.
+    let host_hints = read_host_extension_hints();
+    let all_providers = budi_core::provider::all_providers();
+    for detection in summarize_detected_providers(&all_providers, &host_hints) {
+        if !json_output {
+            detection.print_respecting(quiet);
+        }
+        report.record(&detection);
+        checks.push(detection);
+    }
+
     if json_output {
         let mut json_checks: Vec<CheckResultJson> =
             checks.iter().map(CheckResultJson::from).collect();
@@ -1270,6 +1284,228 @@ fn parse_rfc3339_utc(raw: &str) -> Option<DateTime<Utc>> {
         .map(|value| value.with_timezone(&Utc))
 }
 
+// ---------------------------------------------------------------------------
+// "Detected providers" section (R1.6 / #653)
+// ---------------------------------------------------------------------------
+
+/// One detection line per `Provider::is_available()` host, plus a summary
+/// row when nothing is detected. The section is intentionally separate from
+/// the "tailer health / transcript visibility" rows above because those run
+/// only against `agents.toml`-enabled providers — this one runs against
+/// every registered provider so a user can see *why* a host like Copilot
+/// Chat isn't being tracked even before they touch agents.toml.
+fn summarize_detected_providers(
+    providers: &[Box<dyn Provider>],
+    host_hints: &HostExtensionHints,
+) -> Vec<CheckResult> {
+    let mut detected: Vec<CheckResult> = Vec::new();
+    let mut detected_count = 0usize;
+
+    for provider in providers {
+        if !provider.is_available() {
+            continue;
+        }
+        detected_count += 1;
+        detected.push(summarize_provider_detection(provider.as_ref(), host_hints));
+    }
+
+    if detected_count == 0 {
+        // Per ticket: warn (not fail) when no providers are detected — the
+        // daemon may be healthy and simply have nothing to tail yet.
+        return vec![CheckResult::warn(
+            "detected providers",
+            "no AI editor data detected on this host yet (Cursor, VS Code + Copilot Chat, Claude Code, Codex, Copilot CLI all report `is_available() == false`)",
+            Some(
+                "Open one of your AI editors so it creates its local data directory, then rerun `budi doctor`."
+                    .to_string(),
+            ),
+        )];
+    }
+
+    detected
+}
+
+/// Per-provider detection one-liner. Mirrors the examples in #653:
+/// `copilot_chat — VS Code (workspaceStorage detected, N session files, last write Tm ago)`.
+/// Format is generic so the same code path handles every provider; per-host
+/// hints (e.g. "VS Code Insiders") come from path inspection.
+fn summarize_provider_detection(
+    provider: &dyn Provider,
+    host_hints: &HostExtensionHints,
+) -> CheckResult {
+    let label = format!("detected providers / {}", provider.display_name());
+
+    let watch_roots = provider.watch_roots();
+    let discovered = provider.discover_files().ok().unwrap_or_default();
+    let session_count = discovered.len();
+
+    let latest_mtime = discovered
+        .iter()
+        .filter_map(|f| std::fs::metadata(&f.path).ok())
+        .filter_map(|m| m.modified().ok())
+        .map(DateTime::<Utc>::from)
+        .max();
+
+    let host_label = host_hint_from_paths(&watch_roots);
+
+    let mut parts: Vec<String> = Vec::new();
+    if session_count == 0 {
+        parts.push(format!(
+            "{} watch root(s) detected, no sessions yet",
+            watch_roots.len()
+        ));
+    } else {
+        let word = if session_count == 1 { "file" } else { "files" };
+        parts.push(format!("{session_count} session {word}"));
+    }
+    if let Some(ts) = latest_mtime {
+        parts.push(format!("last write {} ago", format_relative_age(ts)));
+    }
+    if let Some(extensions) = host_hints.extensions_for(provider.name()) {
+        parts.push(format!(
+            "installed extension hints: {}",
+            extensions.join(", ")
+        ));
+    }
+
+    let detail = match host_label {
+        Some(host) => format!("{host} ({})", parts.join(", ")),
+        None => parts.join(", "),
+    };
+
+    CheckResult::pass(label, detail)
+}
+
+/// Match well-known editor-host markers in any of the provider's watch-root
+/// path components. Returns `None` when the provider doesn't live under a
+/// host-scoped directory (e.g. Claude Code lives under `~/.claude`).
+fn host_hint_from_paths(roots: &[PathBuf]) -> Option<String> {
+    // Order matters — longer, more specific tokens are listed before their
+    // generic prefixes so "Code - Insiders" doesn't get misclassified as
+    // plain "Code".
+    const KNOWN_HOSTS: &[(&str, &str)] = &[
+        ("Code - Insiders", "VS Code Insiders"),
+        ("Code - Exploration", "VS Code Exploration"),
+        ("VSCodium", "VSCodium"),
+        ("Cursor", "Cursor"),
+        (".vscode-server-insiders", "VS Code Server (Insiders)"),
+        (".vscode-server", "VS Code Server"),
+        (".vscode-remote", "VS Code Remote"),
+        ("Code", "VS Code"),
+    ];
+
+    let mut hosts: Vec<&'static str> = Vec::new();
+    for root in roots {
+        let s = root.display().to_string();
+        for (token, label) in KNOWN_HOSTS {
+            if s.contains(token) && !hosts.contains(label) {
+                hosts.push(label);
+                break;
+            }
+        }
+    }
+    if hosts.is_empty() {
+        None
+    } else {
+        Some(hosts.join(" / "))
+    }
+}
+
+/// Optional UX hints loaded from the `cursor-sessions.json` v1 file (and a
+/// sibling for VS Code if budi-cursor begins writing one). Per ADR-0086 §3.4
+/// the v1 schema is `{active_session_id, updated_at}`; this loader is
+/// deliberately permissive and ignores any field it doesn't recognise so a
+/// future schema bump that adds an `installed_extensions` array becomes a
+/// no-op upgrade for older binaries.
+#[derive(Debug, Default)]
+struct HostExtensionHints {
+    /// Map from `Provider::name()` (e.g. `"copilot_chat"`) to a deduped list
+    /// of installed-extension identifiers reported by the host.
+    by_provider: std::collections::HashMap<String, Vec<String>>,
+}
+
+impl HostExtensionHints {
+    fn extensions_for(&self, provider: &str) -> Option<&Vec<String>> {
+        self.by_provider.get(provider).filter(|v| !v.is_empty())
+    }
+}
+
+fn read_host_extension_hints() -> HostExtensionHints {
+    let mut hints = HostExtensionHints::default();
+    let Ok(home) = budi_core::config::budi_home_dir() else {
+        return hints;
+    };
+    // Both the existing Cursor session file and a future VS Code sibling
+    // share the same permissive shape; iterate every candidate so a budi-
+    // cursor release that adds `vscode-sessions.json` lights up immediately.
+    for filename in ["cursor-sessions.json", "vscode-sessions.json"] {
+        let path = home.join(filename);
+        if let Some(parsed) = read_session_hint_file(&path) {
+            merge_hint_extensions(&mut hints, parsed);
+        }
+    }
+    hints
+}
+
+fn read_session_hint_file(path: &Path) -> Option<serde_json::Value> {
+    let bytes = std::fs::read(path).ok()?;
+    serde_json::from_slice::<serde_json::Value>(&bytes).ok()
+}
+
+fn merge_hint_extensions(hints: &mut HostExtensionHints, doc: serde_json::Value) {
+    // Two recognised shapes:
+    //   1. {"installed_extensions": {"copilot_chat": ["github.copilot-chat", ...]}}
+    //   2. {"installed_extensions": ["github.copilot-chat", "continue.continue"]}
+    // Shape (2) is mapped to provider buckets via a static manifest of
+    // well-known extension ids → provider names.
+    let Some(value) = doc.get("installed_extensions") else {
+        return;
+    };
+    if let Some(map) = value.as_object() {
+        for (provider, ids) in map {
+            if let Some(arr) = ids.as_array() {
+                for id in arr {
+                    if let Some(s) = id.as_str() {
+                        push_unique(&mut hints.by_provider, provider, s);
+                    }
+                }
+            }
+        }
+        return;
+    }
+    if let Some(arr) = value.as_array() {
+        for id in arr {
+            if let Some(s) = id.as_str()
+                && let Some(provider) = provider_for_extension_id(s)
+            {
+                push_unique(&mut hints.by_provider, provider, s);
+            }
+        }
+    }
+}
+
+fn push_unique(
+    map: &mut std::collections::HashMap<String, Vec<String>>,
+    provider: &str,
+    extension_id: &str,
+) {
+    let bucket = map.entry(provider.to_string()).or_default();
+    if !bucket.iter().any(|existing| existing == extension_id) {
+        bucket.push(extension_id.to_string());
+    }
+}
+
+/// Map well-known marketplace extension ids to budi `Provider::name()`
+/// values. Only covers the ids relevant in 8.4.0; unknown ids are dropped
+/// so the doctor output stays tight.
+fn provider_for_extension_id(id: &str) -> Option<&'static str> {
+    let lower = id.to_ascii_lowercase();
+    match lower.as_str() {
+        "github.copilot-chat" | "github.copilot" => Some("copilot_chat"),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1764,5 +2000,315 @@ mod tests {
         let display = format_outage_display(&outage);
         assert!(!display.contains("last log entry"));
         assert!(display.contains("supervisor: systemd user service"));
+    }
+
+    // -----------------------------------------------------------------
+    // Detected providers (#653 / R1.6)
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn host_hint_picks_specific_vscode_variant_first() {
+        let roots = vec![PathBuf::from(
+            "/Users/me/Library/Application Support/Code - Insiders/User/workspaceStorage",
+        )];
+        assert_eq!(
+            host_hint_from_paths(&roots),
+            Some("VS Code Insiders".to_string())
+        );
+    }
+
+    #[test]
+    fn host_hint_collapses_duplicate_hosts_and_orders_by_appearance() {
+        let roots = vec![
+            PathBuf::from("/Users/me/Library/Application Support/Code/User/workspaceStorage"),
+            PathBuf::from("/Users/me/Library/Application Support/Cursor/User/workspaceStorage"),
+            PathBuf::from("/Users/me/Library/Application Support/Code/User/globalStorage"),
+        ];
+        let hint = host_hint_from_paths(&roots).expect("hosts present");
+        assert!(hint.contains("VS Code"));
+        assert!(hint.contains("Cursor"));
+        // Duplicate "VS Code" must not appear twice.
+        assert_eq!(
+            hint.matches("VS Code").count(),
+            1,
+            "host hint should dedupe VS Code: {hint}"
+        );
+    }
+
+    #[test]
+    fn host_hint_returns_none_for_non_host_scoped_paths() {
+        let roots = vec![PathBuf::from("/Users/me/.claude/projects")];
+        assert_eq!(host_hint_from_paths(&roots), None);
+    }
+
+    #[test]
+    fn provider_for_extension_id_recognises_copilot_ids_case_insensitively() {
+        assert_eq!(
+            provider_for_extension_id("GitHub.copilot-chat"),
+            Some("copilot_chat")
+        );
+        assert_eq!(
+            provider_for_extension_id("github.copilot"),
+            Some("copilot_chat")
+        );
+        assert_eq!(provider_for_extension_id("ms-python.python"), None);
+    }
+
+    #[test]
+    fn merge_hint_extensions_accepts_object_shape() {
+        let mut hints = HostExtensionHints::default();
+        let doc = serde_json::json!({
+            "installed_extensions": {
+                "copilot_chat": ["github.copilot-chat", "github.copilot"],
+                "cursor": []
+            }
+        });
+        merge_hint_extensions(&mut hints, doc);
+        let exts = hints.extensions_for("copilot_chat").expect("present");
+        assert_eq!(
+            exts,
+            &vec![
+                "github.copilot-chat".to_string(),
+                "github.copilot".to_string()
+            ]
+        );
+        // Empty arrays are filtered out by `extensions_for`.
+        assert!(hints.extensions_for("cursor").is_none());
+    }
+
+    #[test]
+    fn merge_hint_extensions_accepts_flat_array_via_known_id_map() {
+        let mut hints = HostExtensionHints::default();
+        let doc = serde_json::json!({
+            "installed_extensions": ["github.copilot-chat", "ms-python.python"]
+        });
+        merge_hint_extensions(&mut hints, doc);
+        // Known id is bucketed by provider.
+        assert_eq!(
+            hints.extensions_for("copilot_chat").cloned(),
+            Some(vec!["github.copilot-chat".to_string()])
+        );
+        // Unknown ids are ignored — the doctor output stays tight.
+        for provider in ["claude_code", "cursor", "codex", "copilot_cli", "ms-python"] {
+            assert!(hints.extensions_for(provider).is_none());
+        }
+    }
+
+    #[test]
+    fn merge_hint_extensions_dedupes_repeated_ids() {
+        let mut hints = HostExtensionHints::default();
+        let doc = serde_json::json!({
+            "installed_extensions": {
+                "copilot_chat": ["github.copilot-chat", "github.copilot-chat"]
+            }
+        });
+        merge_hint_extensions(&mut hints, doc);
+        assert_eq!(
+            hints.extensions_for("copilot_chat").cloned(),
+            Some(vec!["github.copilot-chat".to_string()])
+        );
+    }
+
+    #[test]
+    fn merge_hint_extensions_ignores_unknown_top_level_fields() {
+        // ADR-0086 §3.4 v1 schema: {active_session_id, updated_at}. A v1
+        // file with no `installed_extensions` field must be a silent no-op
+        // so the doctor output doesn't regress when the user is on an old
+        // budi-cursor build.
+        let mut hints = HostExtensionHints::default();
+        let doc = serde_json::json!({
+            "active_session_id": "abc",
+            "updated_at": "2026-05-06T20:00:00Z"
+        });
+        merge_hint_extensions(&mut hints, doc);
+        assert!(hints.by_provider.is_empty());
+    }
+
+    #[test]
+    fn read_session_hint_file_returns_none_for_missing_or_invalid() {
+        // Missing file.
+        assert!(
+            read_session_hint_file(Path::new("/tmp/nonexistent-budi-doctor-hints.json")).is_none()
+        );
+        // Garbage content.
+        let tmp = std::env::temp_dir().join("budi-doctor-invalid-hints.json");
+        std::fs::write(&tmp, b"{not-json").unwrap();
+        assert!(read_session_hint_file(&tmp).is_none());
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    #[test]
+    fn detected_providers_warns_when_nothing_is_available() {
+        let providers: Vec<Box<dyn Provider>> = vec![
+            Box::new(StubDetectProvider::new(
+                "copilot_chat",
+                "Copilot Chat",
+                false,
+            )),
+            Box::new(StubDetectProvider::new("cursor", "Cursor", false)),
+        ];
+        let hints = HostExtensionHints::default();
+
+        let results = summarize_detected_providers(&providers, &hints);
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].state, CheckState::Warn);
+        assert_eq!(results[0].label, "detected providers");
+        assert!(results[0].detail.contains("no AI editor data detected"));
+        assert!(
+            results[0]
+                .fix
+                .as_deref()
+                .unwrap_or_default()
+                .contains("Open one of your AI editors")
+        );
+    }
+
+    #[test]
+    fn detected_providers_lists_each_available_provider() {
+        let cursor_root =
+            PathBuf::from("/Users/me/Library/Application Support/Cursor/User/workspaceStorage");
+        let copilot_root =
+            PathBuf::from("/Users/me/Library/Application Support/Code/User/workspaceStorage");
+        let providers: Vec<Box<dyn Provider>> = vec![
+            Box::new(
+                StubDetectProvider::new("copilot_chat", "Copilot Chat", true)
+                    .with_watch_roots(vec![copilot_root])
+                    .with_files(vec![PathBuf::from("/tmp/budi-doctor-test/copilot.json")]),
+            ),
+            Box::new(
+                StubDetectProvider::new("cursor", "Cursor", true)
+                    .with_watch_roots(vec![cursor_root]),
+            ),
+            Box::new(StubDetectProvider::new("codex", "Codex", false)),
+        ];
+        let hints = HostExtensionHints::default();
+
+        let results = summarize_detected_providers(&providers, &hints);
+
+        let labels: Vec<&str> = results.iter().map(|r| r.label.as_str()).collect();
+        assert_eq!(
+            labels,
+            vec![
+                "detected providers / Copilot Chat",
+                "detected providers / Cursor",
+            ],
+            "only available providers should appear",
+        );
+        for r in &results {
+            assert_eq!(r.state, CheckState::Pass, "{r:?}");
+        }
+        assert!(results[0].detail.contains("VS Code"));
+        assert!(results[1].detail.contains("Cursor"));
+    }
+
+    #[test]
+    fn detected_providers_handles_zero_watch_roots_and_zero_sessions() {
+        let providers: Vec<Box<dyn Provider>> = vec![Box::new(StubDetectProvider::new(
+            "copilot_chat",
+            "Copilot Chat",
+            true,
+        ))];
+        let hints = HostExtensionHints::default();
+
+        let results = summarize_detected_providers(&providers, &hints);
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].state, CheckState::Pass);
+        assert!(
+            results[0]
+                .detail
+                .contains("0 watch root(s) detected, no sessions yet"),
+            "{}",
+            results[0].detail
+        );
+    }
+
+    #[test]
+    fn detected_providers_appends_extension_hint_when_present() {
+        let providers: Vec<Box<dyn Provider>> = vec![Box::new(
+            StubDetectProvider::new("copilot_chat", "Copilot Chat", true).with_watch_roots(vec![
+                PathBuf::from("/Users/me/Library/Application Support/Code/User/workspaceStorage"),
+            ]),
+        )];
+        let mut hints = HostExtensionHints::default();
+        hints.by_provider.insert(
+            "copilot_chat".to_string(),
+            vec!["github.copilot-chat".to_string()],
+        );
+
+        let results = summarize_detected_providers(&providers, &hints);
+
+        assert_eq!(results.len(), 1);
+        assert!(
+            results[0]
+                .detail
+                .contains("installed extension hints: github.copilot-chat"),
+            "{}",
+            results[0].detail
+        );
+    }
+
+    /// Stubs out a `Provider` with explicit availability and watch-root
+    /// values so `summarize_detected_providers` can be tested without
+    /// touching the real filesystem or env vars (which would race against
+    /// other tests in the same binary).
+    struct StubDetectProvider {
+        name: &'static str,
+        display: &'static str,
+        available: bool,
+        watch_roots: Vec<PathBuf>,
+        files: Vec<PathBuf>,
+    }
+
+    impl StubDetectProvider {
+        fn new(name: &'static str, display: &'static str, available: bool) -> Self {
+            Self {
+                name,
+                display,
+                available,
+                watch_roots: Vec::new(),
+                files: Vec::new(),
+            }
+        }
+        fn with_watch_roots(mut self, roots: Vec<PathBuf>) -> Self {
+            self.watch_roots = roots;
+            self
+        }
+        fn with_files(mut self, files: Vec<PathBuf>) -> Self {
+            self.files = files;
+            self
+        }
+    }
+
+    impl Provider for StubDetectProvider {
+        fn name(&self) -> &'static str {
+            self.name
+        }
+        fn display_name(&self) -> &'static str {
+            self.display
+        }
+        fn is_available(&self) -> bool {
+            self.available
+        }
+        fn discover_files(&self) -> anyhow::Result<Vec<budi_core::provider::DiscoveredFile>> {
+            Ok(self
+                .files
+                .iter()
+                .cloned()
+                .map(|path| budi_core::provider::DiscoveredFile { path })
+                .collect())
+        }
+        fn parse_file(
+            &self,
+            _path: &Path,
+            _content: &str,
+            _offset: usize,
+        ) -> anyhow::Result<(Vec<budi_core::jsonl::ParsedMessage>, usize)> {
+            Ok((Vec::new(), 0))
+        }
+        fn watch_roots(&self) -> Vec<PathBuf> {
+            self.watch_roots.clone()
+        }
     }
 }
