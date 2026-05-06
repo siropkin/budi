@@ -176,7 +176,7 @@ pub fn load_agents_config() -> Option<AgentsConfig> {
 /// values so existing `~/.config/budi/statusline.toml` files keep working.
 pub const STATUSLINE_SLOTS: &[&str] = &[
     "1d", "7d", "30d", "today", "week", "month", "session", "message", "branch", "project",
-    "provider", "health",
+    "provider",
 ];
 
 /// Normalize a legacy slot name to its canonical form.
@@ -233,10 +233,10 @@ impl StatuslineConfig {
         let raw = if let Some(ref preset_name) = self.preset {
             match preset_name.as_str() {
                 "cost" => vec!["1d".to_string(), "7d".to_string(), "30d".to_string()],
-                "coach" => vec!["session".to_string(), "health".to_string()],
+                "coach" => vec!["session".to_string(), "message".to_string()],
                 "full" => vec![
                     "session".to_string(),
-                    "health".to_string(),
+                    "message".to_string(),
                     "1d".to_string(),
                 ],
                 _ => self.slots.clone(),
@@ -321,14 +321,13 @@ pub const STATUSLINE_TOML_TEMPLATE: &str = "\
 slots = [\"1d\", \"7d\", \"30d\"]
 
 # Example slot combinations:
-# slots = [\"session\", \"health\"]            # session cost + health vitals
-# slots = [\"session\", \"health\", \"1d\"]      # session + health + 1d
+# slots = [\"session\", \"message\"]            # session cost + last-message cost
 # slots = [\"session\", \"message\", \"1d\"]     # session + per-message + 1d
 #
 # Or build a custom format:
-# format = \"{health} {project} | {session} | {1d} 1d | {7d} 7d\"
+# format = \"{session} session | {message} msg | {1d} 1d | {7d} 7d\"
 #
-# Available slots: 1d, 7d, 30d, session, message, branch, project, provider, health
+# Available slots: 1d, 7d, 30d, session, message, branch, project, provider
 # Docs: https://github.com/siropkin/budi#status-line
 ";
 
@@ -1027,14 +1026,14 @@ mod tests {
     #[test]
     fn statusline_legacy_preset_coach_migrates_to_slots() {
         let config: StatuslineConfig = toml::from_str(r#"preset = "coach""#).unwrap();
-        assert_eq!(config.effective_slots(), vec!["session", "health"]);
-        assert_eq!(config.required_slots(), vec!["session", "health"]);
+        assert_eq!(config.effective_slots(), vec!["session", "message"]);
+        assert_eq!(config.required_slots(), vec!["session", "message"]);
     }
 
     #[test]
     fn statusline_legacy_preset_full_migrates_to_slots() {
         let config: StatuslineConfig = toml::from_str(r#"preset = "full""#).unwrap();
-        assert_eq!(config.effective_slots(), vec!["session", "health", "1d"]);
+        assert_eq!(config.effective_slots(), vec!["session", "message", "1d"]);
     }
 
     #[test]

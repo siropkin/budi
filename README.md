@@ -174,11 +174,11 @@ Windows show rolling 1d / 7d / 30d — not calendar reset at midnight. Customize
 
 ```toml
 slots = ["1d", "7d", "30d"]   # default quiet preset
-# preset = "coach"             # adds session cost + health tip
-# preset = "full"              # session + health + rolling 1d total
+# slots = ["session", "message"]          # session + last-message cost
+# slots = ["session", "message", "1d"]    # session + message + rolling 1d
 ```
 
-Available slots: `1d`, `7d`, `30d`, `session`, `branch`, `project`, `health`.
+Available slots: `1d`, `7d`, `30d`, `session`, `message`, `branch`, `project`, `provider`.
 
 ## `/budi` Claude Code skill
 

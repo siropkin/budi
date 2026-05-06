@@ -174,13 +174,6 @@ fn build_slot_values(data: &Value) -> HashMap<String, String> {
         vals.insert("provider".to_string(), v.to_string());
     }
 
-    // Health slot: just the session cost (no traffic-light emojis or tips per #127)
-    if data.get("health_state").is_some()
-        && let Some(v) = data.get("session_cost").and_then(|v| v.as_f64())
-    {
-        vals.insert("health".to_string(), fmt_cost(v));
-    }
-
     vals
 }
 
@@ -367,9 +360,8 @@ pub fn cmd_statusline(format: StatuslineFormat, provider: Option<String>) -> Res
     if let Some(ref p) = effective_provider {
         query_params.push(("provider", p.clone()));
     }
-    let needs_session = needed.contains(&"session".to_string())
-        || needed.contains(&"message".to_string())
-        || needed.contains(&"health".to_string());
+    let needs_session =
+        needed.contains(&"session".to_string()) || needed.contains(&"message".to_string());
     if let Some(ref sid) = session_id
         && needs_session
     {
@@ -832,7 +824,6 @@ mod tests {
         let vals = build_slot_values(&data);
         assert_eq!(vals.get("session").unwrap(), "$6.23");
         assert_eq!(vals.get("message").unwrap(), "$0.08");
-        assert!(!vals.contains_key("health"));
     }
 
     #[test]
