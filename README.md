@@ -39,11 +39,11 @@ Everything stays on your machine by default. Optional cloud sync pushes aggregat
 
 ## What budi does
 
-- **Tracks every AI coding agent** — Claude Code, Cursor, Codex CLI, and Copilot CLI in one place
+- **Tracks every AI coding agent** — Claude Code, Cursor, Codex CLI, Copilot CLI, and Copilot Chat (VS Code) in one place
 - **Per-message cost and tokens** — not just session totals; every API call attributed individually
 - **Repo, branch, and ticket breakdown** — know which project, PR branch, or ticket is driving spend
 - **Session health** — detects context bloat, cache degradation, and cost acceleration with actionable tips
-- **Live status line** in Claude Code and Cursor showing rolling 1d / 7d / 30d spend
+- **Live status line** in Claude Code, Cursor, and VS Code showing rolling 1d / 7d / 30d spend (VS Code aggregates over Copilot Chat + any other detected provider)
 - **Team dashboard** at [app.getbudi.dev](https://app.getbudi.dev) — optional sync sends only aggregated metrics; prompts and code never leave your machine
 - **~6 MB Rust binary**, zero config required, minimal footprint
 
@@ -64,6 +64,7 @@ Everything stays on your machine by default. Optional cloud sync pushes aggregat
 | **Codex CLI** | Supported | Live transcript tailing |
 | **Cursor** | Supported | Live tailing + Usage API reconciliation |
 | **Copilot CLI** | Supported | Live transcript tailing |
+| **Copilot Chat (VS Code)** | Supported | Live JSON/JSONL tailing + GitHub Billing API reconciliation ([ADR-0092](docs/adr/0092-copilot-chat-data-contract.md)) |
 | **Gemini CLI** | Deferred | Tracked in [#294](https://github.com/siropkin/budi/issues/294) |
 
 All agents also support one-time historical import via `budi db import`.

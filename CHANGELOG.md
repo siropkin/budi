@@ -1,5 +1,38 @@
 # Changelog
 
+## 8.4.0 — Unreleased
+
+8.4.0 is the **VS Code-side coverage** release: the budi extension now hosts inside VS Code as well as Cursor, with **GitHub Copilot Chat** as the first non-Cursor provider. The architectural pieces this round forces into the codebase — a host-scoped statusline surface that aggregates over multiple providers in a single editor window, a third-party-API-as-reconciliation pattern (GitHub Billing API), and a `MIN_API_VERSION` pattern for provider-side data contracts — are the same pieces every later 9.0.0 provider will need (#647).
+
+### Added
+
+- **`copilot_chat` provider plugin — local JSON/JSONL tailing** (R1.4, #651) — new provider tails per-message tokens out of VS Code's `workspaceStorage` and `globalStorage` for the GitHub Copilot Chat extension on macOS / Linux / Windows. Tokens × pricing manifest is the primary live cost path; ADR-0092 §2 pins the on-disk format with a `MIN_API_VERSION = 1` guard so a future Copilot Chat schema flip surfaces in `budi doctor` rather than producing silent zeros. Org-managed users (where the GitHub Billing API is unavailable) rely entirely on this local-tail × pricing path.
+- **GitHub Billing API reconciliation worker for `copilot_chat`** (R1.5, #652) — `sync_direct` worker pulls per-user dollar truth-up for individually-licensed users and reconciles against the local-tail rows. Org-managed users see an empty endpoint and the worker no-ops cleanly. Runs on the same configurable interval as the cloud-sync worker; auth/schema errors are structured-logged and surfaced on the existing pricing/sync status endpoints. ADR-0092 §3 governs the contract.
+- **Multi-provider statusline endpoint — `?provider=a,b,c`** (R1.3, #650) — `GET /analytics/statusline` and `budi statusline --format json` now accept a comma-list `?provider=` value and aggregate every numeric field (`cost_1d` / `cost_7d` / `cost_30d`, `session_cost`, `branch_cost`, `project_cost`) over the listed providers. The response carries a new `contributing_providers` array for tooltip rendering and click-through routing; `provider_scope` is omitted under multi-provider so the byte shape of the single-provider response is unchanged. Single-provider `?provider=cursor` is byte-identical to the 8.1 contract — no consumer is forced to change. The endpoint is host-scoped per the ADR-0088 §7 amendment (#648); cloud dashboard tiles stay provider-scoped.
+- **`budi doctor` surfaces installed VS Code AI extensions and tailer health** (R1.6, #653) — `budi doctor` detects installed Copilot Chat / Continue / Cline / Roo Code / Aider / Windsurf extensions in VS Code, reports per-provider tailer health, and flags ADR-0092 §2.6 `MIN_API_VERSION` mismatches (Copilot Chat schema flip → visible warning, not silent zeros). Org-managed Copilot users and unconfigured-PAT cases are surfaced as informational signals (ADR-0092 §3.3 / §3.4) so the install-funnel state is visible without remote telemetry.
+
+### Changed
+
+- **Supported agents — Copilot Chat is now first-class.** README's supported-agent table now lists Copilot Chat alongside Claude Code, Codex CLI, Cursor, and Copilot CLI. The VS Code host is documented as a peer of the Cursor host for the budi extension.
+- **`docs/statusline-contract.md` updated for the host-scoped surface** — the contract now documents both **provider-scoped** (`?provider=<single>`) and **host-scoped** (`?provider=<a>,<b>,<c>`) behavior, the `contributing_providers` field, and the unknown-provider tolerance rule (unknown names contribute `0.0` and survive in `contributing_providers`). Provider-scoped consumers (Claude Code statusline, cloud dashboard tiles) are unaffected.
+
+### Architecture decisions
+
+- **ADR-0088 §7 amended — host-scoped vs. provider-scoped surfaces** (R1.1, #648). The host extension surface (the VS Code / Cursor status bar) is allowed to aggregate across providers detected in that editor host; provider-scoped surfaces (Claude Code statusline, cloud dashboard per-provider tiles) remain provider-only. Cloud dashboard rollups stay provider-scoped per the existing §7 — only the in-editor surface aggregates. The amendment lands ahead of the multi-provider endpoint so the endpoint is not an ADR violation at merge time.
+- **ADR-0092 — `copilot_chat` data contract** (R1.2, #649). Pins the on-disk format Copilot Chat writes under `workspaceStorage` / `globalStorage`, the GitHub Billing API contract for individually-licensed users, the `MIN_API_VERSION` bump rule for visible drift detection, and the org-managed-user fallback path (local-tail × pricing).
+
+### Cross-repo lockstep
+
+- **`siropkin/budi-cursor` 1.4.x** ships VS Code host detection, the multi-provider request shape (`?provider=cursor,copilot_chat` when both are detected), tooltip copy update for the host-scoped surface, and a `MIN_API_VERSION` bump in `budiClient.ts` matched to this contract. Older daemons continue to surface the existing API-version warning rather than rendering silent zeros. The bundled vsix in this repo was retired in 8.0 (#96), so there is nothing to refresh on the budi side.
+- **`siropkin/getbudi.dev`** copy and screenshots refresh for VS Code support is threaded into the public-site sync ticket; never let the public-site copy drift from shipped behavior.
+
+### Non-blocking, carried forward
+
+- **Cloud Overview cost / token totals diverge from local CLI** (#10) — presentation-layer aggregation difference, not data loss.
+- **RC-4 Part B** (#504) — Cursor Usage API auth root-cause; Part A shipped with `v8.3.1`.
+- **ADR-0090 supersede** — pending one release cycle of live validation on the now-working `cursorDiskKV` bubbles path before the Usage API §1 surface can be retired.
+- **Continue, Cline, Roo Code, Aider, Windsurf, Gemini CLI providers** — deferred to the 9.0.0 breadth round (#295, #161). 8.4.0 ships the architectural pieces every one of those providers will reuse: host-scoped surface, multi-provider endpoint, third-party-API-as-reconciliation pattern.
+
 ## 8.3.19 — 2026-05-05
 
 8.3.19 is a quality-of-life release that improves statusline ergonomics
