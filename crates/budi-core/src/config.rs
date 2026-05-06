@@ -210,7 +210,7 @@ pub struct StatuslineConfig {
     /// Ordered list of data slots to display. Default: ["1d", "7d", "30d"].
     pub slots: Vec<String>,
     /// Optional custom format template. Overrides `slots` when set.
-    /// Placeholders: {1d}, {7d}, {30d}, {session}, {message}, {branch}, {project}, {provider}, {health}
+    /// Placeholders: {1d}, {7d}, {30d}, {session}, {message}, {branch}, {project}, {provider}
     pub format: Option<String>,
 }
 

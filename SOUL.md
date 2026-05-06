@@ -407,11 +407,19 @@ Key points:
 - **Slot config aliases.** `~/.config/budi/statusline.toml` files
   written against the 8.0 vocabulary (`slots = ["today", "week",
   "month"]`) continue to render, since `today` / `week` / `month` are
-  normalized to `1d` / `7d` / `30d` at load time.
+  normalized to `1d` / `7d` / `30d` at load time. The current slot
+  vocabulary is `1d` / `7d` / `30d` / `session` / `message` / `branch`
+  / `project` / `provider` (see `STATUSLINE_SLOTS` in
+  `crates/budi-core/src/config.rs`); the 8.0 `health` slot was a
+  vestigial alias for `session_cost` and was removed in 8.3.18 (#640).
 - **Default install path is quiet.** `budi init` and
   `budi integrations install` install the rolling `1d` / `7d` / `30d`
-  preset without prompting. The `coach` and `full` presets remain
-  opt-in advanced variants documented in `README.md`.
+  slots without prompting. Legacy `preset = "coach"` /
+  `preset = "full"` values in older `statusline.toml` files are
+  silently mapped to `["session", "message"]` /
+  `["session", "message", "1d"]` at load time for migration; the
+  `preset` key itself was removed from the documented surface in
+  8.3.18 (#632) along with the `render_coach` codepath and 📊 emoji.
 - **`budi init` installs the statusline by default.** A fresh
   `budi init` wires the Budi statusline into `~/.claude/settings.json`
   (and installs the Cursor extension when the Cursor CLI is on PATH)

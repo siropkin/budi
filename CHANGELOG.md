@@ -24,6 +24,15 @@ Headline: **statusline slots are now fully composable** — `session` and
   created dead code, config confusion, and a hard-coded emoji.
   All presets now expand to regular slot arrays at config load time;
   `render_coach` and the 📊 prefix are removed.
+- **Remove vestigial `health` statusline slot; coach preset → session + message** —
+  the `health` slot was a leftover from the old `render_coach`
+  codepath that rendered the same `session_cost` dollar amount as the
+  `session` slot, so the legacy `coach` preset showed duplicate values
+  (`$1.22 session · $1.22 health`). The `health` slot is removed from
+  the slot vocabulary entirely; legacy `preset = "coach"` /
+  `preset = "full"` values in older `statusline.toml` files now expand
+  to `["session", "message"]` / `["session", "message", "1d"]` for
+  migration. Patched in after the initial 8.3.18 release prep.
 
 ### Fixed
 
