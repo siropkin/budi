@@ -123,6 +123,111 @@ pub fn agents_config_path() -> Result<PathBuf> {
     Ok(budi_config_dir()?.join("agents.toml"))
 }
 
+// ---------------------------------------------------------------------------
+// copilot_chat config — Billing API reconciliation auth (ADR-0092 §3.3)
+// ---------------------------------------------------------------------------
+
+/// Env var override for the GitHub PAT used by the Copilot Chat Billing
+/// API reconciliation worker (R1.5, #652). Mirrors the cloud-config
+/// pattern (`BUDI_CLOUD_API_KEY`): the env var takes precedence over the
+/// on-disk TOML file when both are present.
+pub const COPILOT_CHAT_BILLING_PAT_ENV: &str = "BUDI_COPILOT_CHAT_BILLING_PAT";
+
+/// Env var override for the GitHub login (`{username}` segment in the
+/// Billing API URL). When unset, the worker resolves it once per process
+/// via `GET /user` against the same PAT.
+pub const COPILOT_CHAT_BILLING_USERNAME_ENV: &str = "BUDI_COPILOT_CHAT_USERNAME";
+
+/// Persistent config for the Copilot Chat provider's reconciliation
+/// surface — kept in its own file (`~/.config/budi/copilot_chat.toml`)
+/// so the secret-bearing PAT lives outside the broader
+/// `agents.toml` and `cloud.toml` so support bundles can redact it
+/// independently.
+///
+/// Per ADR-0092 §3.3 the PAT is user-supplied and opt-in only. The
+/// daemon never auto-prompts for it and never falls back to the `gh`
+/// CLI's session token.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CopilotChatConfig {
+    /// GitHub PAT with `manage_billing:copilot` scope. `None` means
+    /// reconciliation is unconfigured — the worker is a no-op and
+    /// `budi doctor` reports `billing reconciliation unconfigured (local
+    /// tail only)`.
+    pub billing_pat: Option<String>,
+    /// Optional pinned GitHub login. When `None`, the worker resolves
+    /// it once per process via `GET /user`.
+    pub username: Option<String>,
+}
+
+impl CopilotChatConfig {
+    /// Effective PAT, respecting the [`COPILOT_CHAT_BILLING_PAT_ENV`]
+    /// override.
+    pub fn effective_billing_pat(&self) -> Option<String> {
+        if let Ok(val) = env::var(COPILOT_CHAT_BILLING_PAT_ENV) {
+            let trimmed = val.trim().to_string();
+            if !trimmed.is_empty() {
+                return Some(trimmed);
+            }
+        }
+        self.billing_pat.as_ref().and_then(|s| {
+            let trimmed = s.trim();
+            (!trimmed.is_empty()).then(|| trimmed.to_string())
+        })
+    }
+
+    /// Effective GitHub login, respecting [`COPILOT_CHAT_BILLING_USERNAME_ENV`].
+    pub fn effective_username(&self) -> Option<String> {
+        if let Ok(val) = env::var(COPILOT_CHAT_BILLING_USERNAME_ENV) {
+            let trimmed = val.trim().to_string();
+            if !trimmed.is_empty() {
+                return Some(trimmed);
+            }
+        }
+        self.username.as_ref().and_then(|s| {
+            let trimmed = s.trim();
+            (!trimmed.is_empty()).then(|| trimmed.to_string())
+        })
+    }
+}
+
+/// Path to the per-provider Copilot Chat config file.
+pub fn copilot_chat_config_path() -> Result<PathBuf> {
+    Ok(budi_config_dir()?.join("copilot_chat.toml"))
+}
+
+/// Load Copilot Chat config. Returns the default (no PAT) when the file
+/// is absent or unparseable; warnings are logged so a malformed file is
+/// visible without crashing the daemon.
+pub fn load_copilot_chat_config() -> CopilotChatConfig {
+    let path = match copilot_chat_config_path() {
+        Ok(p) => p,
+        Err(_) => return CopilotChatConfig::default(),
+    };
+    if !path.exists() {
+        return CopilotChatConfig::default();
+    }
+    let raw = match fs::read_to_string(&path) {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!("Failed to read {}: {e}", path.display());
+            return CopilotChatConfig::default();
+        }
+    };
+    #[derive(Deserialize, Default)]
+    #[serde(default)]
+    struct Wrapper {
+        copilot_chat: CopilotChatConfig,
+    }
+    match toml::from_str::<Wrapper>(&raw) {
+        Ok(w) => w.copilot_chat,
+        Err(e) => {
+            tracing::warn!("Failed to parse {}: {e}", path.display());
+            CopilotChatConfig::default()
+        }
+    }
+}
+
 /// Load agents config. Returns `None` if the file does not exist (legacy install)
 /// or if the file is effectively empty (no explicit agent sections).
 /// Callers should treat `None` as "all available agents enabled" for backward compatibility.

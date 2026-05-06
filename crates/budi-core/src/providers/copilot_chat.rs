@@ -6,14 +6,17 @@
 //! Any breaking change to the undocumented upstream must land as a paired
 //! edit to ADR-0092 §2.3 and this module so the two never disagree.
 //!
-//! This is the local-tail half of the Copilot Chat surface (R1.4, #651).
-//! The Billing API reconciliation half (`sync_direct`) lands in R1.5
-//! (#652) under `crates/budi-core/src/sync/copilot_chat_billing.rs`.
+//! Local-tail half of the Copilot Chat surface (R1.4, #651). The
+//! Billing API reconciliation half lives in
+//! `crates/budi-core/src/sync/copilot_chat_billing.rs` (R1.5, #652) and
+//! is wired into `Provider::sync_direct` below as a best-effort dollar
+//! truth-up that runs alongside the file-based local-tail ingest.
 
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 use chrono::{DateTime, Utc};
+use rusqlite::Connection;
 use sha2::{Digest, Sha256};
 
 use crate::jsonl::ParsedMessage;
@@ -112,6 +115,27 @@ impl Provider for CopilotChatProvider {
         roots.sort();
         roots.dedup();
         roots
+    }
+
+    fn sync_direct(
+        &self,
+        conn: &mut Connection,
+        _pipeline: &mut crate::pipeline::Pipeline,
+        _max_age_days: Option<u64>,
+    ) -> Option<Result<(usize, usize, Vec<String>)>> {
+        // R1.5 / ADR-0092 §3: best-effort GitHub Billing API
+        // reconciliation. Local-tail is the primary signal; this just
+        // truths-up `cost_cents` on existing rows on a (date, model)
+        // bucket basis, so we deliberately return `None` and let the
+        // dispatcher proceed to the file-based discovery path. The
+        // billing pull is a side effect that complements ingest, never
+        // a replacement for it.
+        let config = crate::config::load_copilot_chat_config();
+        config.effective_billing_pat()?;
+        if let Err(e) = crate::sync::copilot_chat_billing::run_reconciliation(conn, &config) {
+            tracing::warn!("copilot_chat billing reconciliation failed: {e:#}");
+        }
+        None
     }
 }
 

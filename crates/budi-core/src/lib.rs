@@ -18,6 +18,7 @@ pub mod provider;
 pub mod providers;
 pub mod repo_id;
 pub mod session_resolve;
+pub mod sync;
 pub mod tag_keys;
 pub mod update;
 pub mod work_outcome;
