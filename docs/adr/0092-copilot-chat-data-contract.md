@@ -55,7 +55,18 @@ The two `globalStorage/{GitHub,github}.copilot{,-chat}/**` patterns are intentio
 
 #### 2.3 File shapes and token-key dispatch
 
-Each candidate path is read as a stream of newline-delimited JSON (`*.jsonl`) or as a JSON document containing a `messages: []` array (`*.json`). The parser tolerates **any** of the four token-key shapes below and dispatches per-line / per-message:
+Each candidate path is read as a stream of newline-delimited JSON (`*.jsonl`) or as a JSON document (`*.json`). Both forms wrap their per-message records in an envelope key — the parser flattens the envelope before applying the token-key dispatch.
+
+**Envelope keys** (any one of these may be present; first match wins):
+
+| Format | Envelope shape | Notes |
+|---|---|---|
+| JSONL line wrapper | `{ "kind": N, "v": [ ... ] }` | The `github.copilot-chat` extension's persisted per-line shape. `kind: 0` carries session manifest (object `v`, no records); `kind: 1`/`2` carry request/response items in array `v`. Lines whose `v` is an object or scalar fall through to the flat-record path with no records emitted (no warn). |
+| JSON document | `{ "requests": [ ... ] }` | Persisted-on-close session snapshot. Each item in `requests` is a turn with optional `result.metadata.{promptTokens,outputTokens}`. |
+| JSON document (legacy) | `{ "messages": [ ... ] }` | Older synthetic-fixture shape. Retained for back-compat. |
+| Bare record (no envelope) | `{ ...token keys... }` | Treated as a single-record envelope. Used by the v1 unit fixtures and any future format that drops the wrapper. |
+
+**Token-key shapes** (applied to each flattened record; first non-zero pair wins):
 
 | Format | Shape origin | Input-tokens key | Output-tokens key |
 |---|---|---|---|
@@ -63,8 +74,15 @@ Each candidate path is read as a stream of newline-delimited JSON (`*.jsonl`) or
 | Copilot CLI | shape inherited from the standalone `copilot` CLI in 2025 | `modelMetrics.inputTokens` | `modelMetrics.outputTokens` |
 | Legacy | the OpenAI-ish shape Copilot Chat used through 2025-Q4 | `usage.promptTokens` | `usage.completionTokens` |
 | Feb 2026+ | nested-result shape introduced in the Feb-2026 Copilot Chat release | `result.metadata.promptTokens` | `result.metadata.outputTokens` |
+| Output-only fallback (v3, 8.4.0) | shape used by VS Code Copilot Chat builds circa May-2026 that persist response token counts but **not** prompt token counts | _(input = 0)_ | `completionTokens` |
 
-The parser tries the four shapes in the order above per record and uses the first one that yields both a non-zero input and a non-zero output count. Records that match no shape are skipped (see §2.6).
+The parser tries the **four full-pair shapes** in the order above per record and uses the first one that yields both a non-zero input and a non-zero output count. If none match, it tries the **output-only fallback** as a last resort and emits the row with `input_tokens = 0`. Records that match no shape — full-pair or fallback — are skipped (see §2.6).
+
+The envelope split was added in 8.4.0 after the smoke-gate fixtures uncovered that real on-disk JSONL files write tokens at `v[].result.metadata.{promptTokens,outputTokens}` rather than at the top of the line — the four token-key shapes are unchanged, the parser just looks one level deeper before applying them. `MIN_API_VERSION` was bumped to `2` in lockstep (§2.6).
+
+The output-only fallback was added in the same 8.4.0 cycle after smoke-gate verification on a freshly captured session uncovered that newer VS Code Copilot Chat builds (May-2026) persist `completionTokens` at the top of each response record but **drop the prompt-token counterpart entirely** — `result.metadata` no longer contains `promptTokens` or `outputTokens` for these records. The fallback is the only shape allowed to relax the both-non-zero invariant from the four full-pair shapes; rows it emits flow through downstream pricing as output-only at the manifest layer and are truthed up to the real bill by the §3 Billing API reconciliation worker on the next tick (for users with a configured PAT). `MIN_API_VERSION` was bumped to `3`.
+
+A side note from the same investigation: `result.metadata.resolvedModel` is **not** safe to use as a pricing key. On older sessions it was a dated version suffix (`claude-haiku-4-5-20251001`); on May-2026+ sessions it is an internal GPU-fleet code (`capi-noe-ptuc-h200-oswe-vscode-prime`) that does not map to manifest entries. The parser uses `modelId` (post-`copilot/` strip per §2.4) as the pricing key, even when the value is a router placeholder like `auto` — pricing then falls through to `unpriced:no_pricing` and the Billing API reconciliation supplies the dollar truth.
 
 Cache-token keys, when present, follow the same per-shape pattern under `cacheReadTokens` / `cacheWriteTokens` (delta and Feb-2026 shapes) or under `usage.cacheReadInputTokens` / `usage.cacheCreationInputTokens` (legacy). Cache tokens are best-effort — Copilot Chat does not expose cache fields on every record.
 

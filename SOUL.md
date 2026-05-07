@@ -158,9 +158,10 @@ Core tables:
 
 | Source | Confidence | What it provides |
 |--------|-----------|-----------------|
-| **JSONL tailer** (Claude Code, Codex, Copilot CLI) | `estimated` | Per-message tokens parsed from the agent's local transcript as it grows. Same parser as `budi db import`; same enricher chain. |
+| **JSONL tailer** (Claude Code, Codex, Copilot CLI, Copilot Chat) | `estimated` | Per-message tokens parsed from the agent's local transcript as it grows. Same parser as `budi db import`; same enricher chain. Copilot Chat uses an output-only fallback for May-2026+ VS Code builds that drop prompt-token counts client-side ([ADR-0092](docs/adr/0092-copilot-chat-data-contract.md) §2.3). |
 | **Cursor Usage API** | `exact` | Per-request tokens + totalCents pulled from Cursor's API. Reconciles cost/token data the JSONL doesn't carry; scheduled pull, not a live path. Lag profile p50 ≈ 70 s, p99 ≈ 6 min (measured in #321, embedded in [ADR-0089](docs/adr/0089-reverse-proxy-first-jsonl-tailing-as-sole-live-path.md) §7). |
-| **JSONL backfill** (`budi db import`) | `estimated` (Claude Code / Codex / Copilot CLI) / `exact` (Cursor) | Same providers, one-shot mode for historical backfill. Used after install or after `budi db import --force`. |
+| **GitHub Billing API** (Copilot Chat individual licences) | `exact` | Per-`(date, model)` dollar buckets pulled from GitHub's user-billing endpoint, scaling existing local-tail rows in place (`pricing_source = 'billing_api:copilot_chat'`). Org-managed seats yield a 200 with empty usage and no truth-up; local-tail tokens × manifest pricing remain in effect ([ADR-0092](docs/adr/0092-copilot-chat-data-contract.md) §3). |
+| **JSONL backfill** (`budi db import`) | `estimated` (Claude Code / Codex / Copilot CLI / Copilot Chat) / `exact` (Cursor) | Same providers, one-shot mode for historical backfill. Used after install or after `budi db import --force`. |
 | **Legacy proxy** (pre-8.2 history only) | `proxy_estimated` | Rows written by the 8.0/8.1 proxy remain queryable. No new writes; the proxy runtime was deleted in 8.2. |
 
 Historical OTEL data (`otel_exact` confidence) remains queryable but OTEL ingestion has been removed.
@@ -185,8 +186,8 @@ CLI, daemon, and dashboard tell the same story (see ADR-0082 and
   the insert path normalizes `""` to `NULL` so ghost `(empty)` sessions
   cannot appear. Rows with NULL/empty `session_id` are invisible to
   `budi sessions` by design — they indicate an attribution bug upstream.
-- **`provider`** — canonical provider key (`claude_code`, `cursor`, `openai`,
-  `copilot`). `COALESCE(provider, 'claude_code')` is the legacy fallback for
+- **`provider`** — canonical provider key (`claude_code`, `cursor`, `codex`,
+  `copilot_cli`, `copilot_chat`, `openai`). `COALESCE(provider, 'claude_code')` is the legacy fallback for
   pre-8.0 rows; new writes MUST set it explicitly.
 - **`git_branch`** — written without the `refs/heads/` prefix
   (`session_list_with_filters` strips it defensively for older rows). The
@@ -483,6 +484,8 @@ Key points:
 - `crates/budi-core/src/providers/claude_code.rs` — Claude Code provider (JSONL discovery + live watch).
 - `crates/budi-core/src/providers/codex.rs` — Codex provider (Codex Desktop/CLI transcripts under `~/.codex/sessions/`).
 - `crates/budi-core/src/providers/copilot.rs` — Copilot CLI provider (transcripts under `~/.copilot/session-state/`).
+- `crates/budi-core/src/providers/copilot_chat.rs` — Copilot Chat (VS Code) provider. Tails JSON/JSONL session files written by the `github.copilot-chat` extension under `workspaceStorage` and `globalStorage` across Code, Insiders, Exploration, VSCodium, Cursor, and remote-server installs. Five token-key shapes ([ADR-0092](docs/adr/0092-copilot-chat-data-contract.md) §2.3) including the v3 output-only fallback that captures May-2026+ VS Code builds dropping prompt-token counts client-side.
+- `crates/budi-core/src/sync/copilot_chat_billing.rs` — Copilot Chat dollar reconciliation against the GitHub Billing API. Scales `(date, model)` buckets in place; bumps `cost_confidence` to `exact` and tags `pricing_source = 'billing_api:copilot_chat'`. Two-tick empty-response heuristic detects org-managed licences and short-circuits until the next billing cycle.
 - `crates/budi-core/src/providers/cursor.rs` — Cursor provider (Usage API primary + transcript fallback; auth/session context from `state.vscdb` across macOS/Linux/Windows). Usage-API rows write `pricing_source = 'upstream:api'`; transcript-fallback rows flow through `pricing::lookup`.
 - `crates/budi-core/src/migration.rs` — Schema v1, all migration paths.
 - `crates/budi-core/src/cloud_sync.rs` — Cloud sync worker: envelope builder, watermark tracking, HTTPS-only HTTP client with retry/backoff, privacy-safe rollup extraction.

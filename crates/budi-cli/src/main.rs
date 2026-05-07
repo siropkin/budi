@@ -182,7 +182,7 @@ Examples:
         /// Output format: claude (ANSI+OSC8), starship (plain text), json, custom (uses config template)
         #[arg(long, value_enum, default_value_t = StatuslineFormat::Claude)]
         format: StatuslineFormat,
-        /// Scope all costs to a single provider (claude_code, cursor, codex, copilot_cli).
+        /// Scope all costs to a single provider (claude_code, cursor, codex, copilot_cli, copilot_chat).
         /// Defaults to `claude_code` when `--format claude` is used so the
         /// Claude Code statusline never shows blended multi-provider totals.
         #[arg(long)]
@@ -276,7 +276,7 @@ pub struct StatsOpts {
     /// `file` detail views (recommended when names repeat across repos).
     #[arg(long, global = true)]
     pub repo: Option<String>,
-    /// Filter by provider (e.g. claude_code, cursor, codex, copilot_cli, openai). Only meaningful for the default summary view.
+    /// Filter by provider (e.g. claude_code, cursor, codex, copilot_cli, copilot_chat, openai). Only meaningful for the default summary view.
     #[arg(long, global = true)]
     pub provider: Option<String>,
     /// Maximum rows in breakdown views (`projects`, `branches`, `tickets`,
