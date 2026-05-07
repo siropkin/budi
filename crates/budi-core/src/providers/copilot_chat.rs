@@ -365,6 +365,180 @@ fn parse_copilot_chat(path: &Path, content: &str, offset: usize) -> (Vec<ParsedM
     parse_json_document(path, content)
 }
 
+// ---------------------------------------------------------------------------
+// Workspace enrichment (ADR-0092 §2.2 — workspaceStorage/<hash>/workspace.json)
+// ---------------------------------------------------------------------------
+//
+// Per #681: every `copilot_chat` row landed with `cwd = NULL` because the
+// parser hard-skipped workspace enrichment. VS Code writes a sibling
+// `<workspaceStorage>/<hash>/workspace.json` next to every `chatSessions/`
+// directory; the `folder` (single-root) or `configuration` (multi-root)
+// field is the authoritative cwd. Once cwd lands, the GitEnricher
+// resolves `repo_id` and the in-parser HEAD read below resolves
+// `git_branch` — both flow off cwd, no provider-specific surface needed.
+
+/// Resolve the cwd for a Copilot Chat session file by walking up to the
+/// nearest `workspace.json`. Returns `None` for `emptyWindowChatSessions/*`
+/// (legitimately no folder context — the user opened VS Code without a
+/// workspace) and when no `workspace.json` is reachable from the session
+/// path.
+///
+/// Walks up at most through the `workspaceStorage` boundary so a stray
+/// `workspace.json` higher up the tree (e.g. user-level config) doesn't
+/// pollute every session's cwd.
+fn workspace_cwd_for_session_path(session_path: &Path) -> Option<String> {
+    // emptyWindowChatSessions: VS Code opened with no folder. Skip cleanly.
+    for ancestor in session_path.ancestors() {
+        if ancestor
+            .file_name()
+            .and_then(|s| s.to_str())
+            .is_some_and(|n| n.eq_ignore_ascii_case("emptyWindowChatSessions"))
+        {
+            return None;
+        }
+    }
+
+    let mut current = session_path.parent();
+    while let Some(dir) = current {
+        let candidate = dir.join("workspace.json");
+        if candidate.is_file() {
+            return read_workspace_json(&candidate);
+        }
+        // Stop at the workspaceStorage boundary — workspace.json lives at
+        // <workspaceStorage>/<hash>/, never above. Walking further would
+        // pick up a higher-level workspace.json that does not belong to
+        // this session.
+        if dir
+            .file_name()
+            .and_then(|s| s.to_str())
+            .is_some_and(|n| n.eq_ignore_ascii_case("workspaceStorage"))
+        {
+            return None;
+        }
+        current = dir.parent();
+    }
+    None
+}
+
+/// Read a `<workspaceStorage>/<hash>/workspace.json` file and resolve it
+/// to a local-side cwd string. Returns `None` on missing file, malformed
+/// JSON, or unrecognised shape — the caller treats `None` as "no
+/// enrichment" and emits the row without a cwd.
+fn read_workspace_json(path: &Path) -> Option<String> {
+    let content = std::fs::read_to_string(path).ok()?;
+    let doc: serde_json::Value = serde_json::from_str(&content).ok()?;
+
+    // Single-root: `{"folder": "file:///path"}` (or `vscode-remote://...`,
+    // `vscode-vfs://...`). The `folder` URI is authoritative.
+    if let Some(folder) = doc.get("folder").and_then(|v| v.as_str()) {
+        return Some(uri_to_local_path(folder));
+    }
+
+    // Multi-root: `{"configuration": "file:///abs/path/to/x.code-workspace"}`.
+    // Read the workspace file and pick the first folder per #681 (or
+    // fall back when the `inputState.workingSet` reference can't be
+    // resolved — which is the case for ~all sessions today).
+    if let Some(config) = doc.get("configuration").and_then(|v| v.as_str()) {
+        let config_path = PathBuf::from(uri_to_local_path(config));
+        if let Some(cwd) = first_folder_from_workspace_file(&config_path) {
+            return Some(cwd);
+        }
+    }
+
+    None
+}
+
+/// Read a `.code-workspace` file and return the first folder's resolved
+/// path. Folder paths in `.code-workspace` are typically relative to the
+/// workspace file's parent directory; absolute paths pass through.
+fn first_folder_from_workspace_file(config_path: &Path) -> Option<String> {
+    let content = std::fs::read_to_string(config_path).ok()?;
+    let ws: serde_json::Value = serde_json::from_str(&content).ok()?;
+    let folders = ws.get("folders").and_then(|v| v.as_array())?;
+    let first = folders.first()?;
+    let folder_path = first.get("path").and_then(|v| v.as_str())?;
+    let p = Path::new(folder_path);
+    if p.is_absolute() {
+        return Some(folder_path.to_string());
+    }
+    if let Some(parent) = config_path.parent() {
+        return Some(parent.join(p).to_string_lossy().into_owned());
+    }
+    Some(folder_path.to_string())
+}
+
+/// Convert a `file://` / `vscode-remote://` / `vscode-vfs://` URI to a
+/// local-side path string. Per #681:
+/// - `file:///abs/path` → `/abs/path`
+/// - `vscode-remote://ssh-remote+host/abs/path` → `/abs/path`
+/// - `vscode-vfs://github/owner/repo/path` → `/owner/repo/path`
+///   (host segment is dropped — won't resolve to a local repo, but keeps
+///   the row tagged for cloud-dashboard grouping).
+///
+/// Percent-encoded sequences (e.g. `%20` for spaces in
+/// `Application%20Support`) are decoded before stripping the scheme.
+fn uri_to_local_path(uri: &str) -> String {
+    let decoded = percent_decode(uri);
+    if let Some(rest) = decoded.strip_prefix("file://") {
+        return rest.to_string();
+    }
+    if let Some((_scheme, after)) = decoded.split_once("://") {
+        if let Some(slash_idx) = after.find('/') {
+            return after[slash_idx..].to_string();
+        }
+        return format!("/{after}");
+    }
+    decoded
+}
+
+/// Minimal RFC-3986 percent-decoder. Skips invalid escapes verbatim
+/// rather than failing — workspace.json values are written by VS Code so
+/// invalid escapes are not expected, and a parse failure here would lose
+/// cwd enrichment for the whole session.
+fn percent_decode(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%'
+            && i + 2 < bytes.len()
+            && let (Some(hi), Some(lo)) = (hex_digit(bytes[i + 1]), hex_digit(bytes[i + 2]))
+        {
+            out.push((hi << 4) | lo);
+            i += 3;
+            continue;
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8(out).unwrap_or_else(|_| s.to_string())
+}
+
+fn hex_digit(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(b - b'a' + 10),
+        b'A'..=b'F' => Some(b - b'A' + 10),
+        _ => None,
+    }
+}
+
+/// Read the current branch name from `<repo>/.git/HEAD`. Returns `None`
+/// when the cwd is not inside a git repo (per `repo_root_for`), the
+/// repo is in a detached-HEAD state, or `.git` is a worktree pointer
+/// file rather than a directory (handled best-effort — Copilot Chat
+/// sessions in worktrees fall back to `git_branch = NULL`, the same
+/// shape as a non-repo cwd).
+fn git_branch_for_cwd(cwd: &str) -> Option<String> {
+    let root = crate::repo_id::repo_root_for(Path::new(cwd))?;
+    let head = root.join(".git").join("HEAD");
+    let contents = std::fs::read_to_string(&head).ok()?;
+    contents
+        .trim()
+        .strip_prefix("ref: refs/heads/")
+        .map(|b| b.to_string())
+}
+
 fn parse_jsonl(path: &Path, content: &str, start_offset: usize) -> (Vec<ParsedMessage>, usize) {
     if start_offset > content.len() {
         return (Vec::new(), content.len());
@@ -397,6 +571,12 @@ fn parse_jsonl(path: &Path, content: &str, start_offset: usize) -> (Vec<ParsedMe
             serde_json::Value::String(sid.clone()),
         );
     }
+    // Resolve workspace cwd once per session-file parse and reuse for
+    // every emitted row — `parse_jsonl` corresponds 1:1 to a session, so
+    // re-reading `workspace.json` per emit would be wasteful (per #681
+    // "cwd should be cached per session").
+    let session_cwd = workspace_cwd_for_session_path(path);
+    let session_branch = session_cwd.as_deref().and_then(git_branch_for_cwd);
     let mut session_default_model: Option<String> = None;
     let mut messages = Vec::new();
     // Tracks emit keys (typically `requestId`) so a request that
@@ -467,6 +647,8 @@ fn parse_jsonl(path: &Path, content: &str, start_offset: usize) -> (Vec<ParsedMe
                         state.get("sessionId").and_then(|v| v.as_str()),
                         session_default_model.as_deref(),
                         &emit_key,
+                        session_cwd.as_deref(),
+                        session_branch.as_deref(),
                     ) {
                         messages.push(msg);
                     }
@@ -492,6 +674,8 @@ fn parse_jsonl(path: &Path, content: &str, start_offset: usize) -> (Vec<ParsedMe
                     state.get("sessionId").and_then(|v| v.as_str()),
                     session_default_model.as_deref(),
                     composite_index,
+                    session_cwd.as_deref(),
+                    session_branch.as_deref(),
                 ) {
                     messages.push(msg);
                 } else if !shape_matches_any(record) {
@@ -729,6 +913,8 @@ fn build_message_for_request(
     session_id: Option<&str>,
     session_default_model: Option<&str>,
     emit_key: &str,
+    session_cwd: Option<&str>,
+    session_branch: Option<&str>,
 ) -> Option<ParsedMessage> {
     let model = extract_model_id(request).or_else(|| session_default_model.map(|s| s.to_string()));
     let timestamp = extract_timestamp(request);
@@ -741,14 +927,14 @@ fn build_message_for_request(
         uuid,
         session_id: session_id.map(String::from),
         timestamp,
-        cwd: None,
+        cwd: session_cwd.map(String::from),
         role: "assistant".to_string(),
         model,
         input_tokens: tokens.input,
         output_tokens: tokens.output,
         cache_creation_tokens: tokens.cache_write,
         cache_read_tokens: tokens.cache_read,
-        git_branch: None,
+        git_branch: session_branch.map(String::from),
         repo_id: None,
         provider: "copilot_chat".to_string(),
         cost_cents: None,
@@ -813,6 +999,8 @@ fn parse_json_document(path: &Path, content: &str) -> (Vec<ParsedMessage>, usize
         .or_else(|| session_id_for_path(path));
 
     let mut session_default_model = extract_session_default_model(&doc);
+    let session_cwd = workspace_cwd_for_session_path(path);
+    let session_branch = session_cwd.as_deref().and_then(git_branch_for_cwd);
 
     let records: Vec<&serde_json::Value> = flatten_records(&doc);
 
@@ -826,6 +1014,8 @@ fn parse_json_document(path: &Path, content: &str) -> (Vec<ParsedMessage>, usize
             session_id.as_deref(),
             session_default_model.as_deref(),
             index,
+            session_cwd.as_deref(),
+            session_branch.as_deref(),
         ) {
             messages.push(msg);
         } else if !shape_matches_any(record) {
@@ -870,6 +1060,8 @@ fn build_message(
     session_id: Option<&str>,
     session_default_model: Option<&str>,
     index: usize,
+    session_cwd: Option<&str>,
+    session_branch: Option<&str>,
 ) -> Option<ParsedMessage> {
     let tokens = extract_tokens(record)?;
 
@@ -885,14 +1077,14 @@ fn build_message(
         uuid,
         session_id: session_id.map(String::from),
         timestamp,
-        cwd: None,
+        cwd: session_cwd.map(String::from),
         role: "assistant".to_string(),
         model,
         input_tokens: tokens.input,
         output_tokens: tokens.output,
         cache_creation_tokens: tokens.cache_write,
         cache_read_tokens: tokens.cache_read,
-        git_branch: None,
+        git_branch: session_branch.map(String::from),
         repo_id: None,
         provider: "copilot_chat".to_string(),
         cost_cents: None,
@@ -2165,6 +2357,210 @@ mod tests {
         // Every emitted row carries a non-zero output_tokens — none are
         // synthesized from the bare stub.
         assert!(msgs.iter().all(|m| m.output_tokens > 0));
+    }
+
+    // ---- #681: workspace.json cwd enrichment --------------------------
+
+    /// `parse_workspace_storage_session_enriches_cwd` — covers all four
+    /// shapes the parser must handle per #681:
+    /// 1. `<workspaceStorage>/<hash>/chatSessions/<uuid>.jsonl` with a
+    ///    sibling `<hash>/workspace.json` → cwd populated from `folder`.
+    /// 2. `<globalStorage>/emptyWindowChatSessions/<uuid>.jsonl` → cwd
+    ///    stays `None` cleanly (no spurious warnings, no crash).
+    /// 3. Remote / dev-container — same `<hash>/workspace.json` shape on
+    ///    the remote-side path (`~/.vscode-server/data/User/...`) → cwd
+    ///    populated.
+    /// 4. Multi-root — `workspace.json` carries `configuration` pointing
+    ///    at a `.code-workspace` file → first folder's path is the cwd.
+    #[test]
+    fn parse_workspace_storage_session_enriches_cwd() {
+        let tmp = std::env::temp_dir().join("budi-copilot-chat-cwd-enrich");
+        let _ = std::fs::remove_dir_all(&tmp);
+
+        // ---- Case 1: workspaceStorage single-root ----------------------
+        let hash_dir = tmp.join("Library/Application Support/Code/User/workspaceStorage/abc123");
+        let chat_dir = hash_dir.join("chatSessions");
+        std::fs::create_dir_all(&chat_dir).unwrap();
+        let target_cwd = tmp.join("repos/single-root").to_string_lossy().into_owned();
+        std::fs::write(
+            hash_dir.join("workspace.json"),
+            format!("{{\"folder\":\"file://{}\"}}", target_cwd),
+        )
+        .unwrap();
+        let session_path = chat_dir.join("sess-single.jsonl");
+        let line = r#"{"kind":2,"v":[{"requestId":"r-1","modelId":"copilot/gpt-4.1","completionTokens":42,"result":{"metadata":{"resolvedModel":"x"}}}]}"#;
+        std::fs::write(&session_path, format!("{line}\n")).unwrap();
+        let (msgs, _) = parse_copilot_chat(&session_path, &format!("{line}\n"), 0);
+        assert_eq!(msgs.len(), 1, "single-root session emits one row");
+        assert_eq!(
+            msgs[0].cwd.as_deref(),
+            Some(target_cwd.as_str()),
+            "single-root cwd resolved from workspace.json folder URI"
+        );
+
+        // ---- Case 2: emptyWindowChatSessions ---------------------------
+        let empty_dir =
+            tmp.join("Library/Application Support/Code/User/globalStorage/emptyWindowChatSessions");
+        std::fs::create_dir_all(&empty_dir).unwrap();
+        let empty_path = empty_dir.join("sess-empty.jsonl");
+        std::fs::write(&empty_path, format!("{line}\n")).unwrap();
+        let (empty_msgs, _) = parse_copilot_chat(&empty_path, &format!("{line}\n"), 0);
+        assert_eq!(empty_msgs.len(), 1);
+        assert!(
+            empty_msgs[0].cwd.is_none(),
+            "emptyWindowChatSessions session leaves cwd None"
+        );
+        assert!(
+            empty_msgs[0].git_branch.is_none(),
+            "emptyWindowChatSessions session leaves git_branch None"
+        );
+
+        // ---- Case 3: remote / dev-container ----------------------------
+        let remote_hash = tmp.join(".vscode-server/data/User/workspaceStorage/remotehash456");
+        let remote_chat = remote_hash.join("chatSessions");
+        std::fs::create_dir_all(&remote_chat).unwrap();
+        std::fs::write(
+            remote_hash.join("workspace.json"),
+            r#"{"folder":"vscode-remote://ssh-remote+myhost/srv/repos/remote-proj"}"#,
+        )
+        .unwrap();
+        let remote_session = remote_chat.join("sess-remote.jsonl");
+        std::fs::write(&remote_session, format!("{line}\n")).unwrap();
+        let (remote_msgs, _) = parse_copilot_chat(&remote_session, &format!("{line}\n"), 0);
+        assert_eq!(remote_msgs.len(), 1);
+        assert_eq!(
+            remote_msgs[0].cwd.as_deref(),
+            Some("/srv/repos/remote-proj"),
+            "remote URI strips scheme + host segment"
+        );
+
+        // ---- Case 4: multi-root configuration --------------------------
+        let multi_hash =
+            tmp.join("Library/Application Support/Code/User/workspaceStorage/multi789");
+        let multi_chat = multi_hash.join("chatSessions");
+        std::fs::create_dir_all(&multi_chat).unwrap();
+        let workspace_dir = tmp.join("repos/workspaces");
+        let folder_a = tmp.join("repos/multi-a");
+        let folder_b = tmp.join("repos/multi-b");
+        std::fs::create_dir_all(&workspace_dir).unwrap();
+        std::fs::create_dir_all(&folder_a).unwrap();
+        std::fs::create_dir_all(&folder_b).unwrap();
+        let code_workspace = workspace_dir.join("multi.code-workspace");
+        std::fs::write(
+            &code_workspace,
+            format!(
+                "{{\"folders\":[{{\"path\":\"{}\"}},{{\"path\":\"{}\"}}]}}",
+                folder_a.display(),
+                folder_b.display(),
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            multi_hash.join("workspace.json"),
+            format!(
+                "{{\"configuration\":\"file://{}\"}}",
+                code_workspace.display()
+            ),
+        )
+        .unwrap();
+        let multi_session = multi_chat.join("sess-multi.jsonl");
+        std::fs::write(&multi_session, format!("{line}\n")).unwrap();
+        let (multi_msgs, _) = parse_copilot_chat(&multi_session, &format!("{line}\n"), 0);
+        assert_eq!(multi_msgs.len(), 1);
+        assert_eq!(
+            multi_msgs[0].cwd.as_deref(),
+            Some(folder_a.to_string_lossy().as_ref()),
+            "multi-root cwd is the first folder in .code-workspace"
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// Percent-encoded paths (`Application%20Support`) must round-trip
+    /// through the URI decoder so cwds with spaces resolve correctly.
+    #[test]
+    fn workspace_json_percent_decodes_folder_uri() {
+        let tmp = std::env::temp_dir().join("budi-copilot-chat-percent-decode");
+        let _ = std::fs::remove_dir_all(&tmp);
+        let hash_dir = tmp.join("workspaceStorage/abc");
+        let chat_dir = hash_dir.join("chatSessions");
+        std::fs::create_dir_all(&chat_dir).unwrap();
+        std::fs::write(
+            hash_dir.join("workspace.json"),
+            r#"{"folder":"file:///Users/me/My%20Project"}"#,
+        )
+        .unwrap();
+        let session = chat_dir.join("s.jsonl");
+        let line = r#"{"kind":2,"v":[{"requestId":"r","completionTokens":1}]}"#;
+        std::fs::write(&session, format!("{line}\n")).unwrap();
+        let (msgs, _) = parse_copilot_chat(&session, &format!("{line}\n"), 0);
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0].cwd.as_deref(), Some("/Users/me/My Project"));
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// Malformed `workspace.json` falls back to `cwd: None` cleanly — the
+    /// parse must not fail.
+    #[test]
+    fn workspace_json_malformed_falls_back_to_none() {
+        let tmp = std::env::temp_dir().join("budi-copilot-chat-malformed-ws");
+        let _ = std::fs::remove_dir_all(&tmp);
+        let hash_dir = tmp.join("workspaceStorage/bad");
+        let chat_dir = hash_dir.join("chatSessions");
+        std::fs::create_dir_all(&chat_dir).unwrap();
+        std::fs::write(hash_dir.join("workspace.json"), b"{not valid json").unwrap();
+        let session = chat_dir.join("s.jsonl");
+        let line = r#"{"kind":2,"v":[{"requestId":"r","completionTokens":1}]}"#;
+        std::fs::write(&session, format!("{line}\n")).unwrap();
+        let (msgs, _) = parse_copilot_chat(&session, &format!("{line}\n"), 0);
+        assert_eq!(msgs.len(), 1);
+        assert!(
+            msgs[0].cwd.is_none(),
+            "malformed workspace.json -> cwd None"
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// End-to-end against the canonical R1.2 fixture (#669) — drops the
+    /// `vscode_chat_0_47_0.jsonl` content under a synthetic
+    /// `<workspaceStorage>/<hash>/chatSessions/` tree alongside the
+    /// `vscode_chat_0_47_0.workspace.json` sibling fixture, and asserts
+    /// every emitted row carries the cwd from `workspace.json`. Pins the
+    /// #681 acceptance criterion: "the fixture gains a sibling
+    /// `vscode_chat_0_47_0.workspace.json` so the unit test asserts
+    /// cwd-enrichment end-to-end against the canonical fixture".
+    #[test]
+    fn parse_real_vscode_0_47_0_fixture_enriches_cwd() {
+        let jsonl = include_str!("copilot_chat/fixtures/vscode_chat_0_47_0.jsonl");
+        let workspace_json =
+            include_str!("copilot_chat/fixtures/vscode_chat_0_47_0.workspace.json");
+
+        let tmp = std::env::temp_dir().join("budi-copilot-chat-r681-canonical");
+        let _ = std::fs::remove_dir_all(&tmp);
+        let hash_dir = tmp.join("workspaceStorage/canon-hash");
+        let chat_dir = hash_dir.join("chatSessions");
+        std::fs::create_dir_all(&chat_dir).unwrap();
+        std::fs::write(hash_dir.join("workspace.json"), workspace_json).unwrap();
+        let session_path = chat_dir.join("vscode_chat_0_47_0.jsonl");
+        std::fs::write(&session_path, jsonl).unwrap();
+
+        let (msgs, _) = parse_copilot_chat(&session_path, jsonl, 0);
+        assert!(
+            !msgs.is_empty(),
+            "canonical fixture must still emit rows under the cwd-enrichment path"
+        );
+        // The fixture workspace.json points at /Users/budi-fixture/...
+        // which doesn't exist on disk, but cwd is the *string* — the
+        // GitEnricher resolves it (or not) at the pipeline layer.
+        let expected_cwd = "/Users/budi-fixture/workspaces/vscode-0.47.0-chat";
+        assert!(
+            msgs.iter().all(|m| m.cwd.as_deref() == Some(expected_cwd)),
+            "every emitted row must carry the cwd from the sibling \
+             workspace.json (got: {:?})",
+            msgs.iter().map(|m| m.cwd.as_deref()).collect::<Vec<_>>()
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     /// `append_at_path` correctness — the default-path branch (kind:2 with
