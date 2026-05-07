@@ -124,6 +124,20 @@ pub fn cmd_doctor(
             }
             report.record(&visibility);
             checks.push(visibility);
+
+            // R1.3 (#670): zero-rows-from-tailer AMBER. The 8.4.0 Copilot
+            // Chat parser regression shipped with both checks above PASS:
+            // bytes were flowing, the tailer was caught up. The signal that
+            // would have flipped doctor to AMBER on the release driver's
+            // machine before the tag is "tailer advanced N bytes in the
+            // last 30 min but no rows for this provider landed" — see
+            // ADR-0092 §2.6.
+            let rows = summarize_tailer_rows(conn, provider.as_ref(), Utc::now());
+            if !json_output {
+                rows.print_respecting(quiet);
+            }
+            report.record(&rows);
+            checks.push(rows);
         }
     }
 
@@ -1221,6 +1235,159 @@ fn classify_transcript_visibility(
     )
 }
 
+// ---------------------------------------------------------------------------
+// R1.3 (#670): zero-rows-from-tailer AMBER signal.
+//
+// The 8.4.0 Copilot Chat parser regression shipped with `tailer health` PASS
+// and `transcript visibility` PASS — both run on byte-flow signals, neither
+// guarantees the parser actually emits rows. The signal below pairs the
+// existing `tail_offsets` snapshot with a `messages` row count over the same
+// window: if the tailer advanced bytes for a provider but zero rows for that
+// provider landed, the parser is almost certainly broken against a new
+// upstream shape (see ADR-0092 §2.6 / `MIN_API_VERSION`).
+//
+// AMBER (Warn), not FAIL: a generally-healthy install briefly between
+// extension format flips should not break for an end user, and a workspace
+// with non-AI background writes (logs, embeddings) can legitimately advance
+// bytes without producing message rows. The release-side smoke gate (R1.5,
+// #672) escalates AMBER to a release blocker so this stays a useful signal
+// without being a noisy failure for end users.
+// ---------------------------------------------------------------------------
+
+const ZERO_ROWS_WINDOW_MINUTES: i64 = 30;
+
+#[derive(Debug, Clone)]
+struct TailerRowsActivity {
+    advanced_bytes: u64,
+    last_seen: Option<DateTime<Utc>>,
+    rows_in_window: usize,
+    db_error: Option<String>,
+}
+
+fn summarize_tailer_rows(
+    conn: Option<&Connection>,
+    provider: &dyn Provider,
+    now: DateTime<Utc>,
+) -> CheckResult {
+    let label = format!("tailer rows / {}", provider.display_name());
+    let activity = match conn {
+        Some(conn) => load_tailer_rows_activity(conn, provider.name(), now),
+        None => TailerRowsActivity {
+            advanced_bytes: 0,
+            last_seen: None,
+            rows_in_window: 0,
+            db_error: Some("database connection unavailable".to_string()),
+        },
+    };
+    classify_tailer_rows(label, provider.name(), &activity, now)
+}
+
+fn load_tailer_rows_activity(
+    conn: &Connection,
+    provider: &str,
+    now: DateTime<Utc>,
+) -> TailerRowsActivity {
+    let mut activity = TailerRowsActivity {
+        advanced_bytes: 0,
+        last_seen: None,
+        rows_in_window: 0,
+        db_error: None,
+    };
+
+    match conn.query_row(
+        "SELECT COALESCE(SUM(byte_offset), 0), MAX(last_seen)
+         FROM tail_offsets
+         WHERE provider = ?1",
+        params![provider],
+        |row| Ok((row.get::<_, i64>(0)?, row.get::<_, Option<String>>(1)?)),
+    ) {
+        Ok((bytes, last_seen)) => {
+            activity.advanced_bytes = bytes.max(0) as u64;
+            activity.last_seen = last_seen.and_then(|value| parse_rfc3339_utc(&value));
+        }
+        Err(e) => {
+            activity.db_error = Some(format!("could not read tail_offsets ({e})"));
+            return activity;
+        }
+    }
+
+    let cutoff = now - chrono::Duration::minutes(ZERO_ROWS_WINDOW_MINUTES);
+    let cutoff_iso = cutoff.to_rfc3339();
+    match conn.query_row(
+        "SELECT COUNT(*) FROM messages WHERE provider = ?1 AND timestamp >= ?2",
+        params![provider, cutoff_iso],
+        |row| row.get::<_, i64>(0),
+    ) {
+        Ok(count) => activity.rows_in_window = count.max(0) as usize,
+        Err(e) => {
+            activity.db_error = Some(format!("could not count messages ({e})"));
+        }
+    }
+
+    activity
+}
+
+fn classify_tailer_rows(
+    label: String,
+    provider_name: &str,
+    activity: &TailerRowsActivity,
+    now: DateTime<Utc>,
+) -> CheckResult {
+    if let Some(ref error) = activity.db_error {
+        return CheckResult::pass(label, format!("zero-rows check skipped — {error}"));
+    }
+
+    let last_seen_recent = activity
+        .last_seen
+        .map(|ts| {
+            let age = now.signed_duration_since(ts).num_minutes();
+            (0..=ZERO_ROWS_WINDOW_MINUTES).contains(&age)
+        })
+        .unwrap_or(false);
+
+    if !last_seen_recent || activity.advanced_bytes == 0 {
+        return CheckResult::pass(
+            label,
+            format!(
+                "no recent tailer advance for {provider_name} in the last {ZERO_ROWS_WINDOW_MINUTES} min — nothing to compare against"
+            ),
+        );
+    }
+
+    if activity.rows_in_window > 0 {
+        return CheckResult::pass(
+            label,
+            format!(
+                "tailer consumed {} for {provider_name} and {} row(s) landed in the last {ZERO_ROWS_WINDOW_MINUTES} min",
+                format_bytes(activity.advanced_bytes),
+                activity.rows_in_window
+            ),
+        );
+    }
+
+    // AMBER: bytes flowing, no rows emitting. Likely a parser shape regression.
+    let detail = if provider_name == "copilot_chat" {
+        format!(
+            "tailer advanced {} in the last {ZERO_ROWS_WINDOW_MINUTES} min but no {provider_name} rows landed in the database. Likely a parser shape regression — see ADR-0092 §2.6 / MIN_API_VERSION.",
+            format_bytes(activity.advanced_bytes),
+        )
+    } else {
+        format!(
+            "tailer advanced {} in the last {ZERO_ROWS_WINDOW_MINUTES} min but no {provider_name} rows landed in the database.",
+            format_bytes(activity.advanced_bytes),
+        )
+    };
+
+    CheckResult::warn(
+        label,
+        detail,
+        Some(
+            "Check `~/.local/share/budi/logs/daemon.log` for parser warnings (e.g. `*_unknown_record_shape`) and rerun `budi doctor` after restarting the daemon."
+                .to_string(),
+        ),
+    )
+}
+
 fn format_bytes(bytes: u64) -> String {
     const KB: u64 = 1024;
     const MB: u64 = 1024 * KB;
@@ -1873,6 +2040,183 @@ mod tests {
 
         assert_eq!(result.state, CheckState::Fail);
         assert!(result.detail.contains("has not seeded any offsets"));
+    }
+
+    // R1.3 (#670): zero-rows-from-tailer AMBER signal.
+    //
+    // Acceptance from the ticket:
+    //   - 50 KB advance + 0 rows in window  → AMBER (parser-regression hint).
+    //   - same advance + N>0 rows in window → PASS.
+    //   - zero advance + zero rows          → PASS (idle, not AMBER).
+
+    #[test]
+    fn tailer_rows_ambers_when_bytes_flow_but_zero_rows_land_for_copilot_chat() {
+        let now = Utc::now();
+        let activity = TailerRowsActivity {
+            advanced_bytes: 50 * 1024,
+            last_seen: Some(now - chrono::Duration::seconds(30)),
+            rows_in_window: 0,
+            db_error: None,
+        };
+
+        let result = classify_tailer_rows(
+            "tailer rows / Copilot Chat".to_string(),
+            "copilot_chat",
+            &activity,
+            now,
+        );
+
+        assert_eq!(result.state, CheckState::Warn);
+        assert!(result.detail.contains("50.0 KB"));
+        assert!(result.detail.contains("no copilot_chat rows landed"));
+        assert!(result.detail.contains("ADR-0092"));
+        assert!(result.detail.contains("MIN_API_VERSION"));
+        assert!(
+            result
+                .fix
+                .as_deref()
+                .unwrap_or_default()
+                .contains("daemon.log")
+        );
+    }
+
+    #[test]
+    fn tailer_rows_passes_when_bytes_flow_and_rows_land_in_window() {
+        let now = Utc::now();
+        let activity = TailerRowsActivity {
+            advanced_bytes: 50 * 1024,
+            last_seen: Some(now - chrono::Duration::seconds(30)),
+            rows_in_window: 7,
+            db_error: None,
+        };
+
+        let result = classify_tailer_rows(
+            "tailer rows / Copilot Chat".to_string(),
+            "copilot_chat",
+            &activity,
+            now,
+        );
+
+        assert_eq!(result.state, CheckState::Pass);
+        assert!(result.detail.contains("7 row(s) landed"));
+        assert!(result.fix.is_none());
+    }
+
+    #[test]
+    fn tailer_rows_passes_when_idle_with_zero_advance_and_zero_rows() {
+        let now = Utc::now();
+        let activity = TailerRowsActivity {
+            advanced_bytes: 0,
+            last_seen: Some(now - chrono::Duration::seconds(10)),
+            rows_in_window: 0,
+            db_error: None,
+        };
+
+        let result = classify_tailer_rows(
+            "tailer rows / Copilot Chat".to_string(),
+            "copilot_chat",
+            &activity,
+            now,
+        );
+
+        // Idle workspace: no bytes consumed, no rows expected — must NOT be AMBER.
+        assert_eq!(result.state, CheckState::Pass);
+        assert!(result.detail.contains("no recent tailer advance"));
+    }
+
+    #[test]
+    fn tailer_rows_amber_message_omits_adr_pointer_for_non_copilot_chat_providers() {
+        let now = Utc::now();
+        let activity = TailerRowsActivity {
+            advanced_bytes: 12 * 1024,
+            last_seen: Some(now - chrono::Duration::seconds(60)),
+            rows_in_window: 0,
+            db_error: None,
+        };
+
+        let result =
+            classify_tailer_rows("tailer rows / Cursor".to_string(), "cursor", &activity, now);
+
+        assert_eq!(result.state, CheckState::Warn);
+        assert!(result.detail.contains("no cursor rows landed"));
+        // ADR-0092 hint is copilot_chat-specific only.
+        assert!(!result.detail.contains("ADR-0092"));
+    }
+
+    #[test]
+    fn tailer_rows_passes_when_last_seen_is_outside_window() {
+        let now = Utc::now();
+        let activity = TailerRowsActivity {
+            advanced_bytes: 50 * 1024,
+            last_seen: Some(now - chrono::Duration::minutes(ZERO_ROWS_WINDOW_MINUTES + 5)),
+            rows_in_window: 0,
+            db_error: None,
+        };
+
+        let result = classify_tailer_rows(
+            "tailer rows / Copilot Chat".to_string(),
+            "copilot_chat",
+            &activity,
+            now,
+        );
+
+        // Stale tailer activity: not the same failure mode as a parser regression.
+        assert_eq!(result.state, CheckState::Pass);
+    }
+
+    #[test]
+    fn tailer_rows_loader_reads_offset_advance_and_message_count() {
+        let conn = Connection::open_in_memory().unwrap();
+        budi_core::migration::migrate(&conn).unwrap();
+
+        let now = Utc::now();
+        let last_seen = (now - chrono::Duration::seconds(30)).to_rfc3339();
+        let recent_msg = (now - chrono::Duration::seconds(10)).to_rfc3339();
+        let stale_msg = (now - chrono::Duration::hours(2)).to_rfc3339();
+
+        // Seed a 50 KB offset advance for copilot_chat.
+        conn.execute(
+            "INSERT INTO tail_offsets (provider, path, byte_offset, last_seen) VALUES (?1, ?2, ?3, ?4)",
+            params!["copilot_chat", "/tmp/sess.jsonl", 50_i64 * 1024, last_seen],
+        )
+        .unwrap();
+        // One in-window message for copilot_chat, one stale message that must NOT be counted.
+        conn.execute(
+            "INSERT INTO messages (id, role, timestamp, model, provider, input_tokens, output_tokens) VALUES ('m1', 'assistant', ?1, 'gpt-4o', 'copilot_chat', 1, 2)",
+            params![recent_msg],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO messages (id, role, timestamp, model, provider, input_tokens, output_tokens) VALUES ('m2', 'assistant', ?1, 'gpt-4o', 'copilot_chat', 1, 2)",
+            params![stale_msg],
+        )
+        .unwrap();
+        // A row for a different provider must not bleed into the count.
+        conn.execute(
+            "INSERT INTO messages (id, role, timestamp, model, provider, input_tokens, output_tokens) VALUES ('m3', 'assistant', ?1, 'claude-sonnet-4-5', 'claude_code', 1, 2)",
+            params![recent_msg],
+        )
+        .unwrap();
+
+        let activity = load_tailer_rows_activity(&conn, "copilot_chat", now);
+
+        assert!(activity.db_error.is_none());
+        assert_eq!(activity.advanced_bytes, 50 * 1024);
+        assert_eq!(activity.rows_in_window, 1);
+        assert!(activity.last_seen.is_some());
+    }
+
+    #[test]
+    fn tailer_rows_loader_returns_zero_when_no_offsets_or_messages_exist() {
+        let conn = Connection::open_in_memory().unwrap();
+        budi_core::migration::migrate(&conn).unwrap();
+
+        let activity = load_tailer_rows_activity(&conn, "copilot_chat", Utc::now());
+
+        assert!(activity.db_error.is_none());
+        assert_eq!(activity.advanced_bytes, 0);
+        assert_eq!(activity.rows_in_window, 0);
+        assert!(activity.last_seen.is_none());
     }
 
     #[test]
