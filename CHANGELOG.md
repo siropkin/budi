@@ -1,6 +1,6 @@
 # Changelog
 
-## 8.4.0 — Unreleased
+## 8.4.0 — 2026-05-07
 
 8.4.0 is the **VS Code-side coverage** release: the budi extension now hosts inside VS Code as well as Cursor, with **GitHub Copilot Chat** as the first non-Cursor provider. The architectural pieces this round forces into the codebase — a host-scoped statusline surface that aggregates over multiple providers in a single editor window, a third-party-API-as-reconciliation pattern (GitHub Billing API), and a `MIN_API_VERSION` pattern for provider-side data contracts — are the same pieces every later 9.0.0 provider will need (#647).
 
