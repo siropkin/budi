@@ -539,6 +539,24 @@ fn git_branch_for_cwd(cwd: &str) -> Option<String> {
         .map(|b| b.to_string())
 }
 
+/// Per-session enrichment derived once per `parse_file` call so the
+/// builder helpers stay under clippy's `too_many_arguments` limit (a
+/// single parameter holds both fields instead of plumbing two parallel
+/// `Option<&str>`s through every call site).
+#[derive(Default, Clone)]
+struct SessionEnrichment {
+    cwd: Option<String>,
+    git_branch: Option<String>,
+}
+
+impl SessionEnrichment {
+    fn for_path(session_path: &Path) -> Self {
+        let cwd = workspace_cwd_for_session_path(session_path);
+        let git_branch = cwd.as_deref().and_then(git_branch_for_cwd);
+        Self { cwd, git_branch }
+    }
+}
+
 fn parse_jsonl(path: &Path, content: &str, start_offset: usize) -> (Vec<ParsedMessage>, usize) {
     if start_offset > content.len() {
         return (Vec::new(), content.len());
@@ -575,8 +593,7 @@ fn parse_jsonl(path: &Path, content: &str, start_offset: usize) -> (Vec<ParsedMe
     // every emitted row — `parse_jsonl` corresponds 1:1 to a session, so
     // re-reading `workspace.json` per emit would be wasteful (per #681
     // "cwd should be cached per session").
-    let session_cwd = workspace_cwd_for_session_path(path);
-    let session_branch = session_cwd.as_deref().and_then(git_branch_for_cwd);
+    let enrichment = SessionEnrichment::for_path(path);
     let mut session_default_model: Option<String> = None;
     let mut messages = Vec::new();
     // Tracks emit keys (typically `requestId`) so a request that
@@ -647,8 +664,7 @@ fn parse_jsonl(path: &Path, content: &str, start_offset: usize) -> (Vec<ParsedMe
                         state.get("sessionId").and_then(|v| v.as_str()),
                         session_default_model.as_deref(),
                         &emit_key,
-                        session_cwd.as_deref(),
-                        session_branch.as_deref(),
+                        &enrichment,
                     ) {
                         messages.push(msg);
                     }
@@ -674,8 +690,7 @@ fn parse_jsonl(path: &Path, content: &str, start_offset: usize) -> (Vec<ParsedMe
                     state.get("sessionId").and_then(|v| v.as_str()),
                     session_default_model.as_deref(),
                     composite_index,
-                    session_cwd.as_deref(),
-                    session_branch.as_deref(),
+                    &enrichment,
                 ) {
                     messages.push(msg);
                 } else if !shape_matches_any(record) {
@@ -913,8 +928,7 @@ fn build_message_for_request(
     session_id: Option<&str>,
     session_default_model: Option<&str>,
     emit_key: &str,
-    session_cwd: Option<&str>,
-    session_branch: Option<&str>,
+    enrichment: &SessionEnrichment,
 ) -> Option<ParsedMessage> {
     let model = extract_model_id(request).or_else(|| session_default_model.map(|s| s.to_string()));
     let timestamp = extract_timestamp(request);
@@ -927,14 +941,14 @@ fn build_message_for_request(
         uuid,
         session_id: session_id.map(String::from),
         timestamp,
-        cwd: session_cwd.map(String::from),
+        cwd: enrichment.cwd.clone(),
         role: "assistant".to_string(),
         model,
         input_tokens: tokens.input,
         output_tokens: tokens.output,
         cache_creation_tokens: tokens.cache_write,
         cache_read_tokens: tokens.cache_read,
-        git_branch: session_branch.map(String::from),
+        git_branch: enrichment.git_branch.clone(),
         repo_id: None,
         provider: "copilot_chat".to_string(),
         cost_cents: None,
@@ -999,8 +1013,7 @@ fn parse_json_document(path: &Path, content: &str) -> (Vec<ParsedMessage>, usize
         .or_else(|| session_id_for_path(path));
 
     let mut session_default_model = extract_session_default_model(&doc);
-    let session_cwd = workspace_cwd_for_session_path(path);
-    let session_branch = session_cwd.as_deref().and_then(git_branch_for_cwd);
+    let enrichment = SessionEnrichment::for_path(path);
 
     let records: Vec<&serde_json::Value> = flatten_records(&doc);
 
@@ -1014,8 +1027,7 @@ fn parse_json_document(path: &Path, content: &str) -> (Vec<ParsedMessage>, usize
             session_id.as_deref(),
             session_default_model.as_deref(),
             index,
-            session_cwd.as_deref(),
-            session_branch.as_deref(),
+            &enrichment,
         ) {
             messages.push(msg);
         } else if !shape_matches_any(record) {
@@ -1060,8 +1072,7 @@ fn build_message(
     session_id: Option<&str>,
     session_default_model: Option<&str>,
     index: usize,
-    session_cwd: Option<&str>,
-    session_branch: Option<&str>,
+    enrichment: &SessionEnrichment,
 ) -> Option<ParsedMessage> {
     let tokens = extract_tokens(record)?;
 
@@ -1077,14 +1088,14 @@ fn build_message(
         uuid,
         session_id: session_id.map(String::from),
         timestamp,
-        cwd: session_cwd.map(String::from),
+        cwd: enrichment.cwd.clone(),
         role: "assistant".to_string(),
         model,
         input_tokens: tokens.input,
         output_tokens: tokens.output,
         cache_creation_tokens: tokens.cache_write,
         cache_read_tokens: tokens.cache_read,
-        git_branch: session_branch.map(String::from),
+        git_branch: enrichment.git_branch.clone(),
         repo_id: None,
         provider: "copilot_chat".to_string(),
         cost_cents: None,
