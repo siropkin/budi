@@ -1893,6 +1893,114 @@ mod tests {
         );
     }
 
+    // ---- v4 (8.4.1, R1.2): real-extension regression fixture --------------
+
+    /// Real-extension regression fixture (#669) — sanitized capture of an
+    /// actual `github.copilot-chat` 0.47.0 session file. The reducer must
+    /// materialize one row per completed request, matching the expected
+    /// `(requestId, output_tokens, input_tokens, model)` tuples from
+    /// `vscode_chat_0_47_0.expected.json` exactly once each.
+    ///
+    /// Why this exists: the synthetic v3 fixtures pass with both the old
+    /// per-line parser and the v4 reducer because they don't actually
+    /// exercise the kind:0 + kind:1/kind:2 envelope dance. This test pins
+    /// the reducer against a real on-disk capture so a future regression
+    /// of the same shape (an extension bump that changes how the mutation
+    /// log is shaped) fails loudly here even when the synthetic fixtures
+    /// continue to pass.
+    #[test]
+    fn parse_real_vscode_0_47_0_fixture() {
+        let content = include_str!("copilot_chat/fixtures/vscode_chat_0_47_0.jsonl");
+        let expected_json = include_str!("copilot_chat/fixtures/vscode_chat_0_47_0.expected.json");
+        let expected: Vec<serde_json::Value> = serde_json::from_str(expected_json).unwrap();
+
+        // Use a path that does NOT exist on disk so the parser falls through
+        // to the in-memory `content` rather than re-reading from a stale
+        // checkout-relative path.
+        let path = Path::new("/tmp/budi-fixtures-r1-2/vscode_chat_0_47_0.jsonl");
+        let (msgs, _) = parse_copilot_chat(path, content, 0);
+
+        assert_eq!(
+            msgs.len(),
+            expected.len(),
+            "fixture must yield exactly {} rows (one per completed request, \
+             7 inline-completionTokens + 1 patched-completionTokens)",
+            expected.len()
+        );
+
+        // Match each expected tuple to exactly one emitted row, by
+        // `(output_tokens, input_tokens, model)`. The fixture's
+        // output-token values are all distinct, so this uniquely identifies
+        // the request even though `request_id` itself isn't carried on
+        // `ParsedMessage`.
+        for entry in &expected {
+            let want_input = entry["input_tokens"].as_u64().unwrap();
+            let want_output = entry["output_tokens"].as_u64().unwrap();
+            let want_model = entry["model"].as_str().unwrap();
+            let matches: Vec<_> = msgs
+                .iter()
+                .filter(|m| {
+                    m.input_tokens == want_input
+                        && m.output_tokens == want_output
+                        && m.model.as_deref() == Some(want_model)
+                })
+                .collect();
+            assert_eq!(
+                matches.len(),
+                1,
+                "expected exactly one row for {} (input={}, output={}, model={}); \
+                 got {}. If this fails against the v4 reducer, the parser \
+                 regressed; if it fails against the v3 per-line parser, that's \
+                 the regression #669 was authored to catch.",
+                entry["requestId"].as_str().unwrap(),
+                want_input,
+                want_output,
+                want_model,
+                matches.len()
+            );
+        }
+
+        // Provider tag and `auto` model are preserved through the reducer.
+        assert!(msgs.iter().all(|m| m.provider == "copilot_chat"));
+        assert!(msgs.iter().all(|m| m.model.as_deref() == Some("auto")));
+    }
+
+    /// Streaming-truncation variant — the same fixture sliced to drop the
+    /// final `kind:1` `completionTokens` patch. The kind:2 stub for the
+    /// last request is on disk (`requestId` + `modelId` exist) but the
+    /// completion-token count never landed.
+    ///
+    /// Pins the live-tailer contract from #668: an in-flight request MUST
+    /// NOT emit until the completion token arrives. Only the seven
+    /// requests with inline `completionTokens` (delivered on the kind:2
+    /// push payload) materialize.
+    #[test]
+    fn parse_real_vscode_0_47_0_fixture_streaming_truncation() {
+        let content = include_str!("copilot_chat/fixtures/vscode_chat_0_47_0_streaming.jsonl");
+        let path = Path::new("/tmp/budi-fixtures-r1-2/vscode_chat_0_47_0_streaming.jsonl");
+        let (msgs, _) = parse_copilot_chat(path, content, 0);
+
+        assert_eq!(
+            msgs.len(),
+            7,
+            "truncated fixture: 7 inline-completionTokens requests must \
+             still emit; the kind:2 stub for the in-flight request must NOT"
+        );
+
+        // The patched-only request's completion-token value (39) is the
+        // signature for the in-flight row. It must not appear.
+        assert!(
+            !msgs.iter().any(|m| m.output_tokens == 39),
+            "the in-flight (kind:2 stub, no completionTokens patch) request \
+             leaked into the output — this is the no-double-emit /  \
+             wait-for-completion-token contract from R1.1 #668"
+        );
+
+        // Every emitted row carries a non-zero output_tokens — none are
+        // synthesized from the bare stub.
+        assert!(msgs.iter().all(|m| m.output_tokens > 0));
+    }
+
     /// `append_at_path` correctness — the default-path branch (kind:2 with
     /// no `k`) and the explicit `["requests"]` branch must both append to
     /// the same array.
