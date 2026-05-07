@@ -1072,7 +1072,9 @@ fn shape_matches_any(record: &serde_json::Value) -> bool {
         || record.pointer("/result/metadata/outputTokens").is_some()
 }
 
-/// Strip a `copilot/` model-id prefix per ADR-0092 §2.4.
+/// Strip a `copilot/` model-id prefix per ADR-0092 §2.4 and resolve the
+/// router placeholder `"auto"` to a concrete pricing key via `agent.id`
+/// (ADR-0092 §2.4.1, R1.4 #671).
 fn extract_model_id(record: &serde_json::Value) -> Option<String> {
     // `modelId` is the user-facing label (e.g. `copilot/claude-haiku-4.5`,
     // `copilot/auto`). Prefer it over `result.metadata.resolvedModel` —
@@ -1080,20 +1082,76 @@ fn extract_model_id(record: &serde_json::Value) -> Option<String> {
     // or an internal GPU-fleet code (`capi-noe-ptuc-h200-oswe-vscode-prime`)
     // that does not map to manifest entries. The fleet-code form means
     // `resolvedModel` cannot be trusted as a pricing key.
-    if let Some(model) = record.get("modelId").and_then(|v| v.as_str()) {
-        return Some(strip_copilot_prefix(model).to_string());
-    }
-    if let Some(model) = record
-        .pointer("/result/metadata/modelId")
+    let raw = record
+        .get("modelId")
         .and_then(|v| v.as_str())
-    {
-        return Some(strip_copilot_prefix(model).to_string());
+        .or_else(|| {
+            record
+                .pointer("/result/metadata/modelId")
+                .and_then(|v| v.as_str())
+        })
+        .map(|s| strip_copilot_prefix(s).to_string())?;
+
+    if raw != "auto" {
+        return Some(raw);
     }
-    None
+
+    // Router-placeholder: the user picked "auto" in the model selector and
+    // GitHub Copilot Chat picked the actual model server-side. The
+    // user-facing label is "auto", which the LiteLLM pricing manifest does
+    // not know about, so a literal "auto" prices to `unpriced:no_pricing`.
+    // ADR-0092 §2.4.1 resolves it via `agent.id`; on miss, leave the value
+    // as "auto" so the row still emits (priced through to `no_pricing`,
+    // trued up by §3 reconciliation on the next tick for individually-
+    // licensed users).
+    if let Some(agent_id) = record.pointer("/agent/id").and_then(|v| v.as_str())
+        && let Some(resolved) = resolve_auto_model_id(agent_id)
+    {
+        return Some(resolved.to_string());
+    }
+    Some(raw)
 }
 
 fn strip_copilot_prefix(model: &str) -> &str {
     model.strip_prefix("copilot/").unwrap_or(model)
+}
+
+/// Map a Copilot Chat `agent.id` to the model `auto` most likely resolves
+/// to for that agent at the time of the 8.4.1 patch. Returns `None` when
+/// the agent id is missing or unrecognised so the caller can preserve
+/// the literal `"auto"` model id.
+///
+/// Per ADR-0092 §2.4.1: GitHub does not contractually pin which model
+/// `auto` resolves to — the table reflects the **current most-common
+/// default** for each `agent.id` and is the optimistic-resolution arm of
+/// the three options laid out in #671. Wrong guesses only affect
+/// org-managed-license users (the §3 Billing API reconciliation trues up
+/// dollars for individually-licensed users on the next tick), so the cost
+/// of a stale entry is bounded.
+///
+/// The mapping table lives inline here for 8.4.1; ADR-0092 §2.4.1 calls
+/// out migration to a `model_aliases` block on the LiteLLM manifest cache
+/// (Option C in #671) as the longer-term home — defer to 9.0.0 unless the
+/// inline table proves unreliable in practice.
+///
+/// Adding a new agent id is a one-line edit + ADR-0092 §2.4.1 amendment in
+/// the same PR (per the §2.6-style "contract and code never disagree"
+/// rule).
+fn resolve_auto_model_id(agent_id: &str) -> Option<&'static str> {
+    match agent_id {
+        // Edit-mode / agent-mode chat. Copilot has routed to Claude Sonnet
+        // for code-edit-heavy turns since the GPT-5 / Sonnet 4.5 dual-default
+        // rollout in early 2026.
+        "github.copilot.editsAgent" | "github.copilot.codingAgent" => Some("claude-sonnet-4-5"),
+        // `@workspace`, `@terminal`, and the plain chat panel. `gpt-4.1` is
+        // Copilot's prevailing default for non-edit chat completions.
+        "github.copilot.workspaceAgent"
+        | "github.copilot.terminalAgent"
+        | "github.copilot.default"
+        | "github.copilot.chat-default"
+        | "github.copilot" => Some("gpt-4.1"),
+        _ => None,
+    }
 }
 
 /// Try to pluck a per-session default model from a record or document. This
@@ -1315,6 +1373,104 @@ mod tests {
     fn extract_model_id_falls_back_to_metadata() {
         let v = make_message(r#"{"result": {"metadata": {"modelId": "copilot/o3"}}}"#);
         assert_eq!(extract_model_id(&v).as_deref(), Some("o3"));
+    }
+
+    // ---- §2.4.1 `auto` resolver (R1.4, #671) ---------------------------
+
+    /// Concrete, manifest-known modelIds pass through the resolver
+    /// untouched even when an `agent.id` is present. The resolver fires
+    /// only on the literal `"auto"` router placeholder.
+    #[test]
+    fn extract_model_id_concrete_models_bypass_auto_resolver() {
+        let v = make_message(
+            r#"{"modelId": "copilot/claude-sonnet-4-5", "agent": {"id": "github.copilot.editsAgent"}}"#,
+        );
+        assert_eq!(extract_model_id(&v).as_deref(), Some("claude-sonnet-4-5"));
+    }
+
+    /// `modelId == "auto"` + recognised `agent.id` resolves to the agent's
+    /// optimistic default model. Pricing then matches via the LiteLLM
+    /// manifest instead of falling through to `unpriced:no_pricing`.
+    #[test]
+    fn extract_model_id_auto_resolves_via_agent_edits() {
+        let v = make_message(
+            r#"{"modelId": "copilot/auto", "agent": {"id": "github.copilot.editsAgent"}}"#,
+        );
+        assert_eq!(extract_model_id(&v).as_deref(), Some("claude-sonnet-4-5"));
+    }
+
+    #[test]
+    fn extract_model_id_auto_resolves_via_agent_workspace() {
+        let v = make_message(
+            r#"{"modelId": "copilot/auto", "agent": {"id": "github.copilot.workspaceAgent"}}"#,
+        );
+        assert_eq!(extract_model_id(&v).as_deref(), Some("gpt-4.1"));
+    }
+
+    /// `modelId == "auto"` + unknown `agent.id` falls back to the literal
+    /// `"auto"` so the row still emits. Downstream pricing tags it
+    /// `unpriced:no_pricing`; the §3 reconciliation worker trues up
+    /// dollars on the next tick for individually-licensed users.
+    #[test]
+    fn extract_model_id_auto_with_unknown_agent_falls_back_to_auto() {
+        let v = make_message(
+            r#"{"modelId": "copilot/auto", "agent": {"id": "github.copilot.someFutureAgent"}}"#,
+        );
+        assert_eq!(extract_model_id(&v).as_deref(), Some("auto"));
+    }
+
+    /// `modelId == "auto"` with no `agent.id` at all (older sessions, the
+    /// synthetic v3 fixtures, hand-trimmed records) preserves `"auto"`.
+    /// This pins the back-compat contract — the resolver is additive,
+    /// never destructive.
+    #[test]
+    fn extract_model_id_auto_without_agent_preserves_auto() {
+        let v = make_message(r#"{"modelId": "copilot/auto"}"#);
+        assert_eq!(extract_model_id(&v).as_deref(), Some("auto"));
+    }
+
+    /// Resolver also fires when the `modelId` arrives via the Feb-2026
+    /// nested shape (`result.metadata.modelId`).
+    #[test]
+    fn extract_model_id_auto_resolves_under_metadata_shape() {
+        let v = make_message(
+            r#"{"result": {"metadata": {"modelId": "copilot/auto"}}, "agent": {"id": "github.copilot.editsAgent"}}"#,
+        );
+        assert_eq!(extract_model_id(&v).as_deref(), Some("claude-sonnet-4-5"));
+    }
+
+    /// Direct unit test on the static table — pin every entry so a stale
+    /// edit (e.g. dropping a known agent id) trips the test instead of
+    /// silently falling through to the `"auto"` no-pricing path.
+    #[test]
+    fn resolve_auto_model_id_known_table() {
+        assert_eq!(
+            resolve_auto_model_id("github.copilot.editsAgent"),
+            Some("claude-sonnet-4-5")
+        );
+        assert_eq!(
+            resolve_auto_model_id("github.copilot.codingAgent"),
+            Some("claude-sonnet-4-5")
+        );
+        assert_eq!(
+            resolve_auto_model_id("github.copilot.workspaceAgent"),
+            Some("gpt-4.1")
+        );
+        assert_eq!(
+            resolve_auto_model_id("github.copilot.terminalAgent"),
+            Some("gpt-4.1")
+        );
+        assert_eq!(
+            resolve_auto_model_id("github.copilot.default"),
+            Some("gpt-4.1")
+        );
+        assert_eq!(
+            resolve_auto_model_id("github.copilot.chat-default"),
+            Some("gpt-4.1")
+        );
+        assert_eq!(resolve_auto_model_id("github.copilot"), Some("gpt-4.1"));
+        assert_eq!(resolve_auto_model_id("github.copilot.unknownAgent"), None);
+        assert_eq!(resolve_auto_model_id(""), None);
     }
 
     #[test]
@@ -1960,9 +2116,19 @@ mod tests {
             );
         }
 
-        // Provider tag and `auto` model are preserved through the reducer.
+        // Provider tag is preserved through the reducer. The user-facing
+        // `modelId` on every request in this fixture is `copilot/auto`,
+        // and every record carries `agent.id = "github.copilot.editsAgent"`,
+        // so the §2.4.1 resolver (R1.4 #671) maps each row to the
+        // edits-agent default — `claude-sonnet-4-5`. If a future Copilot
+        // bump flips that default, the resolver table changes in the same
+        // PR as ADR-0092 §2.4.1 and `expected.json` regenerates from the
+        // recaptured fixture.
         assert!(msgs.iter().all(|m| m.provider == "copilot_chat"));
-        assert!(msgs.iter().all(|m| m.model.as_deref() == Some("auto")));
+        assert!(
+            msgs.iter()
+                .all(|m| m.model.as_deref() == Some("claude-sonnet-4-5"))
+        );
     }
 
     /// Streaming-truncation variant — the same fixture sliced to drop the

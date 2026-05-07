@@ -97,7 +97,7 @@ Tail offset semantics: `tail_offsets.byte_offset` still records bytes consumed a
 
 **Canonical fixture (R1.2, 8.4.1, [#669](https://github.com/siropkin/budi/issues/669)).** The shape described above is pinned to a real on-disk capture at `crates/budi-core/src/providers/copilot_chat/fixtures/vscode_chat_0_47_0.jsonl` (sanitized — prompt text, response markdown, code citations, file paths, and local-machine metadata stripped; envelope keys, `requestId`, timestamps, `agent.*`, `modelId`, `responseId`, `modelState`, and `completionTokens` / `promptTokens` patches preserved). A sibling `vscode_chat_0_47_0.expected.json` lists the per-request `(requestId, output_tokens, input_tokens, model)` tuples the reducer must materialize. A truncated companion `vscode_chat_0_47_0_streaming.jsonl` slices the fixture mid-stream — kind:2 stub written, kind:1 `completionTokens` patch not yet — and pins the no-emit-until-completion-token contract from R1.1. When extension N+1 changes the format again, the next bump captures a new fixture and the previous one is kept as a regression for the older format.
 
-A side note from the same investigation: `result.metadata.resolvedModel` is **not** safe to use as a pricing key. On older sessions it was a dated version suffix (`claude-haiku-4-5-20251001`); on May-2026+ sessions it is an internal GPU-fleet code (`capi-noe-ptuc-h200-oswe-vscode-prime`) that does not map to manifest entries. The parser uses `modelId` (post-`copilot/` strip per §2.4) as the pricing key, even when the value is a router placeholder like `auto` — pricing then falls through to `unpriced:no_pricing` and the Billing API reconciliation supplies the dollar truth.
+A side note from the same investigation: `result.metadata.resolvedModel` is **not** safe to use as a pricing key. On older sessions it was a dated version suffix (`claude-haiku-4-5-20251001`); on May-2026+ sessions it is an internal GPU-fleet code (`capi-noe-ptuc-h200-oswe-vscode-prime`) that does not map to manifest entries. The parser uses `modelId` (post-`copilot/` strip per §2.4) as the pricing key. When the value is the router placeholder `auto`, the §2.4.1 resolver maps it to a concrete model via `agent.id`; if no mapping exists the literal `"auto"` is preserved and pricing falls through to `unpriced:no_pricing` with the §3 Billing API reconciliation supplying the dollar truth.
 
 Cache-token keys, when present, follow the same per-shape pattern under `cacheReadTokens` / `cacheWriteTokens` (delta and Feb-2026 shapes) or under `usage.cacheReadInputTokens` / `usage.cacheCreationInputTokens` (legacy). Cache tokens are best-effort — Copilot Chat does not expose cache fields on every record.
 
@@ -106,6 +106,32 @@ Cache-token keys, when present, follow the same per-shape pattern under `cacheRe
 - Top-level `modelId` — strip the `copilot/` prefix if present (e.g. `copilot/claude-sonnet-4-5` → `claude-sonnet-4-5`).
 - `result.metadata.modelId` — Feb-2026+ shape.
 - Fall back to a per-session default if a record carries tokens without a model id (e.g. interrupted sessions). Default is the per-session model recorded in the session manifest, if any; otherwise the model id is left empty and the row is tagged `unpriced:no_model` by the cost enricher (consistent with how `unpriced:no_tokens` is handled in ADR-0090 §2026-04-23).
+
+#### 2.4.1 `auto` router resolution (R1.4, 8.4.1, [#671](https://github.com/siropkin/budi/issues/671))
+
+When the user picks `auto` in the Copilot Chat model selector, GitHub picks the actual model server-side and persists the literal string `"auto"` as the request's `modelId`. The LiteLLM pricing manifest has no `auto` entry, so a literal `"auto"` model id falls through to `unpriced:no_pricing` and rows price at \$0 — the headline post-#R1.1 user-visible defect (#671) on the surface of `budi sessions` for any developer who leaves the model picker on the default.
+
+The parser therefore resolves `"auto"` to a concrete model id via `agent.id` immediately after the §2.4 prefix-strip, before the row is handed to the pricing layer:
+
+1. If `modelId != "auto"` — pass through as-is (current §2.4 behavior, unchanged).
+2. Otherwise, look at `agent.id` on the same record and resolve via the table below.
+3. If `agent.id` is missing or unrecognised, preserve the literal `"auto"` so the row still emits — pricing then falls through to `unpriced:no_pricing` and the §3 Billing API reconciliation worker trues the dollar number up to the real bill on the next tick (for individually-licensed users with a configured PAT).
+
+| `agent.id` | Resolves to | Notes |
+|---|---|---|
+| `github.copilot.editsAgent` | `claude-sonnet-4-5` | Edit-mode chat. Copilot has routed to Claude Sonnet for code-edit-heavy turns since the GPT-5 / Sonnet 4.5 dual-default rollout in early 2026. |
+| `github.copilot.codingAgent` | `claude-sonnet-4-5` | Newer agent-mode coding flow; same routing default as `editsAgent`. |
+| `github.copilot.workspaceAgent` | `gpt-4.1` | `@workspace` chat. |
+| `github.copilot.terminalAgent` | `gpt-4.1` | `@terminal` chat. |
+| `github.copilot.default` | `gpt-4.1` | Plain chat panel (default participant). |
+| `github.copilot.chat-default` | `gpt-4.1` | Older alias for the default participant. |
+| `github.copilot` | `gpt-4.1` | Bare publisher id seen on a small fraction of older sessions. |
+
+Three options were considered (per #671): **Option A** — resolve forward in the file via `agent.id`. **Option B** — accept the \$0 and lean on the §3 reconciliation worker. **Option C** — move the table into a `model_aliases` block on the LiteLLM manifest cache. Option A ships in 8.4.1 with the table living inline in `crates/budi-core/src/providers/copilot_chat.rs::resolve_auto_model_id`. Option B alone is unacceptable because for org-managed-license users the §3.4 path returns empty and a wrong guess would leave them at \$0 indefinitely; Option A guarantees a non-zero list-price-equivalent number for every user. Option C is the longer-term home — defer to 9.0.0 unless the inline table proves unreliable in practice.
+
+GitHub does not contractually pin which model `auto` resolves to — it can shift between Copilot updates. The table is therefore the **current most-common default** at the time of the 8.4.1 patch, not a contract. When upstream rotates a default, the fix is the same as for §2.3 shape drift: amend this section, edit `resolve_auto_model_id`, cut both in the same PR. Wrong guesses only affect org-managed-license users (the §3 reconciliation trues up dollars for individually-licensed users on its next tick), so the cost of a stale entry is bounded.
+
+Re-using the resolver: Continue / Cline / Roo Code are deferred to 9.0.0 (#295) and will hit the same `auto`-router shape. The `agent.id` → model mapping is per-provider — each provider plugin will ship its own table, but the resolution rule (§2.4.1) is the canonical pattern they implement.
 
 #### 2.5 Pricing path
 
