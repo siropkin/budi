@@ -345,6 +345,50 @@ fn render_status_text(body: &Value) {
         }
     }
 
+    // 8.4.2 / #680: surface-form → canonical alias overlay.
+    // Listed here so an operator can see why a non-canonical
+    // model id (e.g. Copilot Chat persisting `claude-haiku-4.5`)
+    // priced cleanly via a manifest entry whose key is dashed.
+    let model_aliases = body
+        .get("model_aliases")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    if !model_aliases.is_empty() {
+        println!();
+        println!(
+            "  {bold_cyan}Manifest aliases{reset} {dim}(surface-form → canonical key; rows priced via alias get pricing_source ending `:alias`){reset}"
+        );
+        println!("  {dim}{}{reset}", "─".repeat(40));
+        let label_width = model_aliases
+            .iter()
+            .filter_map(|entry| {
+                entry
+                    .get("surface_form")
+                    .and_then(Value::as_str)
+                    .map(|s| s.chars().count())
+            })
+            .max()
+            .unwrap_or(0)
+            .min(40);
+        println!(
+            "  {bold}{:<w$}  {bold}CANONICAL KEY{reset}",
+            "SURFACE FORM",
+            w = label_width
+        );
+        for entry in &model_aliases {
+            let surface = entry
+                .get("surface_form")
+                .and_then(Value::as_str)
+                .unwrap_or("?");
+            let canonical = entry
+                .get("canonical")
+                .and_then(Value::as_str)
+                .unwrap_or("?");
+            println!("  {:<w$}  {canonical}", surface, w = label_width);
+        }
+    }
+
     // ADR-0091 §2 amendment (8.3.1 / #483): rows the most-recent
     // refresh tick skipped for failing per-row sanity (NaN, negative,
     // or > $1,000/M). Pre-8.3.1 a single bad row would whole-payload-

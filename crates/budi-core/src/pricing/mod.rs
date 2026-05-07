@@ -51,12 +51,18 @@ use crate::provider::ModelPricing;
 ///
 /// Variant ↔ column-value mapping:
 ///
-/// | Variant               | Column serialization  |
-/// |-----------------------|-----------------------|
-/// | `Manifest { v }`      | `manifest:vNNN`       |
-/// | `Backfill { v }`      | `backfilled:vNNN`     |
-/// | `EmbeddedBaseline`    | `embedded:vBUILD`     |
-/// | `LegacyPreManifest`   | `legacy:pre-manifest` |
+/// | Variant                | Column serialization      |
+/// |------------------------|---------------------------|
+/// | `Manifest { v }`       | `manifest:vNNN`           |
+/// | `ManifestAlias { v }`  | `manifest:vNNN:alias`     |
+/// | `Backfill { v }`       | `backfilled:vNNN`         |
+/// | `EmbeddedBaseline`     | `embedded:vBUILD`         |
+/// | `LegacyPreManifest`    | `legacy:pre-manifest`     |
+///
+/// The `:alias` suffix on `ManifestAlias` (8.4.2 / #680) marks a row whose
+/// `model_id` did not directly match a manifest key but resolved through
+/// the alias overlay (surface-form → canonical-key). The version stays
+/// the same — the alias resolved against the same manifest snapshot.
 ///
 /// Three further column literals (`"unknown"`, `"upstream:api"`,
 /// `"unpriced:no_tokens"`) are intentionally *not* variants of this enum:
@@ -78,8 +84,20 @@ use crate::provider::ModelPricing;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum PricingSource {
-    Manifest { version: u32 },
-    Backfill { version: u32 },
+    Manifest {
+        version: u32,
+    },
+    /// 8.4.2 / #680: same manifest snapshot as `Manifest { version }`,
+    /// but the row's `model_id` only matched a manifest entry through
+    /// the alias overlay (surface-form → canonical key). Surfaced in
+    /// the column with a trailing `:alias` so an operator can audit
+    /// alias hits with a `LIKE 'manifest:%:alias'` query.
+    ManifestAlias {
+        version: u32,
+    },
+    Backfill {
+        version: u32,
+    },
     EmbeddedBaseline,
     LegacyPreManifest,
 }
@@ -108,6 +126,7 @@ impl PricingSource {
     pub fn as_column_value(&self) -> String {
         match self {
             PricingSource::Manifest { version } => format!("manifest:v{version}"),
+            PricingSource::ManifestAlias { version } => format!("manifest:v{version}:alias"),
             PricingSource::Backfill { version } => format!("backfilled:v{version}"),
             PricingSource::EmbeddedBaseline => format!("embedded:v{EMBEDDED_BASELINE_BUILD}"),
             PricingSource::LegacyPreManifest => COLUMN_VALUE_LEGACY.to_string(),
@@ -131,12 +150,23 @@ impl PricingSource {
         // byte), so splitting on it is char-boundary-safe regardless of
         // what `rest` contains — model ids never appear in these strings.
         let (prefix, rest) = value.split_once(":v")?;
+        // 8.4.2 / #680: split a trailing `:alias` flag off the version
+        // tail. Manifest/backfilled versions are pure unsigned ints, so
+        // any `:` in `rest` is an alias suffix (or malformed input).
+        let (rest, alias) = match rest.split_once(':') {
+            Some((v, "alias")) => (v, true),
+            Some(_) => return None,
+            None => (rest, false),
+        };
         match prefix {
-            "manifest" => rest
-                .parse::<u32>()
-                .ok()
-                .map(|v| PricingSource::Manifest { version: v }),
-            "backfilled" => rest
+            "manifest" => rest.parse::<u32>().ok().map(|v| {
+                if alias {
+                    PricingSource::ManifestAlias { version: v }
+                } else {
+                    PricingSource::Manifest { version: v }
+                }
+            }),
+            "backfilled" if !alias => rest
                 .parse::<u32>()
                 .ok()
                 .map(|v| PricingSource::Backfill { version: v }),
@@ -144,7 +174,7 @@ impl PricingSource {
             // enum field (ADR §4 locks the enum shape). Any `embedded:v*`
             // becomes the variant; the build tag is recovered from
             // `EMBEDDED_BASELINE_BUILD` at serialize time.
-            "embedded" => Some(PricingSource::EmbeddedBaseline),
+            "embedded" if !alias => Some(PricingSource::EmbeddedBaseline),
             _ => None,
         }
     }
@@ -194,6 +224,44 @@ pub fn lookup(model_id: &str, provider: &str) -> PricingOutcome {
             source: guard.source.clone(),
         };
     }
+    // 8.4.2 / #680: alias overlay. When the surface form a provider
+    // persists doesn't directly match a manifest key (e.g. Copilot
+    // Chat persists `claude-haiku-4.5` while LiteLLM keys are
+    // `claude-haiku-4-5*`), resolve through the curated alias map
+    // before falling back to Unknown. Aliases live on the manifest
+    // (per ADR-0091) so every provider benefits without a parser
+    // change. ADR-0092 §2.4.1 explicitly names this overlay as the
+    // long-term home for surface-form normalization.
+    if let Some(canonical) = guard.manifest.aliases.get(model_id) {
+        if let Some(entry) = guard.manifest.entries.get(canonical.as_str()) {
+            let source = match &guard.source {
+                PricingSource::Manifest { version } => {
+                    PricingSource::ManifestAlias { version: *version }
+                }
+                // Embedded path: there's no version to embed in the
+                // alias-tagged form. Surface as ManifestAlias { v: 0 }
+                // to keep the column shape uniform; v=0 is the
+                // documented embedded sentinel.
+                PricingSource::EmbeddedBaseline => PricingSource::ManifestAlias { version: 0 },
+                // Other sources (Backfill / LegacyPreManifest) shouldn't
+                // be the live install source, but if they are we still
+                // tag the row as ManifestAlias with the carried version
+                // (or 0 for legacy) so callers can rely on the alias
+                // signal regardless of the boot path.
+                PricingSource::Backfill { version } => {
+                    PricingSource::ManifestAlias { version: *version }
+                }
+                PricingSource::ManifestAlias { version } => {
+                    PricingSource::ManifestAlias { version: *version }
+                }
+                PricingSource::LegacyPreManifest => PricingSource::ManifestAlias { version: 0 },
+            };
+            return PricingOutcome::Known {
+                pricing: entry.to_model_pricing(),
+                source,
+            };
+        }
+    }
     drop(guard);
     warn_once_unknown(provider, model_id);
     PricingOutcome::Unknown {
@@ -220,6 +288,19 @@ pub struct PricingState {
     pub unknown_models: Vec<UnknownModelEntry>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub rejected_upstream_rows: Vec<RejectedUpstreamRow>,
+    /// Active surface-form → canonical-key alias entries (8.4.2 / #680).
+    /// Skipped when empty so older `--format json` consumers that
+    /// predate the overlay still see the pre-8.4.2 shape.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub model_aliases: Vec<ModelAliasEntry>,
+}
+
+/// One entry in the `model_aliases` overlay surfaced on
+/// `GET /pricing/status` and `budi pricing status`. 8.4.2 / #680.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelAliasEntry {
+    pub surface_form: String,
+    pub canonical: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -265,15 +346,30 @@ pub fn current_state() -> PricingState {
     let guard = state().read().expect("pricing state RwLock poisoned");
     let source_label = match &guard.source {
         PricingSource::Manifest { .. } => "disk cache",
+        PricingSource::ManifestAlias { .. } => "disk cache",
         PricingSource::Backfill { .. } => "disk cache",
         PricingSource::EmbeddedBaseline => "embedded baseline",
         PricingSource::LegacyPreManifest => "legacy",
     }
     .to_string();
     let manifest_version = match &guard.source {
-        PricingSource::Manifest { version } | PricingSource::Backfill { version } => Some(*version),
+        PricingSource::Manifest { version }
+        | PricingSource::ManifestAlias { version }
+        | PricingSource::Backfill { version } => Some(*version),
         _ => None,
     };
+    let mut model_aliases: Vec<ModelAliasEntry> = guard
+        .manifest
+        .aliases
+        .iter()
+        .map(|(surface, canonical)| ModelAliasEntry {
+            surface_form: surface.clone(),
+            canonical: canonical.clone(),
+        })
+        .collect();
+    // Deterministic order so the JSON shape and text view render
+    // identically across runs (HashMap iteration is randomized).
+    model_aliases.sort_by(|a, b| a.surface_form.cmp(&b.surface_form));
     PricingState {
         source_label,
         manifest_version,
@@ -283,6 +379,7 @@ pub fn current_state() -> PricingState {
         embedded_baseline_build: EMBEDDED_BASELINE_BUILD.to_string(),
         unknown_models: snapshot_unknowns(),
         rejected_upstream_rows: guard.rejected_upstream_rows.clone(),
+        model_aliases,
     }
 }
 
@@ -319,6 +416,20 @@ pub fn pricing_cache_path() -> Result<PathBuf> {
 pub struct Manifest {
     pub version: u32,
     pub entries: HashMap<String, ManifestEntry>,
+    /// Surface-form → canonical-manifest-key map (8.4.2 / #680).
+    ///
+    /// LiteLLM keys are dashed and frequently dated
+    /// (`claude-haiku-4-5-20251001`); providers persist their own
+    /// surface forms (Copilot Chat persists dotted
+    /// `claude-haiku-4.5`; older Cursor persists transposed
+    /// `claude-4.5-opus-high`). [`lookup`] consults this map after
+    /// a direct miss and tags the result as
+    /// [`PricingSource::ManifestAlias`].
+    ///
+    /// Per ADR-0092 §2.4.1, the alias overlay is the architectural
+    /// home for surface-form normalization (Option C) — replacing
+    /// per-provider inline tables and lookup-time string munging.
+    pub aliases: HashMap<String, String>,
     pub fetched_at: String,
 }
 
@@ -380,6 +491,56 @@ pub fn parse_entries(bytes: &[u8]) -> Result<HashMap<String, ManifestEntry>> {
 // Embedded baseline
 // ---------------------------------------------------------------------------
 
+/// Curated surface-form → canonical-manifest-key alias overlay
+/// (8.4.2 / #680).
+///
+/// LiteLLM ships no aliases table; this list is Budi-owned. Each
+/// entry maps a model id Budi has actually observed in the wild
+/// (Copilot Chat persisting `claude-haiku-4.5`, older Cursor
+/// persisting `claude-4.5-opus-high`) to the canonical LiteLLM
+/// key it should price against. Keep entries in this list ONLY
+/// when:
+///
+/// - The surface form has been seen in a real session (so we don't
+///   bloat the map with hypothetical aliases).
+/// - The canonical key exists in [`EMBEDDED_BASELINE_JSON`] so the
+///   alias resolves the same way day-zero (offline) and post-refresh.
+///
+/// Per ADR-0092 §2.4.1, this overlay is the long-term home for
+/// per-provider surface-form normalization. Adding a new entry does
+/// not require a parser change in any provider.
+pub const EMBEDDED_ALIASES: &[(&str, &str)] = &[
+    // Anthropic: dotted marketing form (Copilot Chat / GitHub
+    // changelog) → canonical dashed form. Verified surface form on
+    // real Copilot Chat sessions during 8.4.1 verification (#680).
+    ("claude-haiku-4.5", "claude-haiku-4-5"),
+    ("claude-sonnet-4.5", "claude-sonnet-4-5"),
+    ("claude-sonnet-4.6", "claude-sonnet-4-6"),
+    ("claude-opus-4.5", "claude-opus-4-5"),
+    ("claude-opus-4.6", "claude-opus-4-6"),
+    ("claude-opus-4.7", "claude-opus-4-7"),
+    // Cursor (older transposed form): `claude-<major>.<minor>-<tier>-<effort>`
+    // → canonical `claude-<tier>-<major>-<minor>`. Effort suffix is
+    // stripped on the alias key — pricing is per-model-tier, not
+    // per-effort. Effort still surfaces in `budi stats --models` via
+    // the display::resolve overlay.
+    ("claude-4.5-opus-high", "claude-opus-4-5"),
+    ("claude-4.5-opus-high-thinking", "claude-opus-4-5"),
+    ("claude-4.6-opus-high", "claude-opus-4-6"),
+    ("claude-4.6-opus-high-thinking", "claude-opus-4-6"),
+    ("claude-4.7-opus-high", "claude-opus-4-7"),
+    ("claude-4.7-opus-high-thinking", "claude-opus-4-7"),
+];
+
+/// Build the alias map from [`EMBEDDED_ALIASES`]. Cheap (≤20
+/// entries) — call sites can rebuild fresh per Manifest install.
+pub fn embedded_aliases() -> HashMap<String, String> {
+    EMBEDDED_ALIASES
+        .iter()
+        .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+        .collect()
+}
+
 /// Vendored snapshot of LiteLLM's `model_prices_and_context_window.json`,
 /// refreshed by `scripts/pricing/sync_baseline.sh` per ADR-0091 §10.
 pub const EMBEDDED_BASELINE_JSON: &str = include_str!("manifest.embedded.json");
@@ -397,6 +558,7 @@ pub fn load_embedded_manifest() -> Result<Manifest> {
     Ok(Manifest {
         version: 0,
         entries,
+        aliases: embedded_aliases(),
         fetched_at: Utc::now().to_rfc3339(),
     })
 }
@@ -462,6 +624,7 @@ fn state() -> &'static RwLock<ManifestState> {
             Manifest {
                 version: 0,
                 entries: HashMap::new(),
+                aliases: embedded_aliases(),
                 fetched_at: Utc::now().to_rfc3339(),
             }
         });
@@ -802,6 +965,7 @@ pub(crate) fn reset_state_for_test() {
     guard.manifest = load_embedded_manifest().unwrap_or_else(|_| Manifest {
         version: 0,
         entries: HashMap::new(),
+        aliases: HashMap::new(),
         fetched_at: Utc::now().to_rfc3339(),
     });
     guard.source = PricingSource::EmbeddedBaseline;
@@ -821,6 +985,7 @@ pub(crate) fn install_for_test(entries: HashMap<String, ManifestEntry>, source: 
             _ => 0,
         },
         entries,
+        aliases: HashMap::new(),
         fetched_at: Utc::now().to_rfc3339(),
     };
     install_manifest(manifest, source);
@@ -1087,6 +1252,7 @@ mod pricing_tests {
         let previous = Manifest {
             version: 5,
             entries: prev_entries,
+            aliases: HashMap::new(),
             fetched_at: Utc::now().to_rfc3339(),
         };
 
@@ -1099,6 +1265,7 @@ mod pricing_tests {
         let mut candidate = Manifest {
             version: 6,
             entries: new_entries,
+            aliases: HashMap::new(),
             fetched_at: Utc::now().to_rfc3339(),
         };
 
@@ -1122,6 +1289,7 @@ mod pricing_tests {
         let mut candidate = Manifest {
             version: 6,
             entries: pass,
+            aliases: HashMap::new(),
             fetched_at: Utc::now().to_rfc3339(),
         };
         let rejected = validate_payload(&mut candidate, Some(&previous), 10_000)
@@ -1155,6 +1323,7 @@ mod pricing_tests {
         let mut candidate = Manifest {
             version: 1,
             entries,
+            aliases: HashMap::new(),
             fetched_at: Utc::now().to_rfc3339(),
         };
         let rejected = validate_payload(&mut candidate, None, 10_000)
@@ -1190,6 +1359,7 @@ mod pricing_tests {
         let previous = Manifest {
             version: 5,
             entries: prev_entries,
+            aliases: HashMap::new(),
             fetched_at: Utc::now().to_rfc3339(),
         };
         // 100 entries in the new payload — same ids as previous — but
@@ -1207,6 +1377,7 @@ mod pricing_tests {
         let mut candidate = Manifest {
             version: 6,
             entries: new_entries,
+            aliases: HashMap::new(),
             fetched_at: Utc::now().to_rfc3339(),
         };
         let err = validate_payload(&mut candidate, Some(&previous), 10_000).unwrap_err();
@@ -1293,6 +1464,10 @@ mod pricing_tests {
 
         // Pin the exact set of top-level keys on the clean (empty-
         // rejected-rows) snapshot — stable across older clients.
+        // 8.4.2 / #680: `model_aliases` is present whenever the
+        // installed manifest carries the curated overlay (the
+        // embedded baseline always does), so it appears here even
+        // on a clean snapshot.
         let mut keys: Vec<&str> = obj.keys().map(String::as_str).collect();
         keys.sort();
         assert_eq!(
@@ -1302,6 +1477,7 @@ mod pricing_tests {
                 "fetched_at",
                 "known_model_count",
                 "manifest_version",
+                "model_aliases",
                 "next_refresh_at",
                 "source_label",
                 "unknown_models",
@@ -1417,5 +1593,272 @@ mod pricing_tests {
             !obj.contains_key("rejected_upstream_rows"),
             "empty list must be skipped (back-compat with older clients)"
         );
+    }
+
+    // ---- 8.4.2 / #680: model_aliases overlay -------------------------------
+
+    /// Helper: install a manifest with explicit entries + aliases so
+    /// alias-path tests are deterministic regardless of what the
+    /// embedded baseline carries.
+    fn install_with_aliases(
+        entries: HashMap<String, ManifestEntry>,
+        aliases: HashMap<String, String>,
+        source: PricingSource,
+    ) {
+        let manifest = Manifest {
+            version: match &source {
+                PricingSource::Manifest { version }
+                | PricingSource::ManifestAlias { version }
+                | PricingSource::Backfill { version } => *version,
+                _ => 0,
+            },
+            entries,
+            aliases,
+            fetched_at: Utc::now().to_rfc3339(),
+        };
+        install_manifest(manifest, source);
+    }
+
+    /// Acceptance: dotted surface form (Copilot Chat persists
+    /// `claude-haiku-4.5`) resolves through the alias overlay to a
+    /// dashed canonical key (`claude-haiku-4-5`) and the row is
+    /// tagged `manifest:vNNN:alias`.
+    #[test]
+    fn alias_resolves_dotted_to_dashed_with_alias_tagged_source() {
+        let _g = serial().lock().unwrap();
+        reset_state_for_test();
+
+        let mut entries = HashMap::new();
+        // Per-token rates → 1/M input, 5/M output (matches haiku 4.5).
+        entries.insert("claude-haiku-4-5".to_string(), entry(0.000001, 0.000005));
+
+        let mut aliases = HashMap::new();
+        aliases.insert(
+            "claude-haiku-4.5".to_string(),
+            "claude-haiku-4-5".to_string(),
+        );
+
+        install_with_aliases(entries, aliases, PricingSource::Manifest { version: 14 });
+
+        let outcome = lookup("claude-haiku-4.5", "copilot_chat");
+        match outcome {
+            PricingOutcome::Known { pricing, source } => {
+                assert!(
+                    pricing.input > 0.0,
+                    "alias hit must carry the canonical pricing, got {pricing:?}"
+                );
+                assert_eq!(
+                    source,
+                    PricingSource::ManifestAlias { version: 14 },
+                    "alias hit must tag the row source as ManifestAlias",
+                );
+                assert_eq!(source.as_column_value(), "manifest:v14:alias");
+            }
+            PricingOutcome::Unknown { .. } => {
+                panic!("dotted form should resolve via alias overlay");
+            }
+        }
+    }
+
+    /// Direct hit on a canonical key still returns the un-aliased
+    /// `Manifest { version }` source (alias path is fallback only).
+    #[test]
+    fn alias_overlay_does_not_affect_direct_hits() {
+        let _g = serial().lock().unwrap();
+        reset_state_for_test();
+
+        let mut entries = HashMap::new();
+        entries.insert("claude-sonnet-4-5".to_string(), entry(0.000003, 0.000015));
+        let mut aliases = HashMap::new();
+        aliases.insert(
+            "claude-sonnet-4.5".to_string(),
+            "claude-sonnet-4-5".to_string(),
+        );
+        install_with_aliases(entries, aliases, PricingSource::Manifest { version: 14 });
+
+        let outcome = lookup("claude-sonnet-4-5", "claude_code");
+        match outcome {
+            PricingOutcome::Known { source, .. } => {
+                assert_eq!(
+                    source,
+                    PricingSource::Manifest { version: 14 },
+                    "direct hit must NOT be tagged via-alias",
+                );
+            }
+            PricingOutcome::Unknown { .. } => panic!("canonical key should hit directly"),
+        }
+    }
+
+    /// Negative path: a model id that is neither a manifest key nor
+    /// an alias still emits `Unknown` (no silent per-provider
+    /// default; ADR-0091 §2 invariant preserved).
+    #[test]
+    fn alias_overlay_falls_through_to_unknown_when_no_match() {
+        let _g = serial().lock().unwrap();
+        reset_state_for_test();
+
+        let mut entries = HashMap::new();
+        entries.insert("claude-haiku-4-5".to_string(), entry(0.000001, 0.000005));
+        let mut aliases = HashMap::new();
+        aliases.insert(
+            "claude-haiku-4.5".to_string(),
+            "claude-haiku-4-5".to_string(),
+        );
+        install_with_aliases(entries, aliases, PricingSource::Manifest { version: 14 });
+
+        match lookup("totally-unknown-model", "copilot_chat") {
+            PricingOutcome::Unknown { model_id } => {
+                assert_eq!(model_id, "totally-unknown-model");
+            }
+            PricingOutcome::Known { .. } => {
+                panic!("unaliased unknown id should NOT hit through the overlay");
+            }
+        }
+    }
+
+    /// Cursor's transposed older surface form
+    /// `claude-4.5-opus-high` resolves to the canonical
+    /// `claude-opus-4-5` via the alias overlay.
+    #[test]
+    fn alias_resolves_cursor_transposed_form() {
+        let _g = serial().lock().unwrap();
+        reset_state_for_test();
+
+        let mut entries = HashMap::new();
+        entries.insert("claude-opus-4-5".to_string(), entry(0.000005, 0.000025));
+        let mut aliases = HashMap::new();
+        aliases.insert(
+            "claude-4.5-opus-high".to_string(),
+            "claude-opus-4-5".to_string(),
+        );
+        install_with_aliases(entries, aliases, PricingSource::Manifest { version: 14 });
+
+        match lookup("claude-4.5-opus-high", "cursor") {
+            PricingOutcome::Known { pricing, source } => {
+                assert!(pricing.input > 0.0);
+                assert_eq!(source, PricingSource::ManifestAlias { version: 14 });
+            }
+            PricingOutcome::Unknown { .. } => {
+                panic!("Cursor transposed form should resolve via alias overlay")
+            }
+        }
+    }
+
+    /// Round-trip: `manifest:vNNN:alias` parses back into
+    /// `PricingSource::ManifestAlias { version }`.
+    #[test]
+    fn pricing_source_column_value_round_trip_includes_alias_variant() {
+        for src in [
+            PricingSource::ManifestAlias { version: 1 },
+            PricingSource::ManifestAlias { version: 14 },
+            PricingSource::ManifestAlias { version: 99 },
+        ] {
+            let s = src.as_column_value();
+            assert!(
+                s.ends_with(":alias"),
+                "alias-tagged column must end with `:alias`, got {s:?}",
+            );
+            let parsed =
+                PricingSource::parse_column(&s).unwrap_or_else(|| panic!("failed to parse {s:?}"));
+            assert_eq!(parsed, src);
+        }
+        // Malformed alias trailers still parse to None (defensive).
+        assert_eq!(PricingSource::parse_column("manifest:v1:bogus"), None);
+        // Backfilled rows do NOT support an `:alias` suffix today —
+        // backfill provenance is its own class.
+        assert_eq!(PricingSource::parse_column("backfilled:v1:alias"), None);
+    }
+
+    /// `current_state` surfaces the active alias overlay as a
+    /// `model_aliases` array. Each entry has `surface_form` +
+    /// `canonical`; the array is sorted by surface_form for stable
+    /// rendering.
+    #[test]
+    fn current_state_surfaces_model_aliases_when_populated() {
+        let _g = serial().lock().unwrap();
+        reset_state_for_test();
+
+        let mut entries = HashMap::new();
+        entries.insert("claude-haiku-4-5".to_string(), entry(0.000001, 0.000005));
+        entries.insert("claude-opus-4-5".to_string(), entry(0.000005, 0.000025));
+        let mut aliases = HashMap::new();
+        aliases.insert(
+            "claude-haiku-4.5".to_string(),
+            "claude-haiku-4-5".to_string(),
+        );
+        aliases.insert(
+            "claude-4.5-opus-high".to_string(),
+            "claude-opus-4-5".to_string(),
+        );
+        install_with_aliases(entries, aliases, PricingSource::Manifest { version: 14 });
+
+        let state = current_state();
+        let j = serde_json::to_value(&state).unwrap();
+        let arr = j["model_aliases"]
+            .as_array()
+            .expect("model_aliases must be present when overlay is populated");
+        assert_eq!(arr.len(), 2);
+
+        // Sorted by surface_form, so `claude-4.5-opus-high` comes first.
+        assert_eq!(
+            arr[0]["surface_form"].as_str().unwrap(),
+            "claude-4.5-opus-high",
+        );
+        assert_eq!(arr[0]["canonical"].as_str().unwrap(), "claude-opus-4-5");
+        assert_eq!(arr[1]["surface_form"].as_str().unwrap(), "claude-haiku-4.5");
+        assert_eq!(arr[1]["canonical"].as_str().unwrap(), "claude-haiku-4-5");
+
+        // Each entry has exactly the documented two keys.
+        for entry in arr {
+            let mut keys: Vec<&str> = entry
+                .as_object()
+                .unwrap()
+                .keys()
+                .map(String::as_str)
+                .collect();
+            keys.sort();
+            assert_eq!(keys, vec!["canonical", "surface_form"]);
+        }
+    }
+
+    /// Empty alias overlay is skip-serialized so older
+    /// `--format json` clients still see the pre-8.4.2 shape.
+    #[test]
+    fn current_state_skips_model_aliases_when_empty() {
+        let _g = serial().lock().unwrap();
+        reset_state_for_test();
+        // Force-install a manifest with empty aliases; bypasses the
+        // embedded overlay so we can pin the empty-skip behavior.
+        install_with_aliases(
+            HashMap::new(),
+            HashMap::new(),
+            PricingSource::Manifest { version: 1 },
+        );
+        let state = current_state();
+        let j = serde_json::to_value(&state).unwrap();
+        assert!(
+            !j.as_object().unwrap().contains_key("model_aliases"),
+            "empty overlay must be skip-serialized for back-compat",
+        );
+    }
+
+    /// The curated `EMBEDDED_ALIASES` list is internally consistent:
+    /// every canonical key it points at exists in the embedded
+    /// LiteLLM baseline, so day-zero offline installs price every
+    /// alias correctly.
+    #[test]
+    fn embedded_aliases_all_resolve_against_embedded_baseline() {
+        let manifest = load_embedded_manifest().expect("embedded baseline must parse");
+        for (surface, canonical) in EMBEDDED_ALIASES {
+            assert!(
+                manifest.entries.contains_key(*canonical),
+                "alias `{surface}` → `{canonical}` points at a key not in the embedded baseline",
+            );
+            assert_eq!(
+                manifest.aliases.get(*surface).map(String::as_str),
+                Some(*canonical),
+                "alias `{surface}` not loaded from embedded list",
+            );
+        }
     }
 }
