@@ -232,35 +232,35 @@ pub fn lookup(model_id: &str, provider: &str) -> PricingOutcome {
     // (per ADR-0091) so every provider benefits without a parser
     // change. ADR-0092 §2.4.1 explicitly names this overlay as the
     // long-term home for surface-form normalization.
-    if let Some(canonical) = guard.manifest.aliases.get(model_id) {
-        if let Some(entry) = guard.manifest.entries.get(canonical.as_str()) {
-            let source = match &guard.source {
-                PricingSource::Manifest { version } => {
-                    PricingSource::ManifestAlias { version: *version }
-                }
-                // Embedded path: there's no version to embed in the
-                // alias-tagged form. Surface as ManifestAlias { v: 0 }
-                // to keep the column shape uniform; v=0 is the
-                // documented embedded sentinel.
-                PricingSource::EmbeddedBaseline => PricingSource::ManifestAlias { version: 0 },
-                // Other sources (Backfill / LegacyPreManifest) shouldn't
-                // be the live install source, but if they are we still
-                // tag the row as ManifestAlias with the carried version
-                // (or 0 for legacy) so callers can rely on the alias
-                // signal regardless of the boot path.
-                PricingSource::Backfill { version } => {
-                    PricingSource::ManifestAlias { version: *version }
-                }
-                PricingSource::ManifestAlias { version } => {
-                    PricingSource::ManifestAlias { version: *version }
-                }
-                PricingSource::LegacyPreManifest => PricingSource::ManifestAlias { version: 0 },
-            };
-            return PricingOutcome::Known {
-                pricing: entry.to_model_pricing(),
-                source,
-            };
-        }
+    if let Some(canonical) = guard.manifest.aliases.get(model_id)
+        && let Some(entry) = guard.manifest.entries.get(canonical.as_str())
+    {
+        let source = match &guard.source {
+            PricingSource::Manifest { version } => {
+                PricingSource::ManifestAlias { version: *version }
+            }
+            // Embedded path: there's no version to embed in the
+            // alias-tagged form. Surface as ManifestAlias { v: 0 }
+            // to keep the column shape uniform; v=0 is the
+            // documented embedded sentinel.
+            PricingSource::EmbeddedBaseline => PricingSource::ManifestAlias { version: 0 },
+            // Other sources (Backfill / LegacyPreManifest) shouldn't
+            // be the live install source, but if they are we still
+            // tag the row as ManifestAlias with the carried version
+            // (or 0 for legacy) so callers can rely on the alias
+            // signal regardless of the boot path.
+            PricingSource::Backfill { version } => {
+                PricingSource::ManifestAlias { version: *version }
+            }
+            PricingSource::ManifestAlias { version } => {
+                PricingSource::ManifestAlias { version: *version }
+            }
+            PricingSource::LegacyPreManifest => PricingSource::ManifestAlias { version: 0 },
+        };
+        return PricingOutcome::Known {
+            pricing: entry.to_model_pricing(),
+            source,
+        };
     }
     drop(guard);
     warn_once_unknown(provider, model_id);
