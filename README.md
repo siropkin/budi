@@ -5,7 +5,7 @@
 [![License](https://img.shields.io/github/license/siropkin/budi)](https://github.com/siropkin/budi/blob/main/LICENSE)
 [![GitHub stars](https://img.shields.io/github/stars/siropkin/budi?style=social)](https://github.com/siropkin/budi)
 
-**Local-first cost analytics for AI coding agents.** See where your tokens and money go across Claude Code, Cursor, Codex, and Copilot CLI — broken down by repo, branch, ticket, and file.
+**Local-first cost analytics for AI coding agents.** See where your tokens and money go across Claude Code, Cursor, Codex, Copilot CLI, and Copilot Chat (VS Code) — broken down by repo, branch, ticket, and file.
 
 ```bash
 brew install siropkin/budi/budi && budi init
@@ -337,7 +337,7 @@ Data views accept `--period today|week|month|all` (or relative like `7d`, `2w`, 
 
 | | budi | ccusage | Claude `/cost` |
 |---|---|---|---|
-| Multi-agent support | **Yes** (Claude Code, Codex CLI, Cursor, Copilot CLI) | Claude Code only | Claude Code only |
+| Multi-agent support | **Yes** (Claude Code, Codex CLI, Cursor, Copilot CLI, Copilot Chat) | Claude Code only | Claude Code only |
 | Live local transcript tailing | **Yes** | No | No |
 | Cost history | **Per-message + daily** | Per-session | Current session only |
 | Cloud team dashboard | **Yes** ([app.getbudi.dev](https://app.getbudi.dev)) | No | No |
