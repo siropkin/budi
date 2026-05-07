@@ -221,7 +221,14 @@ pub fn format_cost(dollars: f64) -> String {
 /// stay quiet on a typo can map this error to a soft fallback themselves
 /// (#615).
 pub fn normalize_provider(input: &str) -> Result<String> {
-    const KNOWN_PROVIDERS: &[&str] = &["claude_code", "cursor", "codex", "copilot_cli", "openai"];
+    const KNOWN_PROVIDERS: &[&str] = &[
+        "claude_code",
+        "cursor",
+        "codex",
+        "copilot_cli",
+        "copilot_chat",
+        "openai",
+    ];
 
     if KNOWN_PROVIDERS.contains(&input) {
         return Ok(input.to_string());
@@ -354,7 +361,14 @@ mod tests {
         // Every canonical name routed through the shared helper round-
         // trips unchanged so callers can pass the result straight to the
         // SQL `provider` column.
-        for name in ["claude_code", "cursor", "codex", "copilot_cli", "openai"] {
+        for name in [
+            "claude_code",
+            "cursor",
+            "codex",
+            "copilot_cli",
+            "copilot_chat",
+            "openai",
+        ] {
             assert_eq!(normalize_provider(name).unwrap(), name);
         }
     }
@@ -380,6 +394,7 @@ mod tests {
             "cursor",
             "codex",
             "copilot_cli",
+            "copilot_chat",
             "openai",
             "copilot",
             "anthropic",

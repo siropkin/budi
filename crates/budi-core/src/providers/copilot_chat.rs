@@ -26,7 +26,20 @@ use crate::provider::{DiscoveredFile, Provider};
 /// #653) when the parser shape changes. Mirrors the budi-cursor
 /// `MIN_API_VERSION` pattern (ADR-0092 §2.6). Bump in lockstep with §2.3
 /// of ADR-0092 whenever a fifth (or later) token-key shape lands.
-pub const MIN_API_VERSION: u32 = 1;
+///
+/// v2 (8.4.0): the parser now descends into the `{ "kind": N, "v": [...] }`
+/// JSONL envelope and the `{ "requests": [...] }` JSON-document envelope
+/// that real VS Code Copilot Chat session files actually use. The four
+/// token-key shapes from v1 still apply — they just match against records
+/// inside the envelope rather than the envelope itself.
+///
+/// v3 (8.4.0): added a fifth shape — top-level `completionTokens` only —
+/// to capture VS Code Copilot Chat builds that persist output-token
+/// counts but no input-token counterpart anywhere on disk. These records
+/// emit with `input_tokens = 0` so the row at least exists; the Billing
+/// API reconciliation in §3 of ADR-0092 truths up the dollar number to
+/// the real bill on the next tick for individually-licensed users.
+pub const MIN_API_VERSION: u32 = 3;
 
 /// VS Code-family directory names. Casing is preserved for the macOS
 /// "Application Support" path, where the disk layout is case-sensitive on
@@ -347,6 +360,10 @@ fn parse_jsonl(path: &Path, content: &str, start_offset: usize) -> (Vec<ParsedMe
     let session_id = session_id_for_path(path);
     let mut session_default_model: Option<String> = None;
     let mut line_index: usize = byte_offset_to_line_index(content, start_offset);
+    // Per-record counter so deterministic_uuid stays unique across multiple
+    // records emitted from the same line (envelope shapes — see
+    // [`flatten_records`]).
+    let mut record_index: usize = 0;
 
     let remaining = &content[start_offset..];
     let mut pos = 0;
@@ -372,20 +389,32 @@ fn parse_jsonl(path: &Path, content: &str, start_offset: usize) -> (Vec<ParsedMe
             continue;
         };
 
+        // Session-default model can be advertised either on the envelope
+        // itself (older flat-line shape) or on the manifest record VS Code
+        // writes as `kind: 0` (real on-disk shape — see ADR-0092 §2.3).
         if let Some(model) = extract_session_default_model(&value) {
             session_default_model = Some(model);
         }
 
-        if let Some(msg) = build_message(
-            path,
-            &value,
-            session_id.as_deref(),
-            session_default_model.as_deref(),
-            line_index,
-        ) {
-            messages.push(msg);
-        } else if !shape_matches_any(&value) {
-            log_unknown_shape_once(path, &value);
+        for record in flatten_records(&value) {
+            if let Some(model) = extract_session_default_model(record) {
+                session_default_model = Some(model);
+            }
+            record_index += 1;
+            let composite_index = line_index
+                .wrapping_mul(1_000_000)
+                .wrapping_add(record_index);
+            if let Some(msg) = build_message(
+                path,
+                record,
+                session_id.as_deref(),
+                session_default_model.as_deref(),
+                composite_index,
+            ) {
+                messages.push(msg);
+            } else if !shape_matches_any(record) {
+                log_unknown_shape_once(path, record);
+            }
         }
     }
 
@@ -411,14 +440,14 @@ fn parse_json_document(path: &Path, content: &str) -> (Vec<ParsedMessage>, usize
         .map(|s| s.to_string())
         .or_else(|| session_id_for_path(path));
 
-    let session_default_model = extract_session_default_model(&doc);
+    let mut session_default_model = extract_session_default_model(&doc);
 
-    let records: &[serde_json::Value] = match doc.get("messages").and_then(|v| v.as_array()) {
-        Some(arr) => arr.as_slice(),
-        None => &[],
-    };
+    let records: Vec<&serde_json::Value> = flatten_records(&doc);
 
     for (index, record) in records.iter().enumerate() {
+        if let Some(model) = extract_session_default_model(record) {
+            session_default_model = Some(model);
+        }
         if let Some(msg) = build_message(
             path,
             record,
@@ -433,6 +462,34 @@ fn parse_json_document(path: &Path, content: &str) -> (Vec<ParsedMessage>, usize
     }
 
     (messages, new_offset)
+}
+
+/// Return the candidate records to try for token extraction.
+///
+/// Per ADR-0092 §2.3: the on-disk shapes wrap their per-message records
+/// inside an envelope key. Three are known:
+///
+/// * `{ "kind": N, "v": [ ... ] }` — JSONL line written by recent VS Code
+///   builds. Each item in `v` is a request/response record carrying tokens
+///   under one of the four shapes from §2.3 (typically
+///   `result.metadata.{promptTokens,outputTokens}`).
+/// * `{ "requests": [ ... ] }` — `.json` document written by the same
+///   extension as a session snapshot.
+/// * `{ "messages": [ ... ] }` — older `.json` document shape, retained
+///   for back-compat with the synthetic fixtures used by §2.3 v1.
+///
+/// If none of the envelope keys are present (or `v` is an object rather
+/// than an array, as on the `kind: 0` manifest line that carries
+/// session-level metadata), fall back to treating the value itself as a
+/// flat record. This preserves the v1 flat-line shape that the unit
+/// fixtures and the budi-cursor integration tests rely on.
+fn flatten_records(value: &serde_json::Value) -> Vec<&serde_json::Value> {
+    for key in ["v", "requests", "messages"] {
+        if let Some(arr) = value.get(key).and_then(|v| v.as_array()) {
+            return arr.iter().collect();
+        }
+    }
+    vec![value]
 }
 
 fn build_message(
@@ -489,7 +546,8 @@ fn build_message(
 
 /// Return tokens for the first shape (in §2.3 order) where both input and
 /// output token counts are non-zero. ADR-0092 §2.3 — partial matches do not
-/// count.
+/// count, EXCEPT for the output-only fallback (§2.3.v3) which is tried
+/// last and emits a row with `input = 0`.
 fn extract_tokens(record: &serde_json::Value) -> Option<TokenSet> {
     if let Some(t) = extract_tokens_vscode_delta(record) {
         return Some(t);
@@ -501,6 +559,11 @@ fn extract_tokens(record: &serde_json::Value) -> Option<TokenSet> {
         return Some(t);
     }
     if let Some(t) = extract_tokens_feb_2026(record) {
+        return Some(t);
+    }
+    // Output-only fallback — must be tried after the four full-pair shapes
+    // so a record that legitimately carries both keys never lands here.
+    if let Some(t) = extract_tokens_completion_only(record) {
         return Some(t);
     }
     None
@@ -595,13 +658,40 @@ fn extract_tokens_feb_2026(record: &serde_json::Value) -> Option<TokenSet> {
     })
 }
 
-/// Returns true when *any* of the four token-key shapes can be located on
+/// Output-only fallback shape (v3, 8.4.x amendment to ADR-0092 §2.3) —
+/// top-level `completionTokens` with no input-token counterpart. Captures
+/// VS Code Copilot Chat builds that persist response-token counts but not
+/// prompt-token counts anywhere on disk.
+///
+/// The emitted [`TokenSet`] has `input = 0` and a non-zero `output`. This
+/// is the only shape where the both-non-zero invariant from the four
+/// full-pair shapes is intentionally relaxed; it is also the only shape
+/// allowed to produce a row with zero input tokens. Downstream cost
+/// pricing handles `input = 0` correctly (cost is output-only at the
+/// manifest layer); the Billing API reconciliation worker truths the
+/// dollar number up to the real bill on the next tick for users with a
+/// configured PAT (see §3 of ADR-0092).
+fn extract_tokens_completion_only(record: &serde_json::Value) -> Option<TokenSet> {
+    let output = record.get("completionTokens")?.as_u64()?;
+    if output == 0 {
+        return None;
+    }
+    Some(TokenSet {
+        input: 0,
+        output,
+        cache_read: 0,
+        cache_write: 0,
+    })
+}
+
+/// Returns true when *any* of the five token-key shapes can be located on
 /// this record, even if the values are zero. Used to distinguish "valid
 /// shape, just an empty record" (no warn) from "shape we don't recognize"
 /// (warn-once via [`log_unknown_shape_once`]).
 fn shape_matches_any(record: &serde_json::Value) -> bool {
     record.get("promptTokens").is_some()
         || record.get("outputTokens").is_some()
+        || record.get("completionTokens").is_some()
         || record.pointer("/modelMetrics/inputTokens").is_some()
         || record.pointer("/modelMetrics/outputTokens").is_some()
         || record.pointer("/usage/promptTokens").is_some()
@@ -612,6 +702,12 @@ fn shape_matches_any(record: &serde_json::Value) -> bool {
 
 /// Strip a `copilot/` model-id prefix per ADR-0092 §2.4.
 fn extract_model_id(record: &serde_json::Value) -> Option<String> {
+    // `modelId` is the user-facing label (e.g. `copilot/claude-haiku-4.5`,
+    // `copilot/auto`). Prefer it over `result.metadata.resolvedModel` —
+    // that field is either a dated version suffix (`claude-haiku-4-5-20251001`)
+    // or an internal GPU-fleet code (`capi-noe-ptuc-h200-oswe-vscode-prime`)
+    // that does not map to manifest entries. The fleet-code form means
+    // `resolvedModel` cannot be trusted as a pricing key.
     if let Some(model) = record.get("modelId").and_then(|v| v.as_str()) {
         return Some(strip_copilot_prefix(model).to_string());
     }
@@ -1042,5 +1138,187 @@ mod tests {
         assert!(roots.is_empty());
 
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// Real on-disk JSONL shape from `chatSessions/<id>.jsonl` written by
+    /// the `github.copilot-chat` extension circa 2026-04. The token-bearing
+    /// records are wrapped under the `kind: 2 / v: [...]` envelope and the
+    /// counts live at `result.metadata.{promptTokens,outputTokens}`. This
+    /// fixture is captured from a real session on a developer machine and
+    /// then trimmed to the fields the parser inspects — the structural
+    /// envelope (kind / v / nesting depth) is preserved verbatim so any
+    /// future regression of [`flatten_records`] is caught here.
+    #[test]
+    fn parse_jsonl_real_kind_v_envelope() {
+        let content = concat!(
+            // kind:0 manifest line — no tokens, must not produce a message
+            // and must not trigger an unknown-shape warn (its `v` is an
+            // object, which is the documented "session manifest" shape).
+            r#"{"kind":0,"v":{"sessionId":"abc","creationDate":"2026-04-15T10:00:00Z"}}"#,
+            "\n",
+            // kind:1 string — text fragment, no tokens, must not produce.
+            r#"{"kind":1,"v":"user prompt text"}"#,
+            "\n",
+            // kind:2 response — the token-bearing shape. `v` is an array of
+            // one assistant turn, tokens at result.metadata.{promptTokens,outputTokens}.
+            r#"{"kind":2,"v":[{"modelId":"copilot/claude-haiku-4.5","completionTokens":191,"requestId":"req-1","timestamp":1715000000000,"result":{"metadata":{"promptTokens":26412,"outputTokens":191,"modelMessageId":"m-1","resolvedModel":"claude-haiku-4.5"}}}]}"#,
+            "\n",
+        );
+        let path = Path::new("/tmp/budi-fixtures/sess-real-jsonl.jsonl");
+        let (msgs, offset) = parse_copilot_chat(path, content, 0);
+        assert_eq!(msgs.len(), 1, "exactly one assistant turn carries tokens");
+        let m = &msgs[0];
+        assert_eq!(m.input_tokens, 26412);
+        assert_eq!(m.output_tokens, 191);
+        assert_eq!(m.model.as_deref(), Some("claude-haiku-4.5"));
+        assert_eq!(m.provider, "copilot_chat");
+        assert_eq!(offset, content.len());
+    }
+
+    /// Real on-disk `.json` snapshot shape — `requests: [...]` envelope,
+    /// each request carrying tokens at
+    /// `result.metadata.{promptTokens,outputTokens}`. Mirrors the .jsonl
+    /// shape but as a single document (older / persisted-on-close form).
+    #[test]
+    fn parse_json_document_real_requests_envelope() {
+        let content = r#"{
+            "sessionId": "real-doc-1",
+            "version": 3,
+            "requesterUsername": "alice",
+            "responderUsername": "GitHub Copilot",
+            "requests": [
+                {
+                    "modelId": "github.copilot-chat/claude-sonnet-4",
+                    "requestId": "r-1",
+                    "timestamp": 1715000001000,
+                    "result": {
+                        "metadata": {
+                            "promptTokens": 1234,
+                            "outputTokens": 56,
+                            "modelMessageId": "mm-1"
+                        }
+                    }
+                },
+                {
+                    "modelId": "github.copilot-chat/claude-sonnet-4",
+                    "requestId": "r-2-no-tokens",
+                    "timestamp": 1715000002000
+                }
+            ]
+        }"#;
+        let path = Path::new("/tmp/budi-fixtures/sess-real-doc.json");
+        let (msgs, _) = parse_copilot_chat(path, content, 0);
+        assert_eq!(
+            msgs.len(),
+            1,
+            "only the request with result.metadata tokens produces a message"
+        );
+        let m = &msgs[0];
+        assert_eq!(m.input_tokens, 1234);
+        assert_eq!(m.output_tokens, 56);
+        // `github.copilot-chat/` prefix should be normalised the same way
+        // `copilot/` is — the strip happens via [`strip_copilot_prefix`].
+        // Today only `copilot/` is stripped, so we assert the full id
+        // passes through unchanged; if that ever changes, tighten here.
+        assert!(
+            m.model.as_deref().unwrap_or("").contains("claude-sonnet-4"),
+            "model id should mention claude-sonnet-4, got {:?}",
+            m.model
+        );
+        assert_eq!(m.session_id.as_deref(), Some("real-doc-1"));
+    }
+
+    /// `kind:1` lines whose `v` is an array of state events (no tokens
+    /// anywhere) must not emit an unknown-shape warn — the wrapper is
+    /// known, the inner records simply don't carry tokens. Pinning this
+    /// keeps the warn-once log from getting noisy on real sessions.
+    #[test]
+    fn parse_jsonl_kind1_array_silently_yields_no_messages() {
+        let content = concat!(
+            r#"{"kind":1,"v":[{"role":"user","content":"hi"},{"role":"system","content":"ok"}]}"#,
+            "\n",
+        );
+        let path = Path::new("/tmp/budi-fixtures/sess-kind1.jsonl");
+        let (msgs, _) = parse_copilot_chat(path, content, 0);
+        assert!(msgs.is_empty());
+    }
+
+    /// v3 (8.4.0) output-only fallback shape — VS Code Copilot Chat builds
+    /// circa 2026-05 persist `completionTokens` at the top of each
+    /// response record but no `promptTokens` counterpart anywhere. The
+    /// parser must still emit a row (with `input_tokens = 0`) so the
+    /// session is visible in the local-tail surface and the Billing API
+    /// reconciliation worker has a `(date, model)` bucket to truth up.
+    #[test]
+    fn extract_tokens_completion_only_shape() {
+        let record = serde_json::json!({
+            "modelId": "copilot/auto",
+            "completionTokens": 65,
+            "result": {
+                "metadata": {
+                    "resolvedModel": "capi-noe-ptuc-h200-oswe-vscode-prime"
+                }
+            }
+        });
+        let tokens = extract_tokens(&record).expect("must match output-only fallback");
+        assert_eq!(tokens.input, 0);
+        assert_eq!(tokens.output, 65);
+    }
+
+    /// Output-only fallback must not fire when `completionTokens == 0` —
+    /// that case is "valid shape, empty record" (the surrounding logic
+    /// would emit a useless 0/0 row otherwise).
+    #[test]
+    fn extract_tokens_completion_only_zero_skips() {
+        let record = serde_json::json!({"modelId": "x", "completionTokens": 0});
+        assert!(extract_tokens(&record).is_none());
+    }
+
+    /// Full-pair shapes must outrank the output-only fallback when both
+    /// keys are present — otherwise the `feb_2026` shape would lose its
+    /// input-token count to the fallback's `input = 0`.
+    #[test]
+    fn extract_tokens_full_pair_outranks_completion_only_fallback() {
+        let record = serde_json::json!({
+            "modelId": "copilot/x",
+            "completionTokens": 999,
+            "result": {
+                "metadata": {
+                    "promptTokens": 100,
+                    "outputTokens": 50
+                }
+            }
+        });
+        let tokens = extract_tokens(&record).expect("feb_2026 shape must win");
+        assert_eq!(tokens.input, 100);
+        assert_eq!(tokens.output, 50);
+    }
+
+    /// End-to-end on a real-shape JSONL with the v3 output-only records
+    /// (kind:0 manifest, kind:1 state events, kind:2 response with only
+    /// `completionTokens`). Three response turns → three messages; the
+    /// kind:0 / kind:1 lines emit nothing and stay silent.
+    #[test]
+    fn parse_jsonl_real_v3_completion_only_turns() {
+        let content = concat!(
+            r#"{"kind":0,"v":{"sessionId":"s","creationDate":"2026-05-07T15:00:00Z"}}"#,
+            "\n",
+            r#"{"kind":1,"v":{"completedAt":1715000000000,"value":"prompt"}}"#,
+            "\n",
+            r#"{"kind":2,"v":[{"modelId":"copilot/auto","completionTokens":65,"requestId":"r1","result":{"metadata":{"resolvedModel":"capi-noe-ptuc-h200-oswe-vscode-prime"}}}]}"#,
+            "\n",
+            r#"{"kind":2,"v":[{"modelId":"copilot/auto","completionTokens":115,"requestId":"r2","result":{"metadata":{"resolvedModel":"capi-noe-ptuc-h200-oswe-vscode-prime"}}},{"modelId":"copilot/auto","completionTokens":117,"requestId":"r3","result":{"metadata":{"resolvedModel":"capi-noe-ptuc-h200-oswe-vscode-prime"}}}]}"#,
+            "\n",
+        );
+        let path = Path::new("/tmp/budi-fixtures/sess-v3.jsonl");
+        let (msgs, _) = parse_copilot_chat(path, content, 0);
+        assert_eq!(msgs.len(), 3);
+        assert!(msgs.iter().all(|m| m.input_tokens == 0));
+        assert_eq!(
+            msgs.iter().map(|m| m.output_tokens).sum::<u64>(),
+            65 + 115 + 117
+        );
+        // All emit with the user-facing modelId, not the fleet-code resolvedModel.
+        assert!(msgs.iter().all(|m| m.model.as_deref() == Some("auto")));
     }
 }
