@@ -109,9 +109,14 @@ async fn warm_load_disk_cache(db_path: &std::path::Path) {
         // tick that wrote bytes containing a ceiling-exceeding row would
         // re-admit the row into the in-memory lookup.
         let rejected_upstream_rows = pricing::partition_rows_by_sanity(&mut entries);
+        // 8.4.2 / #680: the alias overlay is Budi-curated, not part
+        // of the upstream LiteLLM payload, so the refresh path
+        // attaches the embedded aliases on every install. Otherwise
+        // a refresh tick would clear the overlay until daemon restart.
         let manifest = Manifest {
             version,
             entries,
+            aliases: pricing::embedded_aliases(),
             fetched_at,
         };
         pricing::install_manifest(manifest, PricingSource::Manifest { version });
@@ -264,9 +269,13 @@ pub fn run_tick(db_path: &std::path::Path) -> anyhow::Result<RefreshReport> {
     // (none in practice, but defensive) can't collide on the primary key.
     let conn = budi_core::analytics::open_db(db_path)?;
     let next_version = next_manifest_version(&conn)?;
+    // 8.4.2 / #680: attach the curated alias overlay on every
+    // refresh tick. LiteLLM ships no aliases section; the overlay
+    // is Budi-owned and rebuilt cheaply per install.
     let mut candidate = Manifest {
         version: next_version,
         entries,
+        aliases: pricing::embedded_aliases(),
         fetched_at: now.clone(),
     };
     let rejected_upstream_rows =
@@ -491,6 +500,7 @@ mod tests {
         let mut candidate = pricing::Manifest {
             version: 2,
             entries,
+            aliases: HashMap::new(),
             fetched_at: chrono::Utc::now().to_rfc3339(),
         };
 
