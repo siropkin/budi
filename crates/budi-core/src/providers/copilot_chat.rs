@@ -39,7 +39,23 @@ use crate::provider::{DiscoveredFile, Provider};
 /// emit with `input_tokens = 0` so the row at least exists; the Billing
 /// API reconciliation in §3 of ADR-0092 truths up the dollar number to
 /// the real bill on the next tick for individually-licensed users.
-pub const MIN_API_VERSION: u32 = 3;
+///
+/// v4 (8.4.1, R1.1): the JSONL parser is now a per-session **mutation-log
+/// reducer** rather than a per-line independent extractor. VS Code 1.109+
+/// (and `github.copilot-chat` ≥0.47.0) persist chat sessions as a JSON
+/// Pointer mutation log: a `kind:0` snapshot followed by `kind:1` set-at-
+/// pointer and `kind:2` array-splice patches. The token counts arrive on
+/// later kind:1 patches like `{"kind":1,"k":["requests",8,"completionTokens"],"v":39}`
+/// — buried inside `k`, never at the top of the line. The v3 parser saw
+/// these as flat records with no token keys and emitted zero rows from
+/// active sessions. v4 replays the mutation log onto a per-session state
+/// and runs the four-then-five token-key shapes against the **materialized
+/// request**, not the raw line. The four full-pair shapes from §2.3 are
+/// unchanged; the output-only fallback is unchanged. Requests are
+/// emit-keyed by `requestId` so a future patch on the same request never
+/// produces a duplicate row. Paired with an ADR-0092 §2.3 amendment that
+/// documents the reducer as the authoritative envelope shape.
+pub const MIN_API_VERSION: u32 = 4;
 
 /// VS Code-family directory names. Casing is preserved for the macOS
 /// "Application Support" path, where the disk layout is case-sensitive on
@@ -350,75 +366,431 @@ fn parse_copilot_chat(path: &Path, content: &str, offset: usize) -> (Vec<ParsedM
 }
 
 fn parse_jsonl(path: &Path, content: &str, start_offset: usize) -> (Vec<ParsedMessage>, usize) {
-    let mut messages = Vec::new();
-    let mut offset = start_offset;
-
     if start_offset > content.len() {
-        return (messages, content.len());
+        return (Vec::new(), content.len());
     }
 
-    let session_id = session_id_for_path(path);
+    // The mutation-log reducer (ADR-0092 §2.3 v4) replays kind:0/1/2 from
+    // byte 0 to materialize per-session state. The framework only hands us
+    // the appended chunk since the previous offset, so we read the full
+    // file ourselves when it is on disk; unit tests (no file at `path`)
+    // and transient I/O failures fall back to the appended chunk, which
+    // is the legacy shape the synthetic fixtures use.
+    let on_disk = std::fs::read_to_string(path).ok();
+    let (parse_content, has_full_file): (&str, bool) = match on_disk.as_deref() {
+        Some(s) if !s.is_empty() => (s, true),
+        _ => (&content[start_offset..], false),
+    };
+
+    // Returned offset is in `content` coordinates (relative to the chunk
+    // the framework gave us). Advance past the last complete line so a
+    // mid-write record is replayed on the next tick.
+    let new_offset = last_complete_line_end_in_content(content, start_offset);
+
+    let session_id_from_path = session_id_for_path(path);
+    let mut state = serde_json::json!({});
+    if let Some(ref sid) = session_id_from_path
+        && let Some(obj) = state.as_object_mut()
+    {
+        obj.insert(
+            "sessionId".to_string(),
+            serde_json::Value::String(sid.clone()),
+        );
+    }
     let mut session_default_model: Option<String> = None;
-    let mut line_index: usize = byte_offset_to_line_index(content, start_offset);
-    // Per-record counter so deterministic_uuid stays unique across multiple
-    // records emitted from the same line (envelope shapes — see
-    // [`flatten_records`]).
-    let mut record_index: usize = 0;
+    let mut messages = Vec::new();
+    // Tracks emit keys (typically `requestId`) so a request that
+    // transitions to "complete" on one line and is then re-touched by a
+    // later patch in the same parse only emits once. Cross-call dedup
+    // relies on the deterministic UUID (keyed by the same emit key)
+    // colliding at the database layer.
+    let mut emitted: std::collections::HashSet<String> = std::collections::HashSet::new();
+    // Flat-line back-compat: monotonic line index used by the legacy
+    // composite UUID derivation (line_index * 1_000_000 + record_index).
+    // Only relevant when the line has no `kind` envelope.
+    let mut flat_line_index: usize = if has_full_file {
+        0
+    } else {
+        byte_offset_to_line_index(content, start_offset)
+    };
+    let mut flat_record_index: usize = 0;
 
-    let remaining = &content[start_offset..];
-    let mut pos = 0;
-
-    for line in remaining.lines() {
-        let line_end = pos + line.len();
-        let has_newline = line_end < remaining.len() && remaining.as_bytes()[line_end] == b'\n';
-        // The last line of a partially-written file has no terminating newline yet;
-        // stop here so the next read picks it up once the writer flushes.
-        if !has_newline && line_end == remaining.len() {
-            break;
-        }
-        pos = line_end + if has_newline { 1 } else { 0 };
-        offset = start_offset + pos;
-        line_index += 1;
-
+    for line in parse_content.lines() {
         let trimmed = line.trim();
         if trimmed.is_empty() {
+            flat_line_index += 1;
             continue;
         }
 
         let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed) else {
+            // Malformed or partially-written line — leave for the next tick.
+            flat_line_index += 1;
             continue;
         };
 
-        // Session-default model can be advertised either on the envelope
-        // itself (older flat-line shape) or on the manifest record VS Code
-        // writes as `kind: 0` (real on-disk shape — see ADR-0092 §2.3).
-        if let Some(model) = extract_session_default_model(&value) {
-            session_default_model = Some(model);
-        }
+        if value.get("kind").and_then(|v| v.as_u64()).is_some() {
+            apply_mutation(&mut state, &value);
 
-        for record in flatten_records(&value) {
-            if let Some(model) = extract_session_default_model(record) {
+            if let Some(m) = extract_session_default_model(&state) {
+                session_default_model = Some(m);
+            }
+            if let Some(v_payload) = value.get("v")
+                && let Some(m) = extract_session_default_model(v_payload)
+            {
+                session_default_model = Some(m);
+            }
+
+            // Re-scan requests after each mutation. A request is
+            // emit-eligible the moment `extract_tokens` returns Some — that
+            // is, a kind:1 patch has just landed enough token counts on
+            // the materialized request to satisfy one of the §2.3 shapes.
+            if let Some(requests) = state.get("requests").and_then(|v| v.as_array()) {
+                for (idx, request) in requests.iter().enumerate() {
+                    if let Some(m) = request
+                        .get("modelId")
+                        .and_then(|v| v.as_str())
+                        .map(|s| strip_copilot_prefix(s).to_string())
+                    {
+                        session_default_model = Some(m);
+                    }
+                    let Some(tokens) = extract_tokens(request) else {
+                        continue;
+                    };
+                    let emit_key = request_emit_key(request, idx);
+                    if !emitted.insert(emit_key.clone()) {
+                        continue;
+                    }
+                    if let Some(msg) = build_message_for_request(
+                        path,
+                        request,
+                        tokens,
+                        state.get("sessionId").and_then(|v| v.as_str()),
+                        session_default_model.as_deref(),
+                        &emit_key,
+                    ) {
+                        messages.push(msg);
+                    }
+                }
+            }
+        } else {
+            // Flat-line back-compat path (synthetic fixtures, pre-v4 shapes).
+            flat_line_index += 1;
+            if let Some(model) = extract_session_default_model(&value) {
                 session_default_model = Some(model);
             }
-            record_index += 1;
-            let composite_index = line_index
-                .wrapping_mul(1_000_000)
-                .wrapping_add(record_index);
-            if let Some(msg) = build_message(
-                path,
-                record,
-                session_id.as_deref(),
-                session_default_model.as_deref(),
-                composite_index,
-            ) {
-                messages.push(msg);
-            } else if !shape_matches_any(record) {
-                log_unknown_shape_once(path, record);
+            for record in flatten_records(&value) {
+                if let Some(model) = extract_session_default_model(record) {
+                    session_default_model = Some(model);
+                }
+                flat_record_index += 1;
+                let composite_index = flat_line_index
+                    .wrapping_mul(1_000_000)
+                    .wrapping_add(flat_record_index);
+                if let Some(msg) = build_message(
+                    path,
+                    record,
+                    state.get("sessionId").and_then(|v| v.as_str()),
+                    session_default_model.as_deref(),
+                    composite_index,
+                ) {
+                    messages.push(msg);
+                } else if !shape_matches_any(record) {
+                    log_unknown_shape_once(path, record);
+                }
             }
         }
     }
 
-    (messages, offset)
+    (messages, new_offset)
+}
+
+/// Position of the byte immediately after the last `\n` in `content`,
+/// clamped to be at least `start_offset`. If no newline exists past
+/// `start_offset` the offset is left unchanged so the partial line is
+/// re-read on the next tick — mirrors the original truncation contract
+/// (`parse_jsonl_truncates_partial_final_line`).
+fn last_complete_line_end_in_content(content: &str, start_offset: usize) -> usize {
+    let from = start_offset.min(content.len());
+    let after = &content.as_bytes()[from..];
+    match after.iter().rposition(|&b| b == b'\n') {
+        Some(i) => from + i + 1,
+        None => start_offset,
+    }
+}
+
+/// Stable emit key for a materialized request — `requestId` when present,
+/// else a synthetic key derived from the in-array index. The reducer
+/// re-scans on every mutation, so the key must be stable across mutations
+/// to the same request (otherwise a kind:1 patch on `result.metadata`
+/// after the tokens already landed would re-emit).
+fn request_emit_key(request: &serde_json::Value, idx: usize) -> String {
+    if let Some(rid) = request.get("requestId").and_then(|v| v.as_str())
+        && !rid.is_empty()
+    {
+        return format!("rid:{rid}");
+    }
+    if let Some(rid) = request
+        .pointer("/result/metadata/requestId")
+        .and_then(|v| v.as_str())
+        && !rid.is_empty()
+    {
+        return format!("rid:{rid}");
+    }
+    if let Some(mid) = request
+        .pointer("/result/metadata/modelMessageId")
+        .and_then(|v| v.as_str())
+        && !mid.is_empty()
+    {
+        return format!("mmid:{mid}");
+    }
+    format!("idx:{idx}")
+}
+
+/// Apply a single mutation-log line (`kind:0`, `kind:1`, or `kind:2`) to
+/// the per-session reducer state. Lines without a recognised `kind` are
+/// no-ops here — the caller routes those through the flat-record path.
+///
+/// Per ADR-0092 §2.3 v4:
+/// - kind:0 — `v` is a session snapshot. Top-level keys are merged into
+///   state (a later kind:1 patch can override individual fields).
+/// - kind:1 — `v` is a value to set at JSON-Pointer-shaped path `k`.
+///   Auto-creates intermediate arrays/objects when the path traverses
+///   indices that haven't been allocated yet (`k=["requests",8,
+///   "completionTokens"]` with state.requests.len() < 9).
+/// - kind:2 — `v` is an array of items to append at `k`. Defaults to
+///   `["requests"]` when `k` is missing or empty (the hand-trimmed
+///   real-world fixtures used in the v3 unit tests, and a common shape
+///   used by some Copilot Chat builds before they landed an explicit `k`).
+fn apply_mutation(state: &mut serde_json::Value, line: &serde_json::Value) {
+    let kind = match line.get("kind").and_then(|v| v.as_u64()) {
+        Some(k) => k,
+        None => return,
+    };
+
+    match kind {
+        0 => {
+            let Some(v) = line.get("v") else { return };
+            // The snapshot is normally `{requests: [...], sessionId: "...",
+            // ...}`. If it's not an object (older fixtures pass a string or
+            // array on kind:0), leave state alone.
+            if let Some(v_obj) = v.as_object()
+                && let Some(state_obj) = state.as_object_mut()
+            {
+                for (k, val) in v_obj {
+                    state_obj.insert(k.clone(), val.clone());
+                }
+            }
+        }
+        1 => {
+            let Some(k_arr) = line.get("k").and_then(|k| k.as_array()) else {
+                return;
+            };
+            let Some(v_val) = line.get("v") else { return };
+            set_at_path(state, k_arr, v_val.clone());
+        }
+        2 => {
+            let Some(items) = line.get("v").and_then(|x| x.as_array()) else {
+                return;
+            };
+            let k_arr = line.get("k").and_then(|k| k.as_array());
+            let path: Vec<serde_json::Value> = match k_arr {
+                Some(arr) if !arr.is_empty() => arr.clone(),
+                _ => vec![serde_json::Value::String("requests".to_string())],
+            };
+            append_at_path(state, &path, items);
+        }
+        _ => {}
+    }
+}
+
+/// Set `value` at the JSON-Pointer-shaped `path` inside `state`, creating
+/// any missing intermediate arrays/objects on the way. Numeric segments
+/// address arrays (auto-grown with placeholders); string segments address
+/// objects.
+fn set_at_path(
+    state: &mut serde_json::Value,
+    path: &[serde_json::Value],
+    value: serde_json::Value,
+) {
+    if path.is_empty() {
+        *state = value;
+        return;
+    }
+    let head = &path[0];
+    let rest = &path[1..];
+
+    if let Some(idx) = head.as_u64().map(|n| n as usize) {
+        if !state.is_array() {
+            *state = serde_json::Value::Array(Vec::new());
+        }
+        let arr = state.as_array_mut().expect("just ensured array");
+        while arr.len() <= idx {
+            arr.push(placeholder_for_path(rest));
+        }
+        set_at_path(&mut arr[idx], rest, value);
+    } else if let Some(key) = head.as_str() {
+        if !state.is_object() {
+            *state = serde_json::Value::Object(serde_json::Map::new());
+        }
+        let obj = state.as_object_mut().expect("just ensured object");
+        if !obj.contains_key(key) {
+            obj.insert(key.to_string(), placeholder_for_path(rest));
+        }
+        set_at_path(obj.get_mut(key).expect("just inserted"), rest, value);
+    }
+}
+
+/// Append `items` to the array at `path` inside `state`, creating any
+/// missing intermediate containers. If `path` resolves to a non-array,
+/// the call is a no-op (the upstream extension occasionally writes
+/// `kind:2` patches that race with a `kind:1` overwrite of the same
+/// path; preserving the new shape over a re-coerced array is safer).
+fn append_at_path(
+    state: &mut serde_json::Value,
+    path: &[serde_json::Value],
+    items: &[serde_json::Value],
+) {
+    if path.is_empty() {
+        if let Some(arr) = state.as_array_mut() {
+            for item in items {
+                arr.push(item.clone());
+            }
+        }
+        return;
+    }
+    let head = &path[0];
+    let rest = &path[1..];
+
+    if let Some(idx) = head.as_u64().map(|n| n as usize) {
+        if !state.is_array() {
+            *state = serde_json::Value::Array(Vec::new());
+        }
+        let arr = state.as_array_mut().expect("just ensured array");
+        while arr.len() <= idx {
+            arr.push(if rest.is_empty() {
+                serde_json::Value::Array(Vec::new())
+            } else {
+                placeholder_for_path(rest)
+            });
+        }
+        if rest.is_empty() {
+            if let Some(target) = arr[idx].as_array_mut() {
+                for item in items {
+                    target.push(item.clone());
+                }
+            }
+        } else {
+            append_at_path(&mut arr[idx], rest, items);
+        }
+    } else if let Some(key) = head.as_str() {
+        if !state.is_object() {
+            *state = serde_json::Value::Object(serde_json::Map::new());
+        }
+        let obj = state.as_object_mut().expect("just ensured object");
+        if !obj.contains_key(key) {
+            obj.insert(
+                key.to_string(),
+                if rest.is_empty() {
+                    serde_json::Value::Array(Vec::new())
+                } else {
+                    placeholder_for_path(rest)
+                },
+            );
+        }
+        if rest.is_empty() {
+            if let Some(target) = obj.get_mut(key).and_then(|v| v.as_array_mut()) {
+                for item in items {
+                    target.push(item.clone());
+                }
+            }
+        } else {
+            append_at_path(obj.get_mut(key).expect("just inserted"), rest, items);
+        }
+    }
+}
+
+fn placeholder_for_path(rest: &[serde_json::Value]) -> serde_json::Value {
+    match rest.first() {
+        Some(seg) if seg.as_u64().is_some() => serde_json::Value::Array(Vec::new()),
+        Some(_) => serde_json::Value::Object(serde_json::Map::new()),
+        None => serde_json::Value::Null,
+    }
+}
+
+/// Build a `ParsedMessage` from a materialized request, keying the
+/// deterministic UUID off `emit_key` (typically the request's
+/// `requestId`). This is the reducer-path counterpart to
+/// [`build_message`], which keys off a synthetic line/record index for
+/// flat-line back-compat.
+fn build_message_for_request(
+    path: &Path,
+    request: &serde_json::Value,
+    tokens: TokenSet,
+    session_id: Option<&str>,
+    session_default_model: Option<&str>,
+    emit_key: &str,
+) -> Option<ParsedMessage> {
+    let model = extract_model_id(request).or_else(|| session_default_model.map(|s| s.to_string()));
+    let timestamp = extract_timestamp(request);
+
+    let path_key = path.display().to_string();
+    let sid = session_id.unwrap_or(path_key.as_str());
+    let uuid = deterministic_uuid_for_key(sid, &path_key, emit_key);
+
+    Some(ParsedMessage {
+        uuid,
+        session_id: session_id.map(String::from),
+        timestamp,
+        cwd: None,
+        role: "assistant".to_string(),
+        model,
+        input_tokens: tokens.input,
+        output_tokens: tokens.output,
+        cache_creation_tokens: tokens.cache_write,
+        cache_read_tokens: tokens.cache_read,
+        git_branch: None,
+        repo_id: None,
+        provider: "copilot_chat".to_string(),
+        cost_cents: None,
+        session_title: None,
+        parent_uuid: None,
+        user_name: None,
+        machine_name: None,
+        cost_confidence: "estimated".to_string(),
+        pricing_source: None,
+        request_id: None,
+        speed: None,
+        cache_creation_1h_tokens: 0,
+        web_search_requests: 0,
+        prompt_category: None,
+        prompt_category_source: None,
+        prompt_category_confidence: None,
+        tool_names: Vec::new(),
+        tool_use_ids: Vec::new(),
+        tool_files: Vec::new(),
+        tool_outcomes: Vec::new(),
+    })
+}
+
+fn deterministic_uuid_for_key(session_id: &str, path: &str, key: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"copilot_chat:");
+    hasher.update(session_id.as_bytes());
+    hasher.update(b"|");
+    hasher.update(path.as_bytes());
+    hasher.update(b"|key:");
+    hasher.update(key.as_bytes());
+    let hash = hasher.finalize();
+    format!(
+        "{:08x}-{:04x}-{:04x}-{:04x}-{:012x}",
+        u32::from_be_bytes([hash[0], hash[1], hash[2], hash[3]]),
+        u16::from_be_bytes([hash[4], hash[5]]),
+        u16::from_be_bytes([hash[6], hash[7]]),
+        u16::from_be_bytes([hash[8], hash[9]]),
+        u64::from_be_bytes([
+            0, 0, hash[10], hash[11], hash[12], hash[13], hash[14], hash[15]
+        ])
+    )
 }
 
 fn parse_json_document(path: &Path, content: &str) -> (Vec<ParsedMessage>, usize) {
@@ -1320,5 +1692,232 @@ mod tests {
         );
         // All emit with the user-facing modelId, not the fleet-code resolvedModel.
         assert!(msgs.iter().all(|m| m.model.as_deref() == Some("auto")));
+    }
+
+    // ---- v4 (8.4.1, R1.1): mutation-log reducer tests ------------------
+
+    /// kind:0 snapshot followed by kind:1 patches that fill in
+    /// `completionTokens` for an existing request. This is the shape that
+    /// VS Code 1.109+ writes mid-conversation, and the regression that
+    /// drove ticket #668 — the v3 parser saw the kind:1 `v: 39` line as
+    /// a flat record with no token keys at the top level and emitted
+    /// nothing. The reducer materializes the merged request and the
+    /// output-only fallback shape produces a row.
+    #[test]
+    fn reducer_kind1_completion_tokens_patch_emits_row() {
+        let content = concat!(
+            // kind:0 snapshot — one request stub, no tokens yet.
+            r#"{"kind":0,"v":{"sessionId":"s-1","requests":[{"requestId":"r-1","modelId":"copilot/claude-sonnet-4-5"}]}}"#,
+            "\n",
+            // kind:1 patch lands the completion-token count on requests[0].
+            r#"{"kind":1,"k":["requests",0,"completionTokens"],"v":42}"#,
+            "\n",
+        );
+        let path = Path::new("/tmp/budi-fixtures/sess-reducer-1.jsonl");
+        let (msgs, _) = parse_copilot_chat(path, content, 0);
+        assert_eq!(msgs.len(), 1, "completionTokens patch must emit one row");
+        let m = &msgs[0];
+        assert_eq!(m.input_tokens, 0, "output-only fallback ⇒ input = 0");
+        assert_eq!(m.output_tokens, 42);
+        assert_eq!(m.model.as_deref(), Some("claude-sonnet-4-5"));
+        assert_eq!(m.session_id.as_deref(), Some("s-1"));
+    }
+
+    /// kind:1 patches that land both `promptTokens` and `outputTokens` on
+    /// `result.metadata` for a request stub appended via kind:2. Auto-grow
+    /// of intermediate objects is exercised: the kind:2 stub doesn't carry
+    /// `result.metadata` at all, so the kind:1 path
+    /// `["requests",0,"result","metadata","promptTokens"]` has to
+    /// materialize the missing object levels on the way in.
+    #[test]
+    fn reducer_kind1_patches_auto_create_intermediate_objects() {
+        let content = concat!(
+            // No kind:0 snapshot — start empty. kind:2 push adds a stub.
+            r#"{"kind":2,"k":["requests"],"v":[{"requestId":"r-9","modelId":"copilot/gpt-4.1"}]}"#,
+            "\n",
+            // kind:1 patches stream the token counts in. result/metadata
+            // do not yet exist — set_at_path must create them.
+            r#"{"kind":1,"k":["requests",0,"result","metadata","promptTokens"],"v":1234}"#,
+            "\n",
+            r#"{"kind":1,"k":["requests",0,"result","metadata","outputTokens"],"v":56}"#,
+            "\n",
+        );
+        let path = Path::new("/tmp/budi-fixtures/sess-reducer-2.jsonl");
+        let (msgs, _) = parse_copilot_chat(path, content, 0);
+        // Three lines, but the first emit-eligible mutation is the second
+        // kind:1 patch (when both prompt+output land). The first kind:1
+        // patch alone leaves `outputTokens = 0` so no shape matches yet.
+        // Result: exactly one row.
+        assert_eq!(msgs.len(), 1, "feb-2026 shape must materialize once");
+        let m = &msgs[0];
+        assert_eq!(m.input_tokens, 1234);
+        assert_eq!(m.output_tokens, 56);
+        assert_eq!(m.model.as_deref(), Some("gpt-4.1"));
+    }
+
+    /// Acceptance criterion (#668): "append a kind:2 stub then a kind:1
+    /// completionTokens patch to a watched file; assert exactly one row
+    /// materializes after the patch." This pins the live-tailer ordering:
+    /// the kind:2 stub alone emits nothing, the kind:1 patch landing
+    /// completionTokens emits one row, and a *second* kind:1 patch on
+    /// the same request (e.g. updating `timestamp`) does not double-emit.
+    #[test]
+    fn reducer_emit_keyed_by_request_id_no_double_emit() {
+        let content = concat!(
+            r#"{"kind":2,"k":["requests"],"v":[{"requestId":"r-only","modelId":"copilot/auto"}]}"#,
+            "\n",
+            r#"{"kind":1,"k":["requests",0,"completionTokens"],"v":77}"#,
+            "\n",
+            // Later patch on the same request — must NOT emit a second row.
+            r#"{"kind":1,"k":["requests",0,"timestamp"],"v":1715000999000}"#,
+            "\n",
+            r#"{"kind":1,"k":["requests",0,"completionTokens"],"v":80}"#,
+            "\n",
+        );
+        let path = Path::new("/tmp/budi-fixtures/sess-reducer-3.jsonl");
+        let (msgs, _) = parse_copilot_chat(path, content, 0);
+        assert_eq!(msgs.len(), 1, "exactly one row per requestId");
+        assert_eq!(msgs[0].output_tokens, 77, "first complete value wins");
+    }
+
+    /// Two kind:2 splices to `["requests"]` followed by interleaved kind:1
+    /// patches that complete each request at different lines. The reducer
+    /// must emit one row per request, in the order each request becomes
+    /// complete (not in array-index order).
+    #[test]
+    fn reducer_multiple_requests_emit_in_completion_order() {
+        let content = concat!(
+            r#"{"kind":0,"v":{"sessionId":"s-multi","requests":[]}}"#,
+            "\n",
+            r#"{"kind":2,"k":["requests"],"v":[{"requestId":"a","modelId":"copilot/gpt-4.1"}]}"#,
+            "\n",
+            r#"{"kind":2,"k":["requests"],"v":[{"requestId":"b","modelId":"copilot/gpt-4.1"}]}"#,
+            "\n",
+            // Request b completes first (out-of-order vs. array index).
+            r#"{"kind":1,"k":["requests",1,"result","metadata","promptTokens"],"v":10}"#,
+            "\n",
+            r#"{"kind":1,"k":["requests",1,"result","metadata","outputTokens"],"v":2}"#,
+            "\n",
+            // Then request a completes.
+            r#"{"kind":1,"k":["requests",0,"result","metadata","promptTokens"],"v":100}"#,
+            "\n",
+            r#"{"kind":1,"k":["requests",0,"result","metadata","outputTokens"],"v":20}"#,
+            "\n",
+        );
+        let path = Path::new("/tmp/budi-fixtures/sess-reducer-4.jsonl");
+        let (msgs, _) = parse_copilot_chat(path, content, 0);
+        assert_eq!(msgs.len(), 2);
+        // First-completed (request b) emits first.
+        assert_eq!(msgs[0].input_tokens, 10);
+        assert_eq!(msgs[0].output_tokens, 2);
+        assert_eq!(msgs[1].input_tokens, 100);
+        assert_eq!(msgs[1].output_tokens, 20);
+        // Stable per-request UUIDs — different requests, different UUIDs.
+        assert_ne!(msgs[0].uuid, msgs[1].uuid);
+    }
+
+    /// kind:0 snapshots that already inline `completionTokens` (the
+    /// historical path that even the v3 parser handled) must keep
+    /// emitting a single row through the reducer. This is the regression
+    /// shape called out in #668: "only kind:0 lines whose `requests`
+    /// snapshot already had `completionTokens` inline at file write time"
+    /// produced rows on v3. The reducer must preserve this for the
+    /// imported-historical-session case (`budi db import`).
+    #[test]
+    fn reducer_kind0_snapshot_with_inline_tokens_emits() {
+        let content = concat!(
+            r#"{"kind":0,"v":{"sessionId":"hist-1","requests":[{"requestId":"h-1","modelId":"copilot/claude-haiku-4.5","result":{"metadata":{"promptTokens":500,"outputTokens":12}}}]}}"#,
+            "\n",
+        );
+        let path = Path::new("/tmp/budi-fixtures/sess-hist.jsonl");
+        let (msgs, _) = parse_copilot_chat(path, content, 0);
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0].input_tokens, 500);
+        assert_eq!(msgs[0].output_tokens, 12);
+        assert_eq!(msgs[0].model.as_deref(), Some("claude-haiku-4.5"));
+    }
+
+    /// Reducer-emitted rows must use a deterministic UUID that's stable
+    /// across re-parses keyed by `requestId` — so a future call that
+    /// re-replays the file (e.g. on daemon restart) produces the same UUID
+    /// and the database upsert dedupes instead of double-counting.
+    #[test]
+    fn reducer_deterministic_uuid_stable_across_reparse() {
+        let content = concat!(
+            r#"{"kind":2,"k":["requests"],"v":[{"requestId":"stable-key","modelId":"copilot/x"}]}"#,
+            "\n",
+            r#"{"kind":1,"k":["requests",0,"completionTokens"],"v":7}"#,
+            "\n",
+        );
+        let path = Path::new("/tmp/budi-fixtures/sess-stable.jsonl");
+        let (first, _) = parse_copilot_chat(path, content, 0);
+        let (second, _) = parse_copilot_chat(path, content, 0);
+        assert_eq!(first.len(), 1);
+        assert_eq!(second.len(), 1);
+        assert_eq!(first[0].uuid, second[0].uuid);
+    }
+
+    /// `set_at_path` correctness — exercises the helper directly so a
+    /// future regression of the auto-grow / placeholder logic is caught
+    /// without needing to construct a full mutation-log fixture.
+    #[test]
+    fn set_at_path_grows_arrays_and_creates_objects() {
+        let mut state = serde_json::json!({});
+        let path = vec![
+            serde_json::json!("requests"),
+            serde_json::json!(2),
+            serde_json::json!("result"),
+            serde_json::json!("metadata"),
+            serde_json::json!("promptTokens"),
+        ];
+        set_at_path(&mut state, &path, serde_json::json!(99));
+        assert_eq!(
+            state
+                .pointer("/requests/2/result/metadata/promptTokens")
+                .and_then(|v| v.as_u64()),
+            Some(99)
+        );
+        // Indices 0 and 1 are placeholder objects (next segment is the
+        // string "result", so an object placeholder is correct).
+        assert!(
+            state
+                .pointer("/requests/0")
+                .map(|v| v.is_object())
+                .unwrap_or(false)
+        );
+        assert!(
+            state
+                .pointer("/requests/1")
+                .map(|v| v.is_object())
+                .unwrap_or(false)
+        );
+    }
+
+    /// `append_at_path` correctness — the default-path branch (kind:2 with
+    /// no `k`) and the explicit `["requests"]` branch must both append to
+    /// the same array.
+    #[test]
+    fn append_at_path_appends_to_named_array() {
+        let mut state = serde_json::json!({});
+        append_at_path(
+            &mut state,
+            &[serde_json::json!("requests")],
+            &[serde_json::json!({"requestId": "a"})],
+        );
+        append_at_path(
+            &mut state,
+            &[serde_json::json!("requests")],
+            &[
+                serde_json::json!({"requestId": "b"}),
+                serde_json::json!({"requestId": "c"}),
+            ],
+        );
+        let arr = state
+            .get("requests")
+            .and_then(|v| v.as_array())
+            .expect("requests is an array");
+        assert_eq!(arr.len(), 3);
+        assert_eq!(arr[0].get("requestId").and_then(|v| v.as_str()), Some("a"));
+        assert_eq!(arr[2].get("requestId").and_then(|v| v.as_str()), Some("c"));
     }
 }
