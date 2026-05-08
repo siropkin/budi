@@ -3539,8 +3539,14 @@ pub fn statusline_stats(
         .as_ref()
         .and_then(|sid| super::health::session_health(conn, Some(sid)).ok())
         .map(|h| {
-            let avg = if h.message_count > 0 {
-                Some(h.total_cost_cents / h.message_count as f64)
+            // #691: average is session_cost / user-typed prompts. Subagent
+            // fan-outs only emit assistant rows so a multi-call turn stays at
+            // 1, and zero-cost unpriced rows contribute 0 to the numerator
+            // without inflating the denominator. `user_prompt_count` carries
+            // the copilot_chat fallback for sessions with no captured user
+            // rows (see `compute_user_prompt_count`).
+            let avg = if h.user_prompt_count > 0 {
+                Some(h.total_cost_cents / h.user_prompt_count as f64)
             } else {
                 None
             };

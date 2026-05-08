@@ -84,6 +84,14 @@ pub const STATE_INSUFFICIENT_DATA: &str = "insufficient_data";
 pub struct SessionHealth {
     pub state: String,
     pub message_count: u64,
+    /// Denominator the statusline `message` slot divides session cost by
+    /// (#691). Counts user-typed prompts so subagent fan-out and unpriced
+    /// rows don't deflate the per-message average. For providers that don't
+    /// yet capture user rows (copilot_chat pre-#686 sessions), falls back to
+    /// `COUNT(DISTINCT request_id WHERE role='assistant' AND cost_cents > 0)`
+    /// so the slot still reads sensibly.
+    #[serde(default)]
+    pub user_prompt_count: u64,
     pub total_cost_cents: f64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cost_lag_hint: Option<String>,
@@ -186,6 +194,7 @@ pub fn session_health(conn: &Connection, session_id: Option<&str>) -> Result<Ses
                     return Ok(SessionHealth {
                         state: "green".to_string(),
                         message_count: 0,
+                        user_prompt_count: 0,
                         total_cost_cents: 0.0,
                         cost_lag_hint: None,
                         vitals: SessionVitals {
@@ -215,6 +224,7 @@ pub fn session_health(conn: &Connection, session_id: Option<&str>) -> Result<Ses
     let messages = session_messages(conn, &sid)?;
     let msg_count = messages.len() as u64;
     let total_cost: f64 = messages.iter().map(|m| m.cost_cents).sum();
+    let user_prompt_count = compute_user_prompt_count(conn, &sid, &provider_str)?;
     let metrics = messages
         .iter()
         .map(|m| HealthMessage {
@@ -276,6 +286,7 @@ pub fn session_health(conn: &Connection, session_id: Option<&str>) -> Result<Ses
     Ok(SessionHealth {
         state: overall_state,
         message_count: msg_count,
+        user_prompt_count,
         total_cost_cents: total_cost,
         cost_lag_hint,
         vitals,
@@ -1008,4 +1019,43 @@ fn load_tool_events(
     _session_ids: &[&str],
 ) -> Result<HashMap<String, Vec<SessionToolEvent>>> {
     Ok(HashMap::new())
+}
+
+/// Denominator for the statusline `message` slot (#691).
+///
+/// Default path counts `role='user'` rows so a single user prompt fanning
+/// out into N subagents stays at `1`, and zero-cost assistant rows from
+/// unpriced models don't dilute the average.
+///
+/// Fallback: `copilot_chat` shipped user-row capture in #686, but pre-#686
+/// sessions still on disk don't have any user rows. For that provider only,
+/// when no user rows exist, count distinct priced assistant requests so the
+/// slot still renders something sensible. Once those legacy sessions age
+/// out, the fallback is silently inert because the user-row path wins.
+fn compute_user_prompt_count(conn: &Connection, sid: &str, provider: &str) -> Result<u64> {
+    let user_count: u64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM messages WHERE session_id = ?1 AND role = 'user'",
+            params![sid],
+            |r| r.get(0),
+        )
+        .context("Failed to count user-role messages for session")?;
+    if user_count > 0 {
+        return Ok(user_count);
+    }
+    if provider == "copilot_chat" {
+        let priced_requests: u64 = conn
+            .query_row(
+                "SELECT COUNT(DISTINCT request_id) FROM messages
+                 WHERE session_id = ?1
+                   AND role = 'assistant'
+                   AND request_id IS NOT NULL
+                   AND COALESCE(cost_cents, 0.0) > 0.0",
+                params![sid],
+                |r| r.get(0),
+            )
+            .context("Failed to count priced copilot_chat requests for session")?;
+        return Ok(priced_requests);
+    }
+    Ok(0)
 }
