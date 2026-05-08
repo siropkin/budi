@@ -269,6 +269,26 @@ pub fn lookup(model_id: &str, provider: &str) -> PricingOutcome {
     }
 }
 
+/// Non-warning probe: does `model_id` resolve to a manifest entry
+/// directly or through the alias overlay?
+///
+/// Used by parsers that need to decide whether a candidate model id is
+/// safe to attribute to a row before [`lookup`] runs (8.4.2 / #685 —
+/// Copilot Chat `result.metadata.resolvedModel` precedence). Unlike
+/// [`lookup`], this does not emit `warn_once_unknown` on miss, so it is
+/// safe to call as a shape probe without polluting the unknown-model
+/// log with values the parser is about to discard.
+pub fn is_known(model_id: &str) -> bool {
+    let guard = state().read().expect("pricing state RwLock poisoned");
+    if guard.manifest.entries.contains_key(model_id) {
+        return true;
+    }
+    if let Some(canonical) = guard.manifest.aliases.get(model_id) {
+        return guard.manifest.entries.contains_key(canonical.as_str());
+    }
+    false
+}
+
 /// Snapshot of the current in-memory manifest for `GET /pricing/status`
 /// and `budi pricing status`. Shape is golden-file tested (#376 gate 9).
 ///
@@ -530,6 +550,12 @@ pub const EMBEDDED_ALIASES: &[(&str, &str)] = &[
     ("claude-4.6-opus-high-thinking", "claude-opus-4-6"),
     ("claude-4.7-opus-high", "claude-opus-4-7"),
     ("claude-4.7-opus-high-thinking", "claude-opus-4-7"),
+    // xAI surface form Copilot Chat persists in
+    // `result.metadata.resolvedModel` for `auto`-routed Grok turns
+    // (`grok-code-fast-1`) → LiteLLM-canonical key
+    // (`xai/grok-code-fast-1`). Verified on a real session
+    // (`e22dad3b`) during 8.4.1 release verification — see #685.
+    ("grok-code-fast-1", "xai/grok-code-fast-1"),
 ];
 
 /// Build the alias map from [`EMBEDDED_ALIASES`]. Cheap (≤20

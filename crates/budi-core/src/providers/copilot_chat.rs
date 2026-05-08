@@ -1323,16 +1323,45 @@ fn shape_matches_any(record: &serde_json::Value) -> bool {
         || record.pointer("/result/metadata/outputTokens").is_some()
 }
 
-/// Strip a `copilot/` model-id prefix per ADR-0092 §2.4 and resolve the
-/// router placeholder `"auto"` to a concrete pricing key via `agent.id`
-/// (ADR-0092 §2.4.1, R1.4 #671).
+/// Resolve the model id Budi attributes a Copilot Chat row to.
+///
+/// Three-step fallback (ADR-0092 §2.4, amended by #685):
+///
+/// 1. `result.metadata.resolvedModel` — when shape-clean and known to
+///    the pricing manifest (or its alias overlay), this is the actual
+///    model GitHub routed to. Catches non-Anthropic `auto` routes
+///    (e.g. `grok-code-fast-1`) and dated Anthropic forms
+///    (`claude-haiku-4-5-20251001`) without us guessing. Skips
+///    GPU-fleet codes (`capi-noe-ptuc-h200-oswe-vscode-prime`) because
+///    they're never in the manifest.
+/// 2. `modelId` (top-level or under `result.metadata`) — the
+///    user-facing label, with the optional `copilot/` prefix stripped.
+///    Returned as-is unless it is the literal `"auto"` router
+///    placeholder.
+/// 3. `auto` + `agent.id` static-table fallback (ADR-0092 §2.4.1,
+///    R1.4 / #671) — optimistic guess based on the agent surface the
+///    user invoked. Demoted from primary to last-resort by #685.
+///
+/// The §2.4.1 table stays intact as the safety net for sessions where
+/// `resolvedModel` is missing or fleet-shaped; only its precedence
+/// changes.
 fn extract_model_id(record: &serde_json::Value) -> Option<String> {
-    // `modelId` is the user-facing label (e.g. `copilot/claude-haiku-4.5`,
-    // `copilot/auto`). Prefer it over `result.metadata.resolvedModel` —
-    // that field is either a dated version suffix (`claude-haiku-4-5-20251001`)
-    // or an internal GPU-fleet code (`capi-noe-ptuc-h200-oswe-vscode-prime`)
-    // that does not map to manifest entries. The fleet-code form means
-    // `resolvedModel` cannot be trusted as a pricing key.
+    // (1) Prefer the actual server-side resolution when we can prove
+    // it prices cleanly. Manifest membership (direct or via alias) is
+    // the gate — fleet codes aren't in the manifest, so they fall
+    // through to step (2)/(3) without a wrong guess.
+    if let Some(resolved) = record
+        .pointer("/result/metadata/resolvedModel")
+        .and_then(|v| v.as_str())
+    {
+        let candidate = strip_copilot_prefix(resolved);
+        if is_clean_model_shape(candidate) && crate::pricing::is_known(candidate) {
+            return Some(candidate.to_string());
+        }
+    }
+
+    // (2) User-facing modelId. Strip the optional `copilot/` prefix
+    // and return as-is unless it's the `"auto"` router placeholder.
     let raw = record
         .get("modelId")
         .and_then(|v| v.as_str())
@@ -1347,20 +1376,36 @@ fn extract_model_id(record: &serde_json::Value) -> Option<String> {
         return Some(raw);
     }
 
-    // Router-placeholder: the user picked "auto" in the model selector and
-    // GitHub Copilot Chat picked the actual model server-side. The
-    // user-facing label is "auto", which the LiteLLM pricing manifest does
-    // not know about, so a literal "auto" prices to `unpriced:no_pricing`.
-    // ADR-0092 §2.4.1 resolves it via `agent.id`; on miss, leave the value
-    // as "auto" so the row still emits (priced through to `no_pricing`,
-    // trued up by §3 reconciliation on the next tick for individually-
-    // licensed users).
+    // (3) Router-placeholder fallback. The user picked "auto" in the
+    // model selector and GitHub Copilot Chat picked the actual model
+    // server-side, but step (1) couldn't pin it down (resolvedModel
+    // missing, fleet-shaped, or unknown to the manifest). ADR-0092
+    // §2.4.1 resolves "auto" via `agent.id`; on miss, leave the value
+    // as "auto" so the row still emits (priced through to
+    // `no_pricing`, trued up by §3 reconciliation on the next tick
+    // for individually-licensed users).
     if let Some(agent_id) = record.pointer("/agent/id").and_then(|v| v.as_str())
         && let Some(resolved) = resolve_auto_model_id(agent_id)
     {
         return Some(resolved.to_string());
     }
     Some(raw)
+}
+
+/// Cheap shape filter for a candidate model id pulled from
+/// `result.metadata.resolvedModel`: lowercase ASCII letters, digits,
+/// and hyphens, leading character must be a letter. Rejects values
+/// with dots, slashes, or uppercase characters before the manifest
+/// probe. Note this does NOT exclude GPU-fleet codes — those share
+/// the same shape — so the manifest membership check in step (1) is
+/// the real safety guard.
+fn is_clean_model_shape(s: &str) -> bool {
+    let mut chars = s.chars();
+    match chars.next() {
+        Some(c) if c.is_ascii_lowercase() => {}
+        _ => return false,
+    }
+    chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
 }
 
 fn strip_copilot_prefix(model: &str) -> &str {
@@ -1688,6 +1733,87 @@ mod tests {
             r#"{"result": {"metadata": {"modelId": "copilot/auto"}}, "agent": {"id": "github.copilot.editsAgent"}}"#,
         );
         assert_eq!(extract_model_id(&v).as_deref(), Some("claude-sonnet-4-5"));
+    }
+
+    /// #685: `result.metadata.resolvedModel` outranks the §2.4.1
+    /// `agent.id` static table when the resolved value is shape-clean
+    /// and the pricing manifest knows about it. Three real on-disk
+    /// sessions drove this priority flip:
+    ///
+    /// - dated LiteLLM-canonical Anthropic key (`claude-haiku-4-5-20251001`)
+    ///   wins directly via manifest entries — no alias hop needed.
+    /// - non-Anthropic auto-routed key (`grok-code-fast-1`) wins via
+    ///   the alias overlay — without this, it would be wrongly
+    ///   attributed to `claude-sonnet-4-5` by the editsAgent fallback.
+    /// - GPU-fleet code (`capi-noe-ptuc-h200-oswe-vscode-prime`)
+    ///   isn't in the manifest, so step (1) fails and the agent.id
+    ///   fallback runs — current behavior preserved.
+    #[test]
+    fn extract_model_id_prefers_resolved_when_manifest_known() {
+        // Anthropic dated form — direct manifest hit.
+        let v = make_message(
+            r#"{
+                "modelId": "copilot/claude-haiku-4.5",
+                "agent": {"id": "github.copilot.editsAgent"},
+                "result": {"metadata": {"resolvedModel": "claude-haiku-4-5-20251001"}}
+            }"#,
+        );
+        assert_eq!(
+            extract_model_id(&v).as_deref(),
+            Some("claude-haiku-4-5-20251001"),
+            "dated LiteLLM-canonical Anthropic key must win directly via manifest"
+        );
+
+        // Grok auto-route — alias-overlay hit, beats Sonnet fallback.
+        let v = make_message(
+            r#"{
+                "modelId": "copilot/auto",
+                "agent": {"id": "github.copilot.editsAgent"},
+                "result": {"metadata": {"resolvedModel": "grok-code-fast-1"}}
+            }"#,
+        );
+        assert_eq!(
+            extract_model_id(&v).as_deref(),
+            Some("grok-code-fast-1"),
+            "Grok resolvedModel must win over editsAgent → claude-sonnet-4-5"
+        );
+
+        // Fleet code — manifest miss, falls through to editsAgent table.
+        let v = make_message(
+            r#"{
+                "modelId": "copilot/auto",
+                "agent": {"id": "github.copilot.editsAgent"},
+                "result": {"metadata": {"resolvedModel": "capi-noe-ptuc-h200-oswe-vscode-prime"}}
+            }"#,
+        );
+        assert_eq!(
+            extract_model_id(&v).as_deref(),
+            Some("claude-sonnet-4-5"),
+            "fleet-code resolvedModel must fall through to §2.4.1 agent.id table"
+        );
+
+        // No resolvedModel at all — current §2.4.1 behavior preserved.
+        let v = make_message(
+            r#"{"modelId": "copilot/auto", "agent": {"id": "github.copilot.editsAgent"}}"#,
+        );
+        assert_eq!(extract_model_id(&v).as_deref(), Some("claude-sonnet-4-5"));
+    }
+
+    /// `is_clean_model_shape` must pass real model ids and reject
+    /// anything carrying dots, slashes, uppercase, or empty input —
+    /// the gate that lets the manifest probe in step (1) of
+    /// `extract_model_id` stay correct without false positives on
+    /// surface forms it can't handle.
+    #[test]
+    fn is_clean_model_shape_filters() {
+        assert!(is_clean_model_shape("grok-code-fast-1"));
+        assert!(is_clean_model_shape("claude-haiku-4-5-20251001"));
+        assert!(is_clean_model_shape("capi-noe-ptuc-h200-oswe-vscode-prime"));
+        assert!(!is_clean_model_shape("claude-haiku-4.5"));
+        assert!(!is_clean_model_shape("xai/grok-code-fast-1"));
+        assert!(!is_clean_model_shape("Claude-Haiku"));
+        assert!(!is_clean_model_shape("1grok"));
+        assert!(!is_clean_model_shape(""));
     }
 
     /// Direct unit test on the static table — pin every entry so a stale
