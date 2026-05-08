@@ -48,10 +48,10 @@ Five candidate subpath shapes, all checked. The `{GitHub,github}` brace expansio
 - `workspaceStorage/<hash>/{GitHub,github}.copilot-chat/{chatSessions,debug-logs}/`
 - `workspaceStorage/<hash>/{GitHub,github}.copilot/{chatSessions,debug-logs}/`
 - `globalStorage/emptyWindowChatSessions/`
-- `globalStorage/{GitHub,github}.copilot-chat/**` (recursive)
-- `globalStorage/{GitHub,github}.copilot/**` (recursive)
+- `globalStorage/{GitHub,github}.copilot-chat/**/{chatSessions,chat-sessions,sessions}/**/*.{json,jsonl}`
+- `globalStorage/{GitHub,github}.copilot/**/{chatSessions,chat-sessions,sessions}/**/*.{json,jsonl}`
 
-The two `globalStorage/{GitHub,github}.copilot{,-chat}/**` patterns are intentionally recursive: GitHub has shipped at least three different sub-directory layouts under that prefix (`chatSessions/`, `chat-sessions/`, `sessions/<lang>/`), and pinning to any one shape regresses on the next release. The recursion bottoms out at any `*.json` or `*.jsonl` file.
+The two `globalStorage/{GitHub,github}.copilot{,-chat}/...` patterns are intentionally recursive in the middle segment: GitHub has shipped at least three different sub-directory layouts under that prefix (`chatSessions/`, `chat-sessions/`, `sessions/<lang>/`), and pinning to any one shape regresses on the next release. The bottom-out is anchored at a directory-name allowlist (`chatSessions`, `chat-sessions`, `sessions`) instead of "any `*.json` or `*.jsonl`" — anchoring at a known session-storage directory name keeps the recursion tolerant of layout shuffles below the publisher-id directory while excluding files the Copilot extension parks as siblings of those directories. Concretely, embedding caches (`commandEmbeddings.json`, `settingEmbeddings.json`) and the Copilot CLI v2 state blob (`copilot.cli.oldGlobalSessions.json`) live one level under the publisher-id directory and never inside a session-storage directory; the allowlist is the cheapest invariant that excludes them without preempting the next layout shuffle ([#684](https://github.com/siropkin/budi/issues/684)). When the Copilot extension introduces a fourth session-storage directory name in a future release, this allowlist is amended in lockstep — the same drill as §2.3 record-shape additions. This is a discovery-layer change; `MIN_API_VERSION` does not bump (the §2.6 record-shape contract is untouched).
 
 #### 2.3 File shapes and token-key dispatch
 

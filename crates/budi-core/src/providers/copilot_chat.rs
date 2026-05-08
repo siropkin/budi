@@ -301,9 +301,12 @@ fn collect_session_files(user_root: &Path, out: &mut Vec<PathBuf>) {
     // intentionally recursive — the sub-directory layout has shifted multiple
     // times across releases. Iterate the actual on-disk dir entries so
     // case-insensitive filesystems collapse to a single match instead of
-    // double-counting both casings.
+    // double-counting both casings. The recursion bottom-out is anchored at
+    // a known session-storage directory name (chatSessions / chat-sessions /
+    // sessions) so embedding caches and CLI state blobs sitting one level
+    // under the publisher dir don't get pulled in (#684).
     for pub_dir in publisher_subdirs(&gs) {
-        push_session_files_recursive(&pub_dir, out, 0);
+        push_global_storage_session_files(&pub_dir, out, 0, false);
     }
 
     // Dedup the slice we just appended. On case-insensitive filesystems
@@ -337,6 +340,51 @@ fn push_session_files_recursive(dir: &Path, out: &mut Vec<PathBuf>, depth: u32) 
             out.push(path);
         }
     }
+}
+
+/// Recurse through `globalStorage/{GitHub,github}.copilot{,-chat}/**` per
+/// ADR-0092 §2.2, but only collect `*.json` / `*.jsonl` files that live under
+/// a directory named `chatSessions`, `chat-sessions`, or `sessions`. The
+/// recursion still tolerates layout shuffles below the publisher-id directory
+/// (the canonical reason §2.2 is recursive at all), but the bottom-out is
+/// anchored at a known session-storage directory name so the embedding caches
+/// (`commandEmbeddings.json`, `settingEmbeddings.json`) and the Copilot CLI
+/// state blob (`copilot.cli.oldGlobalSessions.json`) sitting as siblings of
+/// the session directory never match (#684).
+fn push_global_storage_session_files(
+    dir: &Path,
+    out: &mut Vec<PathBuf>,
+    depth: u32,
+    inside_session_dir: bool,
+) {
+    if depth > 8 {
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            let next_inside = inside_session_dir
+                || path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(is_session_storage_dir_name);
+            push_global_storage_session_files(&path, out, depth + 1, next_inside);
+        } else if inside_session_dir
+            && let Some(ext) = path.extension().and_then(|e| e.to_str())
+            && (ext.eq_ignore_ascii_case("json") || ext.eq_ignore_ascii_case("jsonl"))
+        {
+            out.push(path);
+        }
+    }
+}
+
+fn is_session_storage_dir_name(name: &str) -> bool {
+    name.eq_ignore_ascii_case("chatSessions")
+        || name.eq_ignore_ascii_case("chat-sessions")
+        || name.eq_ignore_ascii_case("sessions")
 }
 
 // ---------------------------------------------------------------------------
@@ -1843,6 +1891,85 @@ mod tests {
         collect_session_files(&tmp, &mut out);
         assert_eq!(out.len(), 1);
         assert!(out[0].ends_with("a.jsonl"));
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn collect_session_files_skips_global_publisher_siblings_of_session_dir() {
+        // ADR-0092 §2.2 directory-name allowlist (#684): under
+        // globalStorage/{publisher}/, only files inside chatSessions,
+        // chat-sessions, or sessions subtrees are session files. Embedding
+        // caches and CLI state blobs sitting as siblings must be skipped.
+        let tmp = std::env::temp_dir().join("budi-copilot-chat-skip-siblings");
+        let _ = std::fs::remove_dir_all(&tmp);
+        let pub_dir = tmp.join("globalStorage/github.copilot-chat");
+        std::fs::create_dir_all(&pub_dir).unwrap();
+
+        // Sibling files (NOT chat sessions): VS Code embedding caches and
+        // the Copilot CLI v2 state blob.
+        std::fs::write(
+            pub_dir.join("commandEmbeddings.json"),
+            // Large embedding-only payload, no `kind`/`requests`/`messages` keys.
+            br#"{"core":{"editor.action.setSelectionAnchor":{"embedding":[0.008,-0.029,0.061]}}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            pub_dir.join("settingEmbeddings.json"),
+            br#"{"core":{"editor.fontSize":{"embedding":[0.1,0.2]}}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            pub_dir.join("copilot.cli.oldGlobalSessions.json"),
+            br#"{"version":2,"sessions":{}}"#,
+        )
+        .unwrap();
+
+        // Real session file under a known session-storage directory.
+        let chat_sessions = pub_dir.join("chatSessions");
+        std::fs::create_dir_all(&chat_sessions).unwrap();
+        std::fs::write(
+            chat_sessions.join("0e3b1f3c-1234-4abc-9def-aaaabbbbcccc.jsonl"),
+            br#"{"kind":0,"v":{"sessionId":"abc","creationDate":"2026-04-15T10:00:00Z"}}
+"#,
+        )
+        .unwrap();
+
+        let mut out = Vec::new();
+        collect_session_files(&tmp, &mut out);
+        assert_eq!(
+            out.len(),
+            1,
+            "only the chatSessions/<uuid>.jsonl is collected; \
+             commandEmbeddings.json / settingEmbeddings.json / \
+             copilot.cli.oldGlobalSessions.json siblings are skipped, got {out:?}"
+        );
+        assert!(out[0].ends_with("0e3b1f3c-1234-4abc-9def-aaaabbbbcccc.jsonl"));
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn collect_session_files_accepts_chat_sessions_chat_sessions_and_sessions_subdirs() {
+        // The directory-name allowlist (#684) covers all three known
+        // session-storage names. A future fourth name must amend ADR-0092
+        // §2.2 in lockstep.
+        let tmp = std::env::temp_dir().join("budi-copilot-chat-allowlist-names");
+        let _ = std::fs::remove_dir_all(&tmp);
+        let pub_dir = tmp.join("globalStorage/GitHub.copilot-chat");
+        for name in ["chatSessions", "chat-sessions", "sessions"] {
+            let d = pub_dir.join(name);
+            std::fs::create_dir_all(&d).unwrap();
+            std::fs::write(d.join("s.jsonl"), b"{}\n").unwrap();
+        }
+
+        let mut out = Vec::new();
+        collect_session_files(&tmp, &mut out);
+        assert_eq!(
+            out.len(),
+            3,
+            "all three allowlisted names match, got {out:?}"
+        );
 
         let _ = std::fs::remove_dir_all(&tmp);
     }
