@@ -247,7 +247,12 @@ pub async fn favicon() -> impl IntoResponse {
 
 /// Current daemon management API version.  Bump when a breaking change is
 /// made to any management API endpoint consumed by budi-cursor or the CLI.
-pub const API_VERSION: u32 = 1;
+///
+/// 8.4.2 (#692) — `session_msg_cost` in `/analytics/statusline` is now in
+/// dollars (was cents). Host extensions that compiled against the cents
+/// contract render 100× too small until they bump their `MIN_API_VERSION`,
+/// so the `/health` advertisement bumps in the same PR.
+pub const API_VERSION: u32 = 2;
 
 pub async fn health() -> Json<HealthResponse> {
     Json(HealthResponse {
