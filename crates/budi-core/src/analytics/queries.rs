@@ -865,7 +865,8 @@ pub fn message_list(conn: &Connection, p: &MessageListParams) -> Result<Paginate
                 messages.cache_creation_tokens, messages.cache_read_tokens,
                 COALESCE(messages.cost_cents, 0.0),
                 COALESCE(messages.cost_confidence, 'estimated'),
-                COALESCE(messages.git_branch, s.git_branch)
+                COALESCE(messages.git_branch, s.git_branch),
+                COALESCE(NULLIF(messages.surface, ''), 'unknown') AS surface
          FROM messages
          LEFT JOIN sessions s ON s.id = messages.session_id
          {}
@@ -901,6 +902,7 @@ pub fn message_list(conn: &Connection, p: &MessageListParams) -> Result<Paginate
                 cost_cents: row.get(11)?,
                 cost_confidence: row.get(12)?,
                 git_branch: row.get(13)?,
+                surface: row.get(14)?,
                 request_id: None,
                 assistant_sequence: None,
                 tools: Vec::new(),

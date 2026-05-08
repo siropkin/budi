@@ -18,6 +18,12 @@ pub struct HealthResponse {
     /// on startup and warns if its expected API version is unsupported.
     /// Bump when a breaking change is made to any management API endpoint.
     pub api_version: u32,
+    /// Canonical surface values this daemon's data layer can emit on the
+    /// `surface` dimension. Lets host extensions introspect the value
+    /// space (instead of hardcoding it against an old daemon) before
+    /// rendering a host filter UI. Added in 8.4.2 (#701) alongside the
+    /// `api_version` bump to 3.
+    pub surfaces: &'static [&'static str],
 }
 
 #[derive(serde::Serialize)]
@@ -252,13 +258,29 @@ pub async fn favicon() -> impl IntoResponse {
 /// dollars (was cents). Host extensions that compiled against the cents
 /// contract render 100× too small until they bump their `MIN_API_VERSION`,
 /// so the `/health` advertisement bumps in the same PR.
-pub const API_VERSION: u32 = 2;
+///
+/// 8.4.2 (#701) — every message/session row now carries a `surface`
+/// dimension (`vscode`, `cursor`, `jetbrains`, `terminal`, `unknown`).
+/// Sibling host extensions (budi-cursor, the future budi-jetbrains) gate
+/// their host-scoped filter UI on this `api_version` advertisement so
+/// they can fall back to the all-rows view when talking to an older
+/// daemon. Sibling ticket adds the HTTP + CLI filter; this PR ships the
+/// data layer and the `surface` field shows up in returned rows.
+pub const API_VERSION: u32 = 3;
+
+/// Canonical surface values advertised on `/health` (#701). Mirrors
+/// `budi_core::surface`'s `VSCODE` / `CURSOR` / `JETBRAINS` / `TERMINAL`
+/// / `UNKNOWN` constants; we materialize the slice at this seam rather
+/// than re-exporting an array from `budi_core` so the daemon's wire
+/// format stays a deliberate snapshot rather than a transitive view.
+const SURFACES: &[&str] = &["vscode", "cursor", "jetbrains", "terminal", "unknown"];
 
 pub async fn health() -> Json<HealthResponse> {
     Json(HealthResponse {
         ok: true,
         version: env!("CARGO_PKG_VERSION"),
         api_version: API_VERSION,
+        surfaces: SURFACES,
     })
 }
 

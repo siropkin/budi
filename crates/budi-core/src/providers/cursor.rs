@@ -1070,6 +1070,7 @@ fn usage_events_to_messages(
                 tool_files: Vec::new(),
                 tool_outcomes: Vec::new(),
                 cwd_source: None,
+                surface: Some(crate::surface::CURSOR.to_string()),
             }
         })
         .collect()
@@ -1494,6 +1495,7 @@ fn bubble_to_parsed_message(
             tool_files: Vec::new(),
             tool_outcomes: Vec::new(),
             cwd_source: None,
+            surface: Some(crate::surface::CURSOR.to_string()),
         })
     } else {
         let resolved_model = match row.model.as_deref().map(str::trim) {
@@ -1542,6 +1544,7 @@ fn bubble_to_parsed_message(
             tool_files: Vec::new(),
             tool_outcomes: Vec::new(),
             cwd_source: None,
+            surface: Some(crate::surface::CURSOR.to_string()),
         })
     }
 }
@@ -2188,6 +2191,7 @@ fn parse_cursor_line(
                 tool_files: Vec::new(),
                 tool_outcomes: Vec::new(),
                 cwd_source: None,
+                surface: Some(crate::surface::CURSOR.to_string()),
             })
         }
         "assistant" | "ai" | "model" => {
@@ -2225,6 +2229,7 @@ fn parse_cursor_line(
                 tool_files,
                 tool_outcomes: Vec::new(),
                 cwd_source: None,
+                surface: Some(crate::surface::CURSOR.to_string()),
             })
         }
         _ => None,

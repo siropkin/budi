@@ -241,6 +241,17 @@ pub struct SessionListEntry {
     /// may lag up to ~10 minutes per the Usage API.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cost_lag_hint: Option<String>,
+    /// Host environment the session ran under — `vscode`, `cursor`,
+    /// `jetbrains`, `terminal`, or `unknown`. Surfaced so host
+    /// extensions can render only their host's sessions. Filter behavior
+    /// is the sibling ticket; this PR only ensures the field is
+    /// returned. See `crate::surface` and ticket #701.
+    #[serde(default = "default_unknown_surface_for_session")]
+    pub surface: String,
+}
+
+fn default_unknown_surface_for_session() -> String {
+    crate::surface::UNKNOWN.to_string()
 }
 
 /// Paginated session list result.
@@ -569,7 +580,22 @@ pub fn session_list_with_filters(
                     COALESCE(s.duration_ms,
                         CAST((julianday(MAX(m.timestamp)) - julianday(MIN(m.timestamp))) * 86400000 AS INTEGER)
                     ) as duration_ms,
-                    s.title
+                    s.title,
+                    COALESCE(
+                        (
+                            SELECT m2.surface
+                            FROM messages m2
+                            WHERE m2.session_id = m.session_id
+                              AND m2.surface IS NOT NULL
+                              AND m2.surface != ''
+                              AND m2.surface != 'unknown'
+                            GROUP BY m2.surface
+                            ORDER BY COUNT(*) DESC, m2.surface ASC
+                            LIMIT 1
+                        ),
+                        NULLIF(MAX(s.surface), ''),
+                        'unknown'
+                    ) as surface
              FROM messages m
              LEFT JOIN sessions s ON s.id = m.session_id
              {where_clause}
@@ -579,7 +605,8 @@ pub fn session_list_with_filters(
          SELECT COUNT(*) OVER() as total,
                 sa.session_id, sa.started_at, sa.ended_at, sa.duration_ms,
                 sa.msg_count, sa.cost, sa.models_csv, sa.provider,
-                sa.repo_ids_csv, sa.git_branches_csv, sa.inp, sa.outp, sa.cost_confidence, sa.title
+                sa.repo_ids_csv, sa.git_branches_csv, sa.inp, sa.outp, sa.cost_confidence, sa.title,
+                sa.surface
          FROM session_agg sa
          ORDER BY {order_expr}
          LIMIT ?{limit_idx} OFFSET ?{offset_idx}",
@@ -606,6 +633,7 @@ pub fn session_list_with_filters(
                 cost_confidence: row.get(13)?,
                 health_state: None,
                 title: row.get(14)?,
+                surface: row.get(15)?,
                 work_outcome: None,
                 work_outcome_rationale: None,
                 cost_lag_hint: None,
@@ -742,7 +770,22 @@ pub fn session_detail(conn: &Connection, session_id: &str) -> Result<Option<Sess
                         WHEN SUM(CASE WHEN m.cost_confidence LIKE '%estimated%' THEN 1 ELSE 0 END) > 0 THEN 'estimated'
                         ELSE COALESCE(MAX(m.cost_confidence), 'exact')
                     END as cost_confidence,
-                    MAX(s.title) as title
+                    MAX(s.title) as title,
+                    COALESCE(
+                        (
+                            SELECT m2.surface
+                            FROM messages m2
+                            WHERE m2.session_id = sid.session_id
+                              AND m2.surface IS NOT NULL
+                              AND m2.surface != ''
+                              AND m2.surface != 'unknown'
+                            GROUP BY m2.surface
+                            ORDER BY COUNT(*) DESC, m2.surface ASC
+                            LIMIT 1
+                        ),
+                        NULLIF(MAX(s.surface), ''),
+                        'unknown'
+                    ) as surface
              FROM (SELECT ?1 AS session_id) sid
              LEFT JOIN sessions s ON s.id = sid.session_id
              LEFT JOIN messages m ON m.session_id = sid.session_id AND m.role = 'assistant'
@@ -751,7 +794,7 @@ pub fn session_detail(conn: &Connection, session_id: &str) -> Result<Option<Sess
          )
          SELECT session_id, started_at, ended_at, duration_ms, msg_count, cost,
                 models_csv, provider, repo_ids_csv, git_branches_csv,
-                inp, outp, cost_confidence, title
+                inp, outp, cost_confidence, title, surface
          FROM session_agg",
         params![session_id],
         |row| {
@@ -773,6 +816,7 @@ pub fn session_detail(conn: &Connection, session_id: &str) -> Result<Option<Sess
                 cost_confidence: row.get(12)?,
                 health_state: None,
                 title: row.get(13)?,
+                surface: row.get(14)?,
                 work_outcome: None,
                 work_outcome_rationale: None,
                 cost_lag_hint: None,
@@ -1004,7 +1048,8 @@ pub fn session_messages_with_roles(
                 COALESCE(cost_cents, 0.0),
                 COALESCE(cost_confidence, 'estimated'),
                 git_branch,
-                request_id
+                request_id,
+                COALESCE(NULLIF(surface, ''), 'unknown')
          FROM messages
          WHERE session_id = ?1",
     );
@@ -1032,6 +1077,7 @@ pub fn session_messages_with_roles(
                 cost_confidence: row.get(11)?,
                 git_branch: row.get(12)?,
                 request_id: row.get(13)?,
+                surface: row.get(14)?,
                 assistant_sequence: None,
                 tools: Vec::new(),
                 tags: Vec::new(),
@@ -1112,7 +1158,8 @@ pub fn session_message_list(
                 COALESCE(m.cost_confidence, 'estimated'),
                 m.git_branch,
                 m.request_id,
-                seq.assistant_sequence
+                seq.assistant_sequence,
+                COALESCE(NULLIF(m.surface, ''), 'unknown')
          FROM messages m
          LEFT JOIN assistant_sequence seq ON seq.id = m.id
          {where_clause}
@@ -1140,6 +1187,7 @@ pub fn session_message_list(
                 git_branch: row.get(12)?,
                 request_id: row.get(13)?,
                 assistant_sequence: row.get::<_, Option<u64>>(14)?,
+                surface: row.get(15)?,
                 tools: Vec::new(),
                 tags: Vec::new(),
             })
@@ -1219,7 +1267,8 @@ pub fn message_detail(conn: &Connection, message_id: &str) -> Result<Option<Mess
                 COALESCE(cost_cents, 0.0),
                 COALESCE(cost_confidence, 'estimated'),
                 git_branch,
-                request_id
+                request_id,
+                COALESCE(NULLIF(surface, ''), 'unknown')
          FROM messages
          WHERE id = ?1",
         params![message_id],
@@ -1240,6 +1289,7 @@ pub fn message_detail(conn: &Connection, message_id: &str) -> Result<Option<Mess
                 cost_confidence: row.get(12)?,
                 git_branch: row.get(13)?,
                 request_id: row.get(14)?,
+                surface: row.get(15)?,
                 assistant_sequence: None,
                 tools: Vec::new(),
                 tags: Vec::new(),

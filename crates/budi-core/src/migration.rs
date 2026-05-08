@@ -137,6 +137,12 @@ fn detect_drift(conn: &Connection) -> Result<(Vec<String>, Vec<String>, Vec<Stri
     if !table_exists(conn, "pricing_manifests")? {
         added_columns.push("pricing_manifests".to_string());
     }
+    if table_exists(conn, "messages")? && !has_column(conn, "messages", "surface")? {
+        added_columns.push("messages.surface".to_string());
+    }
+    if table_exists(conn, "sessions")? && !has_column(conn, "sessions", "surface")? {
+        added_columns.push("sessions.surface".to_string());
+    }
     if table_exists(conn, "proxy_events")? {
         removed_tables.push("proxy_events".to_string());
     }
@@ -206,7 +212,8 @@ fn create_current_schema(conn: &Connection) -> Result<()> {
             git_branch             TEXT,
             cost_confidence        TEXT DEFAULT 'estimated',
             request_id             TEXT,
-            pricing_source         TEXT NOT NULL DEFAULT 'legacy:pre-manifest'
+            pricing_source         TEXT NOT NULL DEFAULT 'legacy:pre-manifest',
+            surface                TEXT NOT NULL DEFAULT 'unknown'
         );
 
         CREATE TABLE IF NOT EXISTS tags (
@@ -336,7 +343,8 @@ fn create_sessions(conn: &Connection) -> Result<()> {
             raw_json           TEXT,
             repo_id            TEXT,
             git_branch         TEXT,
-            title              TEXT
+            title              TEXT,
+            surface            TEXT NOT NULL DEFAULT 'unknown'
         );
         ",
     )?;
@@ -362,13 +370,14 @@ fn create_rollup_tables(conn: &Connection) -> Result<()> {
             model                  TEXT NOT NULL,
             repo_id                TEXT NOT NULL,
             git_branch             TEXT NOT NULL,
+            surface                TEXT NOT NULL DEFAULT 'unknown',
             message_count          INTEGER NOT NULL DEFAULT 0,
             input_tokens           INTEGER NOT NULL DEFAULT 0,
             output_tokens          INTEGER NOT NULL DEFAULT 0,
             cache_creation_tokens  INTEGER NOT NULL DEFAULT 0,
             cache_read_tokens      INTEGER NOT NULL DEFAULT 0,
             cost_cents             REAL NOT NULL DEFAULT 0,
-            PRIMARY KEY(bucket_start, role, provider, model, repo_id, git_branch)
+            PRIMARY KEY(bucket_start, role, provider, model, repo_id, git_branch, surface)
         );
 
         CREATE TABLE IF NOT EXISTS message_rollups_daily (
@@ -378,13 +387,14 @@ fn create_rollup_tables(conn: &Connection) -> Result<()> {
             model                  TEXT NOT NULL,
             repo_id                TEXT NOT NULL,
             git_branch             TEXT NOT NULL,
+            surface                TEXT NOT NULL DEFAULT 'unknown',
             message_count          INTEGER NOT NULL DEFAULT 0,
             input_tokens           INTEGER NOT NULL DEFAULT 0,
             output_tokens          INTEGER NOT NULL DEFAULT 0,
             cache_creation_tokens  INTEGER NOT NULL DEFAULT 0,
             cache_read_tokens      INTEGER NOT NULL DEFAULT 0,
             cost_cents             REAL NOT NULL DEFAULT 0,
-            PRIMARY KEY(bucket_day, role, provider, model, repo_id, git_branch)
+            PRIMARY KEY(bucket_day, role, provider, model, repo_id, git_branch, surface)
         );
         ",
     )?;
@@ -402,7 +412,7 @@ fn create_rollup_triggers(conn: &Connection) -> Result<()> {
         AFTER INSERT ON messages
         BEGIN
             INSERT INTO message_rollups_hourly (
-                bucket_start, role, provider, model, repo_id, git_branch,
+                bucket_start, role, provider, model, repo_id, git_branch, surface,
                 message_count, input_tokens, output_tokens,
                 cache_creation_tokens, cache_read_tokens, cost_cents
             )
@@ -427,6 +437,7 @@ fn create_rollup_triggers(conn: &Connection) -> Result<()> {
                     ),
                     '(untagged)'
                 ),
+                COALESCE(NULLIF(NEW.surface, ''), 'unknown'),
                 1,
                 COALESCE(NEW.input_tokens, 0),
                 COALESCE(NEW.output_tokens, 0),
@@ -434,7 +445,7 @@ fn create_rollup_triggers(conn: &Connection) -> Result<()> {
                 COALESCE(NEW.cache_read_tokens, 0),
                 COALESCE(NEW.cost_cents, 0.0)
             )
-            ON CONFLICT(bucket_start, role, provider, model, repo_id, git_branch) DO UPDATE SET
+            ON CONFLICT(bucket_start, role, provider, model, repo_id, git_branch, surface) DO UPDATE SET
                 message_count = message_count + excluded.message_count,
                 input_tokens = input_tokens + excluded.input_tokens,
                 output_tokens = output_tokens + excluded.output_tokens,
@@ -443,7 +454,7 @@ fn create_rollup_triggers(conn: &Connection) -> Result<()> {
                 cost_cents = cost_cents + excluded.cost_cents;
 
             INSERT INTO message_rollups_daily (
-                bucket_day, role, provider, model, repo_id, git_branch,
+                bucket_day, role, provider, model, repo_id, git_branch, surface,
                 message_count, input_tokens, output_tokens,
                 cache_creation_tokens, cache_read_tokens, cost_cents
             )
@@ -468,6 +479,7 @@ fn create_rollup_triggers(conn: &Connection) -> Result<()> {
                     ),
                     '(untagged)'
                 ),
+                COALESCE(NULLIF(NEW.surface, ''), 'unknown'),
                 1,
                 COALESCE(NEW.input_tokens, 0),
                 COALESCE(NEW.output_tokens, 0),
@@ -475,7 +487,7 @@ fn create_rollup_triggers(conn: &Connection) -> Result<()> {
                 COALESCE(NEW.cache_read_tokens, 0),
                 COALESCE(NEW.cost_cents, 0.0)
             )
-            ON CONFLICT(bucket_day, role, provider, model, repo_id, git_branch) DO UPDATE SET
+            ON CONFLICT(bucket_day, role, provider, model, repo_id, git_branch, surface) DO UPDATE SET
                 message_count = message_count + excluded.message_count,
                 input_tokens = input_tokens + excluded.input_tokens,
                 output_tokens = output_tokens + excluded.output_tokens,
@@ -488,7 +500,7 @@ fn create_rollup_triggers(conn: &Connection) -> Result<()> {
         AFTER DELETE ON messages
         BEGIN
             INSERT INTO message_rollups_hourly (
-                bucket_start, role, provider, model, repo_id, git_branch,
+                bucket_start, role, provider, model, repo_id, git_branch, surface,
                 message_count, input_tokens, output_tokens,
                 cache_creation_tokens, cache_read_tokens, cost_cents
             )
@@ -513,6 +525,7 @@ fn create_rollup_triggers(conn: &Connection) -> Result<()> {
                     ),
                     '(untagged)'
                 ),
+                COALESCE(NULLIF(OLD.surface, ''), 'unknown'),
                 -1,
                 -COALESCE(OLD.input_tokens, 0),
                 -COALESCE(OLD.output_tokens, 0),
@@ -520,7 +533,7 @@ fn create_rollup_triggers(conn: &Connection) -> Result<()> {
                 -COALESCE(OLD.cache_read_tokens, 0),
                 -COALESCE(OLD.cost_cents, 0.0)
             )
-            ON CONFLICT(bucket_start, role, provider, model, repo_id, git_branch) DO UPDATE SET
+            ON CONFLICT(bucket_start, role, provider, model, repo_id, git_branch, surface) DO UPDATE SET
                 message_count = message_count + excluded.message_count,
                 input_tokens = input_tokens + excluded.input_tokens,
                 output_tokens = output_tokens + excluded.output_tokens,
@@ -549,10 +562,11 @@ fn create_rollup_triggers(conn: &Connection) -> Result<()> {
                     ),
                     '(untagged)'
                )
+               AND surface = COALESCE(NULLIF(OLD.surface, ''), 'unknown')
                AND message_count <= 0;
 
             INSERT INTO message_rollups_daily (
-                bucket_day, role, provider, model, repo_id, git_branch,
+                bucket_day, role, provider, model, repo_id, git_branch, surface,
                 message_count, input_tokens, output_tokens,
                 cache_creation_tokens, cache_read_tokens, cost_cents
             )
@@ -577,6 +591,7 @@ fn create_rollup_triggers(conn: &Connection) -> Result<()> {
                     ),
                     '(untagged)'
                 ),
+                COALESCE(NULLIF(OLD.surface, ''), 'unknown'),
                 -1,
                 -COALESCE(OLD.input_tokens, 0),
                 -COALESCE(OLD.output_tokens, 0),
@@ -584,7 +599,7 @@ fn create_rollup_triggers(conn: &Connection) -> Result<()> {
                 -COALESCE(OLD.cache_read_tokens, 0),
                 -COALESCE(OLD.cost_cents, 0.0)
             )
-            ON CONFLICT(bucket_day, role, provider, model, repo_id, git_branch) DO UPDATE SET
+            ON CONFLICT(bucket_day, role, provider, model, repo_id, git_branch, surface) DO UPDATE SET
                 message_count = message_count + excluded.message_count,
                 input_tokens = input_tokens + excluded.input_tokens,
                 output_tokens = output_tokens + excluded.output_tokens,
@@ -613,6 +628,7 @@ fn create_rollup_triggers(conn: &Connection) -> Result<()> {
                     ),
                     '(untagged)'
                )
+               AND surface = COALESCE(NULLIF(OLD.surface, ''), 'unknown')
                AND message_count <= 0;
         END;
 
@@ -620,7 +636,7 @@ fn create_rollup_triggers(conn: &Connection) -> Result<()> {
         AFTER UPDATE ON messages
         BEGIN
             INSERT INTO message_rollups_hourly (
-                bucket_start, role, provider, model, repo_id, git_branch,
+                bucket_start, role, provider, model, repo_id, git_branch, surface,
                 message_count, input_tokens, output_tokens,
                 cache_creation_tokens, cache_read_tokens, cost_cents
             )
@@ -645,6 +661,7 @@ fn create_rollup_triggers(conn: &Connection) -> Result<()> {
                     ),
                     '(untagged)'
                 ),
+                COALESCE(NULLIF(OLD.surface, ''), 'unknown'),
                 -1,
                 -COALESCE(OLD.input_tokens, 0),
                 -COALESCE(OLD.output_tokens, 0),
@@ -652,7 +669,7 @@ fn create_rollup_triggers(conn: &Connection) -> Result<()> {
                 -COALESCE(OLD.cache_read_tokens, 0),
                 -COALESCE(OLD.cost_cents, 0.0)
             )
-            ON CONFLICT(bucket_start, role, provider, model, repo_id, git_branch) DO UPDATE SET
+            ON CONFLICT(bucket_start, role, provider, model, repo_id, git_branch, surface) DO UPDATE SET
                 message_count = message_count + excluded.message_count,
                 input_tokens = input_tokens + excluded.input_tokens,
                 output_tokens = output_tokens + excluded.output_tokens,
@@ -681,10 +698,11 @@ fn create_rollup_triggers(conn: &Connection) -> Result<()> {
                     ),
                     '(untagged)'
                )
+               AND surface = COALESCE(NULLIF(OLD.surface, ''), 'unknown')
                AND message_count <= 0;
 
             INSERT INTO message_rollups_daily (
-                bucket_day, role, provider, model, repo_id, git_branch,
+                bucket_day, role, provider, model, repo_id, git_branch, surface,
                 message_count, input_tokens, output_tokens,
                 cache_creation_tokens, cache_read_tokens, cost_cents
             )
@@ -709,6 +727,7 @@ fn create_rollup_triggers(conn: &Connection) -> Result<()> {
                     ),
                     '(untagged)'
                 ),
+                COALESCE(NULLIF(OLD.surface, ''), 'unknown'),
                 -1,
                 -COALESCE(OLD.input_tokens, 0),
                 -COALESCE(OLD.output_tokens, 0),
@@ -716,7 +735,7 @@ fn create_rollup_triggers(conn: &Connection) -> Result<()> {
                 -COALESCE(OLD.cache_read_tokens, 0),
                 -COALESCE(OLD.cost_cents, 0.0)
             )
-            ON CONFLICT(bucket_day, role, provider, model, repo_id, git_branch) DO UPDATE SET
+            ON CONFLICT(bucket_day, role, provider, model, repo_id, git_branch, surface) DO UPDATE SET
                 message_count = message_count + excluded.message_count,
                 input_tokens = input_tokens + excluded.input_tokens,
                 output_tokens = output_tokens + excluded.output_tokens,
@@ -745,10 +764,11 @@ fn create_rollup_triggers(conn: &Connection) -> Result<()> {
                     ),
                     '(untagged)'
                )
+               AND surface = COALESCE(NULLIF(OLD.surface, ''), 'unknown')
                AND message_count <= 0;
 
             INSERT INTO message_rollups_hourly (
-                bucket_start, role, provider, model, repo_id, git_branch,
+                bucket_start, role, provider, model, repo_id, git_branch, surface,
                 message_count, input_tokens, output_tokens,
                 cache_creation_tokens, cache_read_tokens, cost_cents
             )
@@ -773,6 +793,7 @@ fn create_rollup_triggers(conn: &Connection) -> Result<()> {
                     ),
                     '(untagged)'
                 ),
+                COALESCE(NULLIF(NEW.surface, ''), 'unknown'),
                 1,
                 COALESCE(NEW.input_tokens, 0),
                 COALESCE(NEW.output_tokens, 0),
@@ -780,7 +801,7 @@ fn create_rollup_triggers(conn: &Connection) -> Result<()> {
                 COALESCE(NEW.cache_read_tokens, 0),
                 COALESCE(NEW.cost_cents, 0.0)
             )
-            ON CONFLICT(bucket_start, role, provider, model, repo_id, git_branch) DO UPDATE SET
+            ON CONFLICT(bucket_start, role, provider, model, repo_id, git_branch, surface) DO UPDATE SET
                 message_count = message_count + excluded.message_count,
                 input_tokens = input_tokens + excluded.input_tokens,
                 output_tokens = output_tokens + excluded.output_tokens,
@@ -789,7 +810,7 @@ fn create_rollup_triggers(conn: &Connection) -> Result<()> {
                 cost_cents = cost_cents + excluded.cost_cents;
 
             INSERT INTO message_rollups_daily (
-                bucket_day, role, provider, model, repo_id, git_branch,
+                bucket_day, role, provider, model, repo_id, git_branch, surface,
                 message_count, input_tokens, output_tokens,
                 cache_creation_tokens, cache_read_tokens, cost_cents
             )
@@ -814,6 +835,7 @@ fn create_rollup_triggers(conn: &Connection) -> Result<()> {
                     ),
                     '(untagged)'
                 ),
+                COALESCE(NULLIF(NEW.surface, ''), 'unknown'),
                 1,
                 COALESCE(NEW.input_tokens, 0),
                 COALESCE(NEW.output_tokens, 0),
@@ -821,7 +843,7 @@ fn create_rollup_triggers(conn: &Connection) -> Result<()> {
                 COALESCE(NEW.cache_read_tokens, 0),
                 COALESCE(NEW.cost_cents, 0.0)
             )
-            ON CONFLICT(bucket_day, role, provider, model, repo_id, git_branch) DO UPDATE SET
+            ON CONFLICT(bucket_day, role, provider, model, repo_id, git_branch, surface) DO UPDATE SET
                 message_count = message_count + excluded.message_count,
                 input_tokens = input_tokens + excluded.input_tokens,
                 output_tokens = output_tokens + excluded.output_tokens,
@@ -862,6 +884,7 @@ fn backfill_rollup_tables(conn: &Connection) -> Result<()> {
                     ),
                     '(untagged)'
                 ) AS git_branch,
+                COALESCE(NULLIF(surface, ''), 'unknown') AS surface,
                 COALESCE(input_tokens, 0) AS input_tokens,
                 COALESCE(output_tokens, 0) AS output_tokens,
                 COALESCE(cache_creation_tokens, 0) AS cache_creation_tokens,
@@ -870,12 +893,12 @@ fn backfill_rollup_tables(conn: &Connection) -> Result<()> {
             FROM messages
         )
         INSERT INTO message_rollups_hourly (
-            bucket_start, role, provider, model, repo_id, git_branch,
+            bucket_start, role, provider, model, repo_id, git_branch, surface,
             message_count, input_tokens, output_tokens,
             cache_creation_tokens, cache_read_tokens, cost_cents
         )
         SELECT
-            bucket_hour, role, provider, model, repo_id, git_branch,
+            bucket_hour, role, provider, model, repo_id, git_branch, surface,
             COUNT(*) AS message_count,
             COALESCE(SUM(input_tokens), 0),
             COALESCE(SUM(output_tokens), 0),
@@ -883,7 +906,7 @@ fn backfill_rollup_tables(conn: &Connection) -> Result<()> {
             COALESCE(SUM(cache_read_tokens), 0),
             COALESCE(SUM(cost_cents), 0.0)
         FROM normalized
-        GROUP BY bucket_hour, role, provider, model, repo_id, git_branch;
+        GROUP BY bucket_hour, role, provider, model, repo_id, git_branch, surface;
 
         WITH normalized AS (
             SELECT
@@ -906,6 +929,7 @@ fn backfill_rollup_tables(conn: &Connection) -> Result<()> {
                     ),
                     '(untagged)'
                 ) AS git_branch,
+                COALESCE(NULLIF(surface, ''), 'unknown') AS surface,
                 COALESCE(input_tokens, 0) AS input_tokens,
                 COALESCE(output_tokens, 0) AS output_tokens,
                 COALESCE(cache_creation_tokens, 0) AS cache_creation_tokens,
@@ -914,12 +938,12 @@ fn backfill_rollup_tables(conn: &Connection) -> Result<()> {
             FROM messages
         )
         INSERT INTO message_rollups_daily (
-            bucket_day, role, provider, model, repo_id, git_branch,
+            bucket_day, role, provider, model, repo_id, git_branch, surface,
             message_count, input_tokens, output_tokens,
             cache_creation_tokens, cache_read_tokens, cost_cents
         )
         SELECT
-            bucket_day, role, provider, model, repo_id, git_branch,
+            bucket_day, role, provider, model, repo_id, git_branch, surface,
             COUNT(*) AS message_count,
             COALESCE(SUM(input_tokens), 0),
             COALESCE(SUM(output_tokens), 0),
@@ -927,7 +951,7 @@ fn backfill_rollup_tables(conn: &Connection) -> Result<()> {
             COALESCE(SUM(cache_read_tokens), 0),
             COALESCE(SUM(cost_cents), 0.0)
         FROM normalized
-        GROUP BY bucket_day, role, provider, model, repo_id, git_branch;
+        GROUP BY bucket_day, role, provider, model, repo_id, git_branch, surface;
         ",
     )?;
     Ok(())
@@ -1014,7 +1038,23 @@ pub fn backfill_session_timestamps_from_messages(conn: &Connection) -> Result<us
                 (SELECT m.git_branch FROM messages m
                   WHERE m.session_id = sessions.id
                     AND m.git_branch IS NOT NULL AND m.git_branch <> ''
-                  ORDER BY m.timestamp DESC LIMIT 1))
+                  ORDER BY m.timestamp DESC LIMIT 1)),
+            surface = CASE
+                WHEN sessions.surface IS NULL OR sessions.surface = '' OR sessions.surface = 'unknown'
+                THEN COALESCE(
+                    (SELECT m.surface FROM messages m
+                      WHERE m.session_id = sessions.id
+                        AND m.surface IS NOT NULL
+                        AND m.surface <> ''
+                        AND m.surface <> 'unknown'
+                      GROUP BY m.surface
+                      ORDER BY COUNT(*) DESC, m.surface ASC
+                      LIMIT 1),
+                    sessions.surface,
+                    'unknown'
+                )
+                ELSE sessions.surface
+            END
          WHERE EXISTS (SELECT 1 FROM messages WHERE session_id = sessions.id)
            AND (
                 started_at IS NULL
@@ -1031,6 +1071,14 @@ pub fn backfill_session_timestamps_from_messages(conn: &Connection) -> Result<us
                     AND EXISTS (SELECT 1 FROM messages m
                                 WHERE m.session_id = sessions.id
                                   AND m.git_branch IS NOT NULL AND m.git_branch <> '')
+                )
+                OR (
+                    (sessions.surface IS NULL OR sessions.surface = '' OR sessions.surface = 'unknown')
+                    AND EXISTS (SELECT 1 FROM messages m
+                                WHERE m.session_id = sessions.id
+                                  AND m.surface IS NOT NULL
+                                  AND m.surface <> ''
+                                  AND m.surface <> 'unknown')
                 )
            )",
         [],
@@ -1142,6 +1190,112 @@ fn trigger_exists(conn: &Connection, name: &str) -> Result<bool> {
     Ok(exists)
 }
 
+/// True iff the `message_rollups_hourly` PRIMARY KEY definition includes
+/// `surface`. Used by the #701 reconcile to decide whether the rollup
+/// tables need to be rebuilt with the new PK shape on an existing v1 DB.
+fn rollup_pk_includes_surface(conn: &Connection) -> Result<bool> {
+    if !table_exists(conn, "message_rollups_hourly")? {
+        return Ok(false);
+    }
+    let sql: Option<String> = conn
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='message_rollups_hourly'",
+            [],
+            |r| r.get(0),
+        )
+        .ok();
+    Ok(sql.as_deref().is_some_and(|s| s.contains("surface")))
+}
+
+/// Drop the legacy rollup tables/triggers and recreate them with the
+/// `surface`-aware PK shape. Used only in the #701 reconcile path; on a
+/// fresh schema `create_rollup_tables` already produces the right PK.
+fn rebuild_rollups_with_surface_pk(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        "
+        DROP TRIGGER IF EXISTS trg_messages_rollup_insert;
+        DROP TRIGGER IF EXISTS trg_messages_rollup_delete;
+        DROP TRIGGER IF EXISTS trg_messages_rollup_update;
+        DROP TABLE IF EXISTS message_rollups_hourly;
+        DROP TABLE IF EXISTS message_rollups_daily;
+        ",
+    )?;
+    create_rollup_tables(conn)?;
+    create_rollup_triggers(conn)?;
+    Ok(())
+}
+
+/// Backfill the `surface` column on `messages` and `sessions` for rows
+/// that pre-date #701. Per the ticket:
+///
+/// - `claude_code` / `codex` / `copilot_cli` → `terminal` (no IDE binding)
+/// - `cursor` → `cursor`
+/// - `copilot_chat` → best-effort path-based inference from `cwd`:
+///   `Cursor/User/...` → `cursor`; `Code/User/...`,
+///   `Code - Insiders`, `Code - Exploration`, `VSCodium`, or
+///   `~/.vscode-server*`/`~/.vscode-remote*` → `vscode`; otherwise
+///   `unknown`
+/// - everything else → `terminal` as a coarse fallback
+///
+/// Idempotent: rows that already carry a non-default surface are not
+/// touched, so a second migration run no-ops. Documented as a one-shot,
+/// non-reversible step.
+fn backfill_surface(conn: &Connection) -> Result<usize> {
+    let mut total = 0usize;
+
+    // Messages: stamp every row that still carries the default `unknown`
+    // surface with the best inference we have. The `WHERE surface = ''
+    // OR surface = 'unknown' OR surface IS NULL` predicate becomes empty
+    // on subsequent runs once the column is fully populated.
+    total += conn.execute(
+        "UPDATE messages SET surface = CASE
+            WHEN provider IN ('claude_code', 'codex', 'copilot_cli') THEN 'terminal'
+            WHEN provider = 'cursor' THEN 'cursor'
+            WHEN provider = 'copilot_chat' THEN
+                CASE
+                    WHEN cwd LIKE '%/Cursor/User/%' OR cwd LIKE '%/Cursor/%' THEN 'cursor'
+                    WHEN cwd LIKE '%/Code/User/%'
+                      OR cwd LIKE '%/Code - Insiders/%'
+                      OR cwd LIKE '%/Code - Exploration/%'
+                      OR cwd LIKE '%/VSCodium/%'
+                      OR cwd LIKE '%/.vscode-server%'
+                      OR cwd LIKE '%/.vscode-remote%'
+                      OR cwd LIKE '%vscode-server%'
+                      THEN 'vscode'
+                    ELSE 'unknown'
+                END
+            ELSE 'terminal'
+        END
+        WHERE surface IS NULL OR surface = '' OR surface = 'unknown'",
+        [],
+    )?;
+
+    // Sessions inherit the dominant surface of their messages. If a
+    // session has no messages yet (cloud-shipped stub, in-flight tail),
+    // fall back to the provider rule.
+    total += conn.execute(
+        "UPDATE sessions SET surface = COALESCE(
+            (
+                SELECT m.surface FROM messages m
+                WHERE m.session_id = sessions.id
+                  AND m.surface IS NOT NULL AND m.surface != '' AND m.surface != 'unknown'
+                GROUP BY m.surface
+                ORDER BY COUNT(*) DESC, m.surface ASC
+                LIMIT 1
+            ),
+            CASE
+                WHEN sessions.provider IN ('claude_code', 'codex', 'copilot_cli') THEN 'terminal'
+                WHEN sessions.provider = 'cursor' THEN 'cursor'
+                ELSE 'unknown'
+            END
+        )
+        WHERE surface IS NULL OR surface = '' OR surface = 'unknown'",
+        [],
+    )?;
+
+    Ok(total)
+}
+
 fn drop_legacy_proxy_events_table(conn: &Connection) -> Result<bool> {
     if !table_exists(conn, "proxy_events")? {
         return Ok(false);
@@ -1210,16 +1364,50 @@ fn reconcile_schema(conn: &Connection) -> Result<SchemaReconcileReport> {
     let mut added_columns: Vec<String> = Vec::new();
     let mut removed_tables: Vec<String> = Vec::new();
 
+    // #701: add the `surface` column to messages/sessions BEFORE the
+    // rollup repair runs. The rollup triggers and backfill query both
+    // reference `messages.surface` (NEW.surface in trigger bodies, plus
+    // a SELECT in `backfill_rollup_tables`); an older v1 DB would
+    // otherwise hit "no such column: surface" the moment the new
+    // trigger SQL touches an INSERT against `messages`.
+    let mut surface_column_added = false;
+    if ensure_column(
+        conn,
+        "messages",
+        "surface",
+        "surface TEXT NOT NULL DEFAULT 'unknown'",
+    )? {
+        added_columns.push("messages.surface".to_string());
+        surface_column_added = true;
+    }
+    if ensure_column(
+        conn,
+        "sessions",
+        "surface",
+        "surface TEXT NOT NULL DEFAULT 'unknown'",
+    )? {
+        added_columns.push("sessions.surface".to_string());
+        surface_column_added = true;
+    }
+
     let has_hourly_rollups = table_exists(conn, "message_rollups_hourly")?;
     let has_daily_rollups = table_exists(conn, "message_rollups_daily")?;
     let has_rollup_insert_trigger = trigger_exists(conn, "trg_messages_rollup_insert")?;
     let has_rollup_delete_trigger = trigger_exists(conn, "trg_messages_rollup_delete")?;
     let has_rollup_update_trigger = trigger_exists(conn, "trg_messages_rollup_update")?;
+    let rollup_pk_outdated_pre = has_hourly_rollups && !rollup_pk_includes_surface(conn)?;
     let needs_rollup_repair = !has_hourly_rollups
         || !has_daily_rollups
         || !has_rollup_insert_trigger
         || !has_rollup_delete_trigger
-        || !has_rollup_update_trigger;
+        || !has_rollup_update_trigger
+        || rollup_pk_outdated_pre;
+    if rollup_pk_outdated_pre {
+        // Pre-#701 rollup tables still carry the old PK. Drop them so
+        // `ensure_rollup_schema` recreates with the surface-aware shape;
+        // the rebuild below repopulates from `messages`.
+        rebuild_rollups_with_surface_pk(conn)?;
+    }
     if needs_rollup_repair {
         ensure_rollup_schema(conn, true)?;
         if !has_hourly_rollups {
@@ -1262,6 +1450,24 @@ fn reconcile_schema(conn: &Connection) -> Result<SchemaReconcileReport> {
         added_columns.push("pricing_manifests".to_string());
     }
     seed_pricing_manifests_baseline(conn)?;
+
+    // #701: backfill the surface dimension on messages/sessions for
+    // rows that pre-date the column add at the top of this function.
+    // The column itself was added before `ensure_rollup_schema` so the
+    // trigger SQL and the rollup backfill query both have a column to
+    // reference; what remains here is to populate the per-row value
+    // from provider-local rules and rebuild rollups so they partition
+    // on surface from this point forward.
+    let backfilled_surface = backfill_surface(conn)?;
+    if backfilled_surface > 0 {
+        tracing::info!(
+            rows = backfilled_surface,
+            "Backfilled surface dimension on messages/sessions (#701)"
+        );
+    }
+    if surface_column_added || backfilled_surface > 0 {
+        backfill_rollup_tables(conn)?;
+    }
 
     if drop_legacy_proxy_events_table(conn)? {
         removed_tables.push("proxy_events".to_string());
@@ -1452,6 +1658,132 @@ mod tests {
                 .unwrap();
             assert_eq!(junk, 0, "old tables should be dropped (v{old_version})");
         }
+    }
+
+    /// #701 — an existing v1 DB that pre-dates the `surface` dimension
+    /// must gain the column on both `messages` and `sessions` through
+    /// `reconcile_schema`, populate it via the parser-rule backfill, and
+    /// rebuild rollups with the new PK shape. The fixture seeds rows
+    /// from each provider so the backfill matrix is exercised end-to-end.
+    #[test]
+    fn reconcile_adds_surface_and_backfills_existing_v1_db() {
+        let conn = Connection::open_in_memory().unwrap();
+        migrate(&conn).unwrap();
+
+        // Simulate a pre-#701 database: drop the rollup triggers (they
+        // reference `NEW.surface` after the migration) and the surface
+        // column on both tables. The reconcile path under test must
+        // recreate the triggers, the column, and the rollup PK shape.
+        conn.execute_batch(
+            "DROP TRIGGER IF EXISTS trg_messages_rollup_insert;
+             DROP TRIGGER IF EXISTS trg_messages_rollup_delete;
+             DROP TRIGGER IF EXISTS trg_messages_rollup_update;
+             ALTER TABLE messages DROP COLUMN surface;
+             ALTER TABLE sessions DROP COLUMN surface;",
+        )
+        .unwrap();
+        assert!(!has_column(&conn, "messages", "surface").unwrap());
+        assert!(!has_column(&conn, "sessions", "surface").unwrap());
+
+        // Seed one row per inference rule. `cwd` drives the
+        // copilot_chat path-based inference; the others are
+        // provider-rule rows.
+        conn.execute_batch(
+            "INSERT INTO messages (id, role, timestamp, provider, cwd) VALUES
+                ('m_cc', 'assistant', '2026-04-01T00:00:00Z', 'claude_code', '/repo/foo'),
+                ('m_cur', 'assistant', '2026-04-01T00:00:00Z', 'cursor', '/repo/foo'),
+                ('m_cli', 'assistant', '2026-04-01T00:00:00Z', 'copilot_cli', '/repo/foo'),
+                ('m_cdx', 'assistant', '2026-04-01T00:00:00Z', 'codex', '/repo/foo'),
+                ('m_chat_vscode', 'assistant', '2026-04-01T00:00:00Z', 'copilot_chat',
+                 '/Users/x/Library/Application Support/Code/User/workspaceStorage/abc'),
+                ('m_chat_cursor', 'assistant', '2026-04-01T00:00:00Z', 'copilot_chat',
+                 '/Users/x/Library/Application Support/Cursor/User/workspaceStorage/abc'),
+                ('m_chat_remote', 'assistant', '2026-04-01T00:00:00Z', 'copilot_chat',
+                 '/home/x/.vscode-server/data/User/workspaceStorage/abc'),
+                ('m_chat_unknown', 'assistant', '2026-04-01T00:00:00Z', 'copilot_chat', NULL);
+             INSERT INTO sessions (id, provider) VALUES ('sess_cc', 'claude_code'), ('sess_cur', 'cursor');",
+        )
+        .unwrap();
+
+        let report = repair(&conn).unwrap();
+        assert!(
+            report.added_columns.iter().any(|c| c == "messages.surface"),
+            "report should mention added messages.surface column; got {:?}",
+            report.added_columns
+        );
+        assert!(
+            report.added_columns.iter().any(|c| c == "sessions.surface"),
+            "report should mention added sessions.surface column; got {:?}",
+            report.added_columns
+        );
+
+        let surface_for = |id: &str| -> String {
+            conn.query_row("SELECT surface FROM messages WHERE id = ?1", [id], |r| {
+                r.get::<_, String>(0)
+            })
+            .unwrap()
+        };
+        assert_eq!(surface_for("m_cc"), "terminal");
+        assert_eq!(surface_for("m_cur"), "cursor");
+        assert_eq!(surface_for("m_cli"), "terminal");
+        assert_eq!(surface_for("m_cdx"), "terminal");
+        assert_eq!(surface_for("m_chat_vscode"), "vscode");
+        assert_eq!(surface_for("m_chat_cursor"), "cursor");
+        assert_eq!(surface_for("m_chat_remote"), "vscode");
+        assert_eq!(surface_for("m_chat_unknown"), "unknown");
+
+        // Sessions rule-fall back when no messages link to them. No
+        // message references `sess_cc` or `sess_cur`, so the provider
+        // rule kicks in.
+        let sess_cc_surface: String = conn
+            .query_row(
+                "SELECT surface FROM sessions WHERE id = 'sess_cc'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let sess_cur_surface: String = conn
+            .query_row(
+                "SELECT surface FROM sessions WHERE id = 'sess_cur'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(sess_cc_surface, "terminal");
+        assert_eq!(sess_cur_surface, "cursor");
+
+        // Rollups should be rebuilt with surface partitioning.
+        let surfaces_in_rollups: Vec<String> = conn
+            .prepare("SELECT DISTINCT surface FROM message_rollups_daily ORDER BY surface")
+            .unwrap()
+            .query_map([], |r| r.get::<_, String>(0))
+            .unwrap()
+            .filter_map(|r| r.ok())
+            .collect();
+        // We seeded rows with vscode, cursor, terminal, and unknown.
+        assert!(
+            surfaces_in_rollups.contains(&"vscode".to_string()),
+            "daily rollups should partition on surface; got {:?}",
+            surfaces_in_rollups
+        );
+        assert!(
+            surfaces_in_rollups.contains(&"cursor".to_string()),
+            "daily rollups should partition on surface; got {:?}",
+            surfaces_in_rollups
+        );
+        assert!(
+            surfaces_in_rollups.contains(&"terminal".to_string()),
+            "daily rollups should partition on surface; got {:?}",
+            surfaces_in_rollups
+        );
+
+        // Idempotency: a second repair should be a no-op.
+        let second = repair(&conn).unwrap();
+        assert!(
+            !second.added_columns.iter().any(|c| c.contains("surface")),
+            "second repair must not re-add surface columns; got {:?}",
+            second.added_columns
+        );
     }
 
     /// 8.1 → 8.2 upgrade: an existing v1 database that pre-dates the
