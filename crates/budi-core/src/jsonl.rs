@@ -214,6 +214,13 @@ pub struct ParsedMessage {
     /// tag via `tag_keys::CWD_SOURCE`. Added in #688 for Copilot Chat
     /// emptyWindow editor-context hints.
     pub cwd_source: Option<String>,
+    /// Host environment where the AI conversation happened — `vscode`,
+    /// `cursor`, `jetbrains`, `terminal`, `unknown`. Distinct from
+    /// `provider` (which agent ran the call) and used by host extensions
+    /// to display only their host's rows. Set per-parser; the ingest path
+    /// falls back to `surface::default_for_provider` when `None`. See
+    /// `crate::surface` and ticket #701.
+    pub surface: Option<String>,
 }
 
 /// One provider-reported tool outcome. Content is never stored — we only
@@ -263,6 +270,7 @@ impl Default for ParsedMessage {
             tool_files: Vec::new(),
             tool_outcomes: Vec::new(),
             cwd_source: None,
+            surface: None,
         }
     }
 }
@@ -553,6 +561,7 @@ fn parse_line(line: &str) -> Option<ParsedMessage> {
                 tool_files: Vec::new(),
                 tool_outcomes,
                 cwd_source: None,
+                surface: Some(crate::surface::TERMINAL.to_string()),
             })
         }
         TranscriptEntry::Assistant(a) => {
@@ -606,6 +615,7 @@ fn parse_line(line: &str) -> Option<ParsedMessage> {
                 tool_files,
                 tool_outcomes: Vec::new(),
                 cwd_source: None,
+                surface: Some(crate::surface::TERMINAL.to_string()),
             })
         }
         TranscriptEntry::Other => None,
@@ -672,6 +682,7 @@ fn parse_flat_line(line: &str) -> Option<ParsedMessage> {
                 tool_files,
                 tool_outcomes: Vec::new(),
                 cwd_source: None,
+                surface: Some(crate::surface::TERMINAL.to_string()),
             })
         }
         "user" => Some(ParsedMessage {
@@ -686,6 +697,7 @@ fn parse_flat_line(line: &str) -> Option<ParsedMessage> {
             provider: "claude_code".to_string(),
             cost_confidence: "n/a".to_string(),
             pricing_source: None,
+            surface: Some(crate::surface::TERMINAL.to_string()),
             ..Default::default()
         }),
         _ => None,

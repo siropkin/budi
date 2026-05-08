@@ -203,6 +203,16 @@ pub struct MessageRow {
     pub tools: Vec<String>,
     #[serde(default)]
     pub tags: Vec<SessionTag>,
+    /// Host environment the message was produced under (`vscode`,
+    /// `cursor`, `jetbrains`, `terminal`, `unknown`). Distinct from
+    /// `provider`. The data-layer ticket (#701) only ensures the field
+    /// is present; the sibling ticket adds the filter behavior.
+    #[serde(default = "default_unknown_surface")]
+    pub surface: String,
+}
+
+fn default_unknown_surface() -> String {
+    crate::surface::UNKNOWN.to_string()
 }
 
 #[derive(Debug, Clone)]
@@ -477,15 +487,25 @@ pub fn ingest_messages_with_sync(
         // so a hypothetical future writer that skips the enricher still
         // produces a valid tag rather than NULL.
         let pricing_source: Option<&str> = msg.pricing_source.as_deref();
+        // #701: surface is provider-set (parser-local). Fall back to the
+        // provider's natural surface (terminal for claude_code/codex/
+        // copilot_cli, cursor for cursor; copilot_chat must always set
+        // its own per-path) so a writer that bypasses the parser still
+        // produces a valid tag.
+        let surface_value: String = msg
+            .surface
+            .clone()
+            .unwrap_or_else(|| crate::surface::default_for_provider(&msg.provider).to_string());
         let inserted = tx.execute(
             "INSERT OR IGNORE INTO messages
              (id, session_id, role, timestamp, model,
               input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
               cwd, repo_id, provider,
               cost_cents,
-              parent_uuid, git_branch, cost_confidence, request_id, pricing_source)
+              parent_uuid, git_branch, cost_confidence, request_id, pricing_source, surface)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17,
-                     COALESCE(?18, 'legacy:pre-manifest'))",
+                     COALESCE(?18, 'legacy:pre-manifest'),
+                     ?19)",
             params![
                 msg.uuid,
                 normalized_session_id.as_deref(),
@@ -505,6 +525,7 @@ pub fn ingest_messages_with_sync(
                 msg.cost_confidence,
                 msg.request_id,
                 pricing_source,
+                surface_value,
             ],
         )?;
 
@@ -527,7 +548,7 @@ pub fn ingest_messages_with_sync(
     // This makes `sessions` a merged metadata table populated from any source,
     // not only hooks. Hooks/OTEL will later enrich these stubs with metadata.
     {
-        let mut seen_sessions: std::collections::HashSet<(String, String)> =
+        let mut seen_sessions: std::collections::HashSet<(String, String, String)> =
             std::collections::HashSet::new();
         let mut session_categories: std::collections::HashMap<String, String> =
             std::collections::HashMap::new();
@@ -538,16 +559,19 @@ pub fn ingest_messages_with_sync(
                 .map(crate::identity::normalize_session_id)
                 .filter(|sid| !sid.is_empty())
             {
-                seen_sessions.insert((sid.clone(), msg.provider.clone()));
+                let surface_value = msg.surface.clone().unwrap_or_else(|| {
+                    crate::surface::default_for_provider(&msg.provider).to_string()
+                });
+                seen_sessions.insert((sid.clone(), msg.provider.clone(), surface_value));
                 if let Some(ref cat) = msg.prompt_category {
                     session_categories.insert(sid, cat.clone());
                 }
             }
         }
-        for (sid, provider) in &seen_sessions {
+        for (sid, provider, surface_value) in &seen_sessions {
             tx.execute(
-                "INSERT OR IGNORE INTO sessions (id, provider) VALUES (?1, ?2)",
-                params![sid, provider],
+                "INSERT OR IGNORE INTO sessions (id, provider, surface) VALUES (?1, ?2, ?3)",
+                params![sid, provider, surface_value],
             )?;
             // Without this, claude_code/codex sessions keep started_at/ended_at/
             // repo_id/git_branch = NULL forever (#569 / #577) and never reach
@@ -572,7 +596,23 @@ pub fn ingest_messages_with_sync(
                         (SELECT m.git_branch FROM messages m
                           WHERE m.session_id = ?1
                             AND m.git_branch IS NOT NULL AND m.git_branch <> ''
-                          ORDER BY m.timestamp DESC LIMIT 1))
+                          ORDER BY m.timestamp DESC LIMIT 1)),
+                    surface = CASE
+                        WHEN sessions.surface IS NULL OR sessions.surface = '' OR sessions.surface = 'unknown'
+                        THEN COALESCE(
+                            (SELECT m.surface FROM messages m
+                              WHERE m.session_id = ?1
+                                AND m.surface IS NOT NULL
+                                AND m.surface <> ''
+                                AND m.surface <> 'unknown'
+                              GROUP BY m.surface
+                              ORDER BY COUNT(*) DESC, m.surface ASC
+                              LIMIT 1),
+                            sessions.surface,
+                            'unknown'
+                        )
+                        ELSE sessions.surface
+                    END
                  WHERE id = ?1",
                 params![sid],
             )?;

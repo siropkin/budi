@@ -1226,6 +1226,7 @@ fn build_messages_for_request(
             tool_files: Vec::new(),
             tool_outcomes: Vec::new(),
             cwd_source: enrichment.cwd_source.map(str::to_string),
+            surface: Some(crate::surface::infer_copilot_chat_surface(path).to_string()),
         }
     });
 
@@ -1267,6 +1268,7 @@ fn build_messages_for_request(
         tool_files: tool_data.files,
         tool_outcomes: Vec::new(),
         cwd_source: enrichment.cwd_source.map(str::to_string),
+        surface: Some(crate::surface::infer_copilot_chat_surface(path).to_string()),
     });
 
     rows
@@ -1445,6 +1447,7 @@ fn build_message(
             tool_files: Vec::new(),
             tool_outcomes: Vec::new(),
             cwd_source: enrichment.cwd_source.map(str::to_string),
+            surface: Some(crate::surface::infer_copilot_chat_surface(path).to_string()),
         }
     });
 
@@ -1486,6 +1489,7 @@ fn build_message(
         tool_files: tool_data.files,
         tool_outcomes: Vec::new(),
         cwd_source: enrichment.cwd_source.map(str::to_string),
+        surface: Some(crate::surface::infer_copilot_chat_surface(path).to_string()),
     });
 
     rows
@@ -2639,6 +2643,88 @@ mod tests {
         let path = Path::new("/tmp/budi-fixtures/sess-doc-2.json");
         let (msgs, _) = parse_copilot_chat(path, content, 0);
         assert!(msgs.is_empty());
+    }
+
+    /// #701 acceptance — parser-local surface inference. The four
+    /// canonical roots from ADR-0092 §2.1 each map to a deterministic
+    /// surface label on every emitted row, so host extensions
+    /// (budi-cursor, future budi-jetbrains) can filter to "only my
+    /// host's data" without inspecting paths themselves.
+    ///
+    /// JetBrains is a placeholder — copilot_chat's discovery roots only
+    /// touch VS Code-family directories today, so a JetBrains-shaped
+    /// path is exercised at the `infer_copilot_chat_surface` unit-test
+    /// layer (see `crate::surface::tests`). The matrix here pins the
+    /// three roots that actually flow through the parser.
+    #[test]
+    fn surface_is_cursor_when_path_under_cursor_user_root() {
+        let content = r#"{"promptTokens": 1, "outputTokens": 2}"#;
+        let path = Path::new(
+            "/Users/dev/Library/Application Support/Cursor/User/workspaceStorage/abc/chatSessions/sess.jsonl",
+        );
+        let (msgs, _) = parse_copilot_chat(path, content, 0);
+        assert!(!msgs.is_empty());
+        for m in &msgs {
+            assert_eq!(
+                m.surface.as_deref(),
+                Some(crate::surface::CURSOR),
+                "Cursor/User/... must map to surface=cursor; got {:?}",
+                m.surface
+            );
+        }
+    }
+
+    #[test]
+    fn surface_is_vscode_when_path_under_code_user_root() {
+        let content = r#"{"promptTokens": 1, "outputTokens": 2}"#;
+        let path = Path::new(
+            "/Users/dev/Library/Application Support/Code/User/workspaceStorage/abc/chatSessions/sess.jsonl",
+        );
+        let (msgs, _) = parse_copilot_chat(path, content, 0);
+        assert!(!msgs.is_empty());
+        for m in &msgs {
+            assert_eq!(
+                m.surface.as_deref(),
+                Some(crate::surface::VSCODE),
+                "Code/User/... must map to surface=vscode; got {:?}",
+                m.surface
+            );
+        }
+    }
+
+    #[test]
+    fn surface_is_vscode_when_path_under_vscode_server_root() {
+        let content = r#"{"promptTokens": 1, "outputTokens": 2}"#;
+        let path = Path::new(
+            "/home/dev/.vscode-server/data/User/workspaceStorage/abc/chatSessions/sess.jsonl",
+        );
+        let (msgs, _) = parse_copilot_chat(path, content, 0);
+        assert!(!msgs.is_empty());
+        for m in &msgs {
+            assert_eq!(
+                m.surface.as_deref(),
+                Some(crate::surface::VSCODE),
+                "~/.vscode-server/... must map to surface=vscode; got {:?}",
+                m.surface
+            );
+        }
+    }
+
+    /// JetBrains placeholder — until the budi-jetbrains parser lands,
+    /// the surface module's classifier on a JetBrains-shaped path
+    /// returns the `jetbrains` placeholder so the matrix is explicit.
+    /// copilot_chat's discovery never reaches such a path today (it
+    /// iterates VS Code-family roots only), so this assertion lives at
+    /// the classifier layer rather than going through `parse_copilot_chat`.
+    #[test]
+    fn surface_jetbrains_path_classifier_returns_jetbrains_placeholder() {
+        let path = Path::new(
+            "/Users/dev/Library/Application Support/JetBrains/IntelliJIdea2026.1/copilot/sessions/x.json",
+        );
+        assert_eq!(
+            crate::surface::infer_copilot_chat_surface(path),
+            crate::surface::JETBRAINS
+        );
     }
 
     #[test]

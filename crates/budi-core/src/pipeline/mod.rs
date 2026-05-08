@@ -936,6 +936,7 @@ mod tests {
             tool_files: Vec::new(),
             tool_outcomes: Vec::new(),
             cwd_source: None,
+            surface: None,
         }
     }
 

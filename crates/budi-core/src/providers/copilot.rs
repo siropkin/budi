@@ -338,6 +338,7 @@ fn parse_usage_event(
         tool_files: Vec::new(),
         tool_outcomes: Vec::new(),
         cwd_source: None,
+        surface: Some(crate::surface::TERMINAL.to_string()),
     })
 }
 
