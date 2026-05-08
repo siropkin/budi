@@ -134,6 +134,12 @@ Examples:
         /// Filter sessions by search term (model, repo, branch, provider)
         #[arg(long)]
         search: Option<String>,
+        /// Filter sessions to a single provider (e.g. `copilot_chat`,
+        /// `claude_code`). Unlike `--search`, this is an exact match on
+        /// the provider field — `--search code` would also match
+        /// `claude_code`/`vscode`/`codex`.
+        #[arg(long, value_name = "NAME")]
+        provider: Option<String>,
         /// Filter sessions by ticket id (e.g. ENG-123). Matches the
         /// `ticket_id` tag emitted by the git enricher when the branch name
         /// contains a recognised ID.
@@ -745,6 +751,7 @@ fn main() -> Result<()> {
             session_id,
             period,
             search,
+            provider,
             ticket,
             activity,
             limit,
@@ -755,9 +762,13 @@ fn main() -> Result<()> {
             if let Some(id) = session_id {
                 commands::sessions::cmd_session_detail(&id, json_output)
             } else {
+                let provider = provider
+                    .map(|p| commands::normalize_provider(&p))
+                    .transpose()?;
                 commands::sessions::cmd_sessions(
                     period,
                     search.as_deref(),
+                    provider.as_deref(),
                     ticket.as_deref(),
                     activity.as_deref(),
                     limit,
@@ -1047,6 +1058,21 @@ mod tests {
         match cli.command {
             Commands::Sessions { ticket, .. } => {
                 assert_eq!(ticket.as_deref(), Some("PAVA-2057"));
+            }
+            _ => panic!("expected sessions command"),
+        }
+    }
+
+    /// #683: `--provider` complements `--search` so `budi sessions
+    /// --provider copilot_chat` no longer leaks substring matches into
+    /// `claude_code` / `vscode` / `codex`. Pre-fix the flag didn't exist.
+    #[test]
+    fn cli_parses_sessions_provider_flag() {
+        let cli = Cli::try_parse_from(["budi", "sessions", "--provider", "copilot_chat"])
+            .expect("budi sessions --provider parses");
+        match cli.command {
+            Commands::Sessions { provider, .. } => {
+                assert_eq!(provider.as_deref(), Some("copilot_chat"));
             }
             _ => panic!("expected sessions command"),
         }

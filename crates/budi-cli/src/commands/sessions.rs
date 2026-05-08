@@ -31,9 +31,11 @@ const MODEL_COL_WIDTH: usize = 28;
 
 use budi_core::analytics::SHORT_ID_LEN;
 
+#[allow(clippy::too_many_arguments)]
 pub fn cmd_sessions(
     period: StatsPeriod,
     search: Option<&str>,
+    provider: Option<&str>,
     ticket: Option<&str>,
     activity: Option<&str>,
     limit: usize,
@@ -49,6 +51,7 @@ pub fn cmd_sessions(
         since.as_deref(),
         until.as_deref(),
         search,
+        provider,
         ticket,
         activity,
         limit,
@@ -81,6 +84,9 @@ pub fn cmd_sessions(
     // dimension scoped the result. Both ticket and activity live in the
     // same space (tag-derived filters) and can compose in principle.
     let mut filter_bits: Vec<String> = Vec::new();
+    if let Some(p) = provider {
+        filter_bits.push(format!("provider: {p}"));
+    }
     if let Some(t) = ticket {
         filter_bits.push(format!("ticket: {t}"));
     }
