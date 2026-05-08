@@ -62,7 +62,10 @@
     "role": "assistant",
     "input_tokens": 0,
     "output_tokens": 257,
-    "model": "claude-sonnet-4-5"
+    "model": "claude-sonnet-4-5",
+    "tool_names": ["replace_string_in_file", "read_file"],
+    "tool_use_ids": ["call_synthetic_e22dad3b_01", "call_synthetic_e22dad3b_02"],
+    "tool_files": ["src/auth.rs", "src/main.rs"]
   },
   {
     "requestId": "request_b406b73b-be7a-4801-ab0a-589c5948bab2",
