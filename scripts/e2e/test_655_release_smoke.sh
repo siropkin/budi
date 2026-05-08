@@ -402,6 +402,29 @@ if [[ "$NULL_CWD" != "0" || "$NULL_REPO" != "0" || "$NULL_BRANCH" != "0" ]]; the
 fi
 echo "[e2e] OK: cwd / repo_id / git_branch all non-null on $EXPECTED_COUNT row(s) (#681)"
 
+# #686 acceptance: both row roles materialize from the canonical fixture.
+# Pre-#686 the parser hard-coded role='assistant' on every emit and
+# /analytics/providers reported user_messages: 0 for copilot_chat. The
+# canonical fixture now carries synthetic message.text on its first two
+# requests (clearly fake, see SANITIZATION CHECKLIST in the fixture
+# header), so the parser is expected to emit at least one user row and
+# at least one assistant row for the session.
+EXPECTED_USER_ROWS=$(python3 -c "import json; d=json.load(open('$FIXTURE_EXPECTED')); print(sum(1 for r in d if r.get('role') == 'user'))")
+EXPECTED_ASSISTANT_ROWS=$(python3 -c "import json; d=json.load(open('$FIXTURE_EXPECTED')); print(sum(1 for r in d if r.get('role') == 'assistant'))")
+USER_ROWS=$(sqlite3 "$DB" \
+  "SELECT COUNT(*) FROM messages WHERE provider='copilot_chat' AND session_id='$FIXTURE_SESSION_ID' AND role='user';")
+ASSISTANT_ROWS=$(sqlite3 "$DB" \
+  "SELECT COUNT(*) FROM messages WHERE provider='copilot_chat' AND session_id='$FIXTURE_SESSION_ID' AND role='assistant';")
+if [[ "$USER_ROWS" != "$EXPECTED_USER_ROWS" || "$ASSISTANT_ROWS" != "$EXPECTED_ASSISTANT_ROWS" ]]; then
+  echo "[e2e] FAIL: copilot_chat row roles mismatch (#686)" >&2
+  echo "  user rows:       $USER_ROWS (expected $EXPECTED_USER_ROWS)" >&2
+  echo "  assistant rows:  $ASSISTANT_ROWS (expected $EXPECTED_ASSISTANT_ROWS)" >&2
+  sqlite3 "$DB" \
+    "SELECT id, role, parent_uuid, prompt_category FROM messages WHERE provider='copilot_chat' AND session_id='$FIXTURE_SESSION_ID' ORDER BY id LIMIT 20;" >&2 || true
+  exit 1
+fi
+echo "[e2e] OK: both row roles materialize ($USER_ROWS user, $ASSISTANT_ROWS assistant) (#686)"
+
 # ---------------------------------------------------------------------------
 # Step 21 — streaming-truncation resilience (8.4.1 R1.5, #672).
 #

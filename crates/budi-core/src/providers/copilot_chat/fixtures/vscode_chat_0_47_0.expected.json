@@ -1,48 +1,72 @@
 [
   {
     "requestId": "request_607ae8f0-1b2c-41c3-a9b4-57e31857099d",
+    "role": "user",
+    "input_tokens": 0,
+    "output_tokens": 0,
+    "model": null,
+    "prompt_category": "bugfix"
+  },
+  {
+    "requestId": "request_607ae8f0-1b2c-41c3-a9b4-57e31857099d",
+    "role": "assistant",
     "input_tokens": 0,
     "output_tokens": 65,
     "model": "claude-sonnet-4-5"
   },
   {
     "requestId": "request_3e330c56-32d5-44c5-8e43-70da08045275",
+    "role": "user",
+    "input_tokens": 0,
+    "output_tokens": 0,
+    "model": null,
+    "prompt_category": "feature"
+  },
+  {
+    "requestId": "request_3e330c56-32d5-44c5-8e43-70da08045275",
+    "role": "assistant",
     "input_tokens": 0,
     "output_tokens": 109,
     "model": "claude-sonnet-4-5"
   },
   {
     "requestId": "request_f682bb40-89e1-4e52-b0c4-e37aafdc564d",
+    "role": "assistant",
     "input_tokens": 0,
     "output_tokens": 115,
     "model": "claude-sonnet-4-5"
   },
   {
     "requestId": "request_15fd2a22-adc0-49d5-ad5a-855529a51a02",
+    "role": "assistant",
     "input_tokens": 0,
     "output_tokens": 117,
     "model": "claude-sonnet-4-5"
   },
   {
     "requestId": "request_663c6a77-7475-466c-b0bd-799e9a5d28e8",
+    "role": "assistant",
     "input_tokens": 0,
     "output_tokens": 214,
     "model": "claude-sonnet-4-5"
   },
   {
     "requestId": "request_70f1c5db-60be-45d2-abd3-4b969210e619",
+    "role": "assistant",
     "input_tokens": 0,
     "output_tokens": 89,
     "model": "claude-sonnet-4-5"
   },
   {
     "requestId": "request_dc9f930d-8a66-44de-89a0-31328e367183",
+    "role": "assistant",
     "input_tokens": 0,
     "output_tokens": 257,
     "model": "claude-sonnet-4-5"
   },
   {
     "requestId": "request_b406b73b-be7a-4801-ab0a-589c5948bab2",
+    "role": "assistant",
     "input_tokens": 0,
     "output_tokens": 39,
     "model": "claude-sonnet-4-5"
