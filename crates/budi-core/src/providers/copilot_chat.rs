@@ -705,7 +705,7 @@ fn parse_jsonl(path: &Path, content: &str, start_offset: usize) -> (Vec<ParsedMe
                     if !emitted.insert(emit_key.clone()) {
                         continue;
                     }
-                    if let Some(msg) = build_message_for_request(
+                    let rows = build_messages_for_request(
                         path,
                         request,
                         tokens,
@@ -713,9 +713,8 @@ fn parse_jsonl(path: &Path, content: &str, start_offset: usize) -> (Vec<ParsedMe
                         session_default_model.as_deref(),
                         &emit_key,
                         &enrichment,
-                    ) {
-                        messages.push(msg);
-                    }
+                    );
+                    messages.extend(rows);
                 }
             }
         } else {
@@ -732,17 +731,20 @@ fn parse_jsonl(path: &Path, content: &str, start_offset: usize) -> (Vec<ParsedMe
                 let composite_index = flat_line_index
                     .wrapping_mul(1_000_000)
                     .wrapping_add(flat_record_index);
-                if let Some(msg) = build_message(
+                let rows = build_message(
                     path,
                     record,
                     state.get("sessionId").and_then(|v| v.as_str()),
                     session_default_model.as_deref(),
                     composite_index,
                     &enrichment,
-                ) {
-                    messages.push(msg);
-                } else if !shape_matches_any(record) {
-                    log_unknown_shape_once(path, record);
+                );
+                if rows.is_empty() {
+                    if !shape_matches_any(record) {
+                        log_unknown_shape_once(path, record);
+                    }
+                } else {
+                    messages.extend(rows);
                 }
             }
         }
@@ -964,12 +966,20 @@ fn placeholder_for_path(rest: &[serde_json::Value]) -> serde_json::Value {
     }
 }
 
-/// Build a `ParsedMessage` from a materialized request, keying the
-/// deterministic UUID off `emit_key` (typically the request's
-/// `requestId`). This is the reducer-path counterpart to
-/// [`build_message`], which keys off a synthetic line/record index for
-/// flat-line back-compat.
-fn build_message_for_request(
+/// Build the per-turn rows for a materialized request — up to two
+/// `ParsedMessage`s: an optional user row (when `request.message` carries
+/// any prompt text) and the assistant row (when token counts are
+/// present). The deterministic UUIDs are keyed off `emit_key` (typically
+/// the request's `requestId`), with a `:user` suffix on the user-row
+/// key so a future re-emit on the same request never collides with the
+/// assistant row.
+///
+/// Mirrors the `claude_code` per-role emit shape: same `session_id` on
+/// both rows; the assistant row's `parent_uuid` references the user
+/// row's `uuid` so the prompt-classifier's existing pairing logic — and
+/// any downstream aggregation that walks the user→assistant edge —
+/// works without changes.
+fn build_messages_for_request(
     path: &Path,
     request: &serde_json::Value,
     tokens: TokenSet,
@@ -977,16 +987,71 @@ fn build_message_for_request(
     session_default_model: Option<&str>,
     emit_key: &str,
     enrichment: &SessionEnrichment,
-) -> Option<ParsedMessage> {
+) -> Vec<ParsedMessage> {
     let model = extract_model_id(request).or_else(|| session_default_model.map(|s| s.to_string()));
     let timestamp = extract_timestamp(request);
 
     let path_key = path.display().to_string();
     let sid = session_id.unwrap_or(path_key.as_str());
-    let uuid = deterministic_uuid_for_key(sid, &path_key, emit_key);
+    let assistant_uuid = deterministic_uuid_for_key(sid, &path_key, emit_key);
 
-    Some(ParsedMessage {
-        uuid,
+    let mut rows = Vec::with_capacity(2);
+
+    let user_row = extract_user_message_text(request).map(|text| {
+        let user_emit_key = format!("{emit_key}:user");
+        let user_uuid = deterministic_uuid_for_key(sid, &path_key, &user_emit_key);
+        let classification = crate::hooks::classify_prompt_detailed(&text);
+        let (prompt_category, prompt_category_source, prompt_category_confidence) =
+            match classification {
+                Some(c) => (
+                    Some(c.category),
+                    Some(c.source.to_string()),
+                    Some(c.confidence.to_string()),
+                ),
+                None => (None, None, None),
+            };
+        ParsedMessage {
+            uuid: user_uuid,
+            session_id: session_id.map(String::from),
+            timestamp: extract_user_timestamp(request),
+            cwd: enrichment.cwd.clone(),
+            role: "user".to_string(),
+            model: None,
+            input_tokens: 0,
+            output_tokens: 0,
+            cache_creation_tokens: 0,
+            cache_read_tokens: 0,
+            git_branch: enrichment.git_branch.clone(),
+            repo_id: None,
+            provider: "copilot_chat".to_string(),
+            cost_cents: None,
+            session_title: None,
+            parent_uuid: None,
+            user_name: None,
+            machine_name: None,
+            cost_confidence: "n/a".to_string(),
+            pricing_source: None,
+            request_id: None,
+            speed: None,
+            cache_creation_1h_tokens: 0,
+            web_search_requests: 0,
+            prompt_category,
+            prompt_category_source,
+            prompt_category_confidence,
+            tool_names: Vec::new(),
+            tool_use_ids: Vec::new(),
+            tool_files: Vec::new(),
+            tool_outcomes: Vec::new(),
+        }
+    });
+
+    let parent_uuid = user_row.as_ref().map(|u| u.uuid.clone());
+    if let Some(u) = user_row {
+        rows.push(u);
+    }
+
+    rows.push(ParsedMessage {
+        uuid: assistant_uuid,
         session_id: session_id.map(String::from),
         timestamp,
         cwd: enrichment.cwd.clone(),
@@ -1001,7 +1066,7 @@ fn build_message_for_request(
         provider: "copilot_chat".to_string(),
         cost_cents: None,
         session_title: None,
-        parent_uuid: None,
+        parent_uuid,
         user_name: None,
         machine_name: None,
         cost_confidence: "estimated".to_string(),
@@ -1017,7 +1082,9 @@ fn build_message_for_request(
         tool_use_ids: Vec::new(),
         tool_files: Vec::new(),
         tool_outcomes: Vec::new(),
-    })
+    });
+
+    rows
 }
 
 fn deterministic_uuid_for_key(session_id: &str, path: &str, key: &str) -> String {
@@ -1069,17 +1136,20 @@ fn parse_json_document(path: &Path, content: &str) -> (Vec<ParsedMessage>, usize
         if let Some(model) = extract_session_default_model(record) {
             session_default_model = Some(model);
         }
-        if let Some(msg) = build_message(
+        let rows = build_message(
             path,
             record,
             session_id.as_deref(),
             session_default_model.as_deref(),
             index,
             &enrichment,
-        ) {
-            messages.push(msg);
-        } else if !shape_matches_any(record) {
-            log_unknown_shape_once(path, record);
+        );
+        if rows.is_empty() {
+            if !shape_matches_any(record) {
+                log_unknown_shape_once(path, record);
+            }
+        } else {
+            messages.extend(rows);
         }
     }
 
@@ -1114,6 +1184,12 @@ fn flatten_records(value: &serde_json::Value) -> Vec<&serde_json::Value> {
     vec![value]
 }
 
+/// Build per-turn rows for a flat-line / JSON-document record. Returns
+/// the same shape as [`build_messages_for_request`] (up to two rows: an
+/// optional user row, then the assistant row), keyed off `index` for
+/// flat-line back-compat. An empty `Vec` means the record carried no
+/// extractable tokens — the caller checks `shape_matches_any` to decide
+/// whether to log an unknown-shape warning.
 fn build_message(
     path: &Path,
     record: &serde_json::Value,
@@ -1121,8 +1197,10 @@ fn build_message(
     session_default_model: Option<&str>,
     index: usize,
     enrichment: &SessionEnrichment,
-) -> Option<ParsedMessage> {
-    let tokens = extract_tokens(record)?;
+) -> Vec<ParsedMessage> {
+    let Some(tokens) = extract_tokens(record) else {
+        return Vec::new();
+    };
 
     let model = extract_model_id(record).or_else(|| session_default_model.map(|s| s.to_string()));
 
@@ -1130,10 +1208,66 @@ fn build_message(
 
     let path_key = path.display().to_string();
     let sid = session_id.unwrap_or(path_key.as_str());
-    let uuid = deterministic_uuid(sid, &path_key, index);
+    let assistant_uuid = deterministic_uuid(sid, &path_key, index);
 
-    Some(ParsedMessage {
-        uuid,
+    let mut rows = Vec::with_capacity(2);
+
+    let user_row = extract_user_message_text(record).map(|text| {
+        // Use a derived key so the user row's deterministic UUID never
+        // collides with the assistant row's UUID at the same index.
+        let user_uuid = deterministic_uuid_for_key(sid, &path_key, &format!("idx:{index}:user"));
+        let classification = crate::hooks::classify_prompt_detailed(&text);
+        let (prompt_category, prompt_category_source, prompt_category_confidence) =
+            match classification {
+                Some(c) => (
+                    Some(c.category),
+                    Some(c.source.to_string()),
+                    Some(c.confidence.to_string()),
+                ),
+                None => (None, None, None),
+            };
+        ParsedMessage {
+            uuid: user_uuid,
+            session_id: session_id.map(String::from),
+            timestamp: extract_user_timestamp(record),
+            cwd: enrichment.cwd.clone(),
+            role: "user".to_string(),
+            model: None,
+            input_tokens: 0,
+            output_tokens: 0,
+            cache_creation_tokens: 0,
+            cache_read_tokens: 0,
+            git_branch: enrichment.git_branch.clone(),
+            repo_id: None,
+            provider: "copilot_chat".to_string(),
+            cost_cents: None,
+            session_title: None,
+            parent_uuid: None,
+            user_name: None,
+            machine_name: None,
+            cost_confidence: "n/a".to_string(),
+            pricing_source: None,
+            request_id: None,
+            speed: None,
+            cache_creation_1h_tokens: 0,
+            web_search_requests: 0,
+            prompt_category,
+            prompt_category_source,
+            prompt_category_confidence,
+            tool_names: Vec::new(),
+            tool_use_ids: Vec::new(),
+            tool_files: Vec::new(),
+            tool_outcomes: Vec::new(),
+        }
+    });
+
+    let parent_uuid = user_row.as_ref().map(|u| u.uuid.clone());
+    if let Some(u) = user_row {
+        rows.push(u);
+    }
+
+    rows.push(ParsedMessage {
+        uuid: assistant_uuid,
         session_id: session_id.map(String::from),
         timestamp,
         cwd: enrichment.cwd.clone(),
@@ -1148,7 +1282,7 @@ fn build_message(
         provider: "copilot_chat".to_string(),
         cost_cents: None,
         session_title: None,
-        parent_uuid: None,
+        parent_uuid,
         user_name: None,
         machine_name: None,
         cost_confidence: "estimated".to_string(),
@@ -1164,7 +1298,9 @@ fn build_message(
         tool_use_ids: Vec::new(),
         tool_files: Vec::new(),
         tool_outcomes: Vec::new(),
-    })
+    });
+
+    rows
 }
 
 /// Return tokens for the first shape (in §2.3 order) where both input and
@@ -1470,6 +1606,56 @@ fn extract_session_default_model(value: &serde_json::Value) -> Option<String> {
         return Some(strip_copilot_prefix(s).to_string());
     }
     None
+}
+
+/// Extract the user-prompt text for a request — the text the human typed
+/// that produced the assistant turn. Looks at `request.message.text` and
+/// `request.message.parts[*].text` (text-typed parts only, joined in
+/// order). Returns `None` if neither shape carries any text.
+///
+/// Per ADR-0092 §2.3 the canonical user-prompt text lives on
+/// `request.message`, never on `result.metadata.renderedUserMessage`
+/// (which is a *re-rendered* copy with the editor-context envelope
+/// already wrapped around it). The renderer is decorative; the source
+/// is `message`.
+fn extract_user_message_text(request: &serde_json::Value) -> Option<String> {
+    let message = request.get("message")?;
+    if let Some(s) = message.get("text").and_then(|v| v.as_str())
+        && !s.is_empty()
+    {
+        return Some(s.to_string());
+    }
+    if let Some(parts) = message.get("parts").and_then(|v| v.as_array()) {
+        let joined: String = parts
+            .iter()
+            .filter_map(|p| {
+                // A text-typed part carries `{kind: "text", text: "..."}` in
+                // some builds and a bare `{text: "..."}` in others; we
+                // accept either as long as a `text` string exists. Non-text
+                // parts (e.g. file references, ephemeral cache markers)
+                // expose other keys and have no `text`, so they're skipped.
+                p.get("text").and_then(|v| v.as_str())
+            })
+            .collect::<Vec<_>>()
+            .join("");
+        if !joined.is_empty() {
+            return Some(joined);
+        }
+    }
+    None
+}
+
+/// Best-effort timestamp for a user row — prefer the message-side timestamp
+/// (when the prompt was submitted) over the request-level one (when the
+/// assistant response started). Falls back to the request timestamp.
+fn extract_user_timestamp(request: &serde_json::Value) -> DateTime<Utc> {
+    if let Some(v) = request.pointer("/message/timestamp")
+        && let Some(ms) = v.as_i64()
+        && let Some(ts) = DateTime::from_timestamp_millis(ms)
+    {
+        return ts;
+    }
+    extract_timestamp(request)
 }
 
 fn extract_timestamp(record: &serde_json::Value) -> DateTime<Utc> {
@@ -2535,56 +2721,91 @@ mod tests {
         assert_eq!(
             msgs.len(),
             expected.len(),
-            "fixture must yield exactly {} rows (one per completed request, \
-             7 inline-completionTokens + 1 patched-completionTokens)",
+            "fixture must yield exactly {} rows (8 assistant rows + 2 user \
+             rows from the synthetic message.text on the first two requests)",
             expected.len()
         );
 
-        // Match each expected tuple to exactly one emitted row, by
-        // `(output_tokens, input_tokens, model)`. The fixture's
-        // output-token values are all distinct, so this uniquely identifies
-        // the request even though `request_id` itself isn't carried on
-        // `ParsedMessage`.
+        // Each expected entry carries a `role`; assistant entries match by
+        // `(output_tokens, model)` (output values are all distinct), and
+        // user entries match by `(role, prompt_category)` against the
+        // paired user row produced for the same `requestId`. The fixture's
+        // synthetic user prompts are authored so each `prompt_category`
+        // is unique among user rows in the fixture.
         for entry in &expected {
-            let want_input = entry["input_tokens"].as_u64().unwrap();
-            let want_output = entry["output_tokens"].as_u64().unwrap();
-            let want_model = entry["model"].as_str().unwrap();
-            let matches: Vec<_> = msgs
-                .iter()
-                .filter(|m| {
-                    m.input_tokens == want_input
-                        && m.output_tokens == want_output
-                        && m.model.as_deref() == Some(want_model)
-                })
-                .collect();
+            let role = entry["role"].as_str().unwrap();
+            let matches: Vec<_> = match role {
+                "assistant" => {
+                    let want_output = entry["output_tokens"].as_u64().unwrap();
+                    let want_model = entry["model"].as_str().unwrap();
+                    msgs.iter()
+                        .filter(|m| {
+                            m.role == "assistant"
+                                && m.output_tokens == want_output
+                                && m.model.as_deref() == Some(want_model)
+                        })
+                        .collect()
+                }
+                "user" => {
+                    let want_category = entry["prompt_category"].as_str().unwrap();
+                    msgs.iter()
+                        .filter(|m| {
+                            m.role == "user" && m.prompt_category.as_deref() == Some(want_category)
+                        })
+                        .collect()
+                }
+                other => panic!("unknown role in expected.json: {other}"),
+            };
             assert_eq!(
                 matches.len(),
                 1,
-                "expected exactly one row for {} (input={}, output={}, model={}); \
-                 got {}. If this fails against the v4 reducer, the parser \
-                 regressed; if it fails against the v3 per-line parser, that's \
-                 the regression #669 was authored to catch.",
+                "expected exactly one {} row for requestId={}; got {}",
+                role,
                 entry["requestId"].as_str().unwrap(),
-                want_input,
-                want_output,
-                want_model,
                 matches.len()
             );
         }
 
-        // Provider tag is preserved through the reducer. The user-facing
-        // `modelId` on every request in this fixture is `copilot/auto`,
-        // and every record carries `agent.id = "github.copilot.editsAgent"`,
-        // so the §2.4.1 resolver (R1.4 #671) maps each row to the
-        // edits-agent default — `claude-sonnet-4-5`. If a future Copilot
-        // bump flips that default, the resolver table changes in the same
-        // PR as ADR-0092 §2.4.1 and `expected.json` regenerates from the
-        // recaptured fixture.
+        // Provider tag is preserved through the reducer.
         assert!(msgs.iter().all(|m| m.provider == "copilot_chat"));
-        assert!(
-            msgs.iter()
-                .all(|m| m.model.as_deref() == Some("claude-sonnet-4-5"))
+        // Every assistant row maps to the §2.4.1 edits-agent default
+        // (`claude-sonnet-4-5`); user rows carry `model = None`.
+        for m in &msgs {
+            match m.role.as_str() {
+                "assistant" => assert_eq!(m.model.as_deref(), Some("claude-sonnet-4-5")),
+                "user" => assert!(m.model.is_none()),
+                other => panic!("unexpected role: {other}"),
+            }
+        }
+        // #686 acceptance: both row roles materialize, and every assistant
+        // row whose paired request carried `message.text` (or `message.parts`)
+        // points back at its user row via `parent_uuid`.
+        assert!(msgs.iter().any(|m| m.role == "user"));
+        assert!(msgs.iter().any(|m| m.role == "assistant"));
+        let user_uuids: std::collections::HashSet<&str> = msgs
+            .iter()
+            .filter(|m| m.role == "user")
+            .map(|m| m.uuid.as_str())
+            .collect();
+        let assistants_with_parent = msgs
+            .iter()
+            .filter(|m| m.role == "assistant")
+            .filter(|m| m.parent_uuid.is_some())
+            .count();
+        assert_eq!(
+            assistants_with_parent,
+            user_uuids.len(),
+            "every user row in the fixture must have exactly one paired assistant row"
         );
+        for m in msgs.iter().filter(|m| m.role == "assistant") {
+            if let Some(p) = m.parent_uuid.as_deref() {
+                assert!(
+                    user_uuids.contains(p),
+                    "assistant row's parent_uuid {} must reference a user row in the same parse",
+                    p
+                );
+            }
+        }
     }
 
     /// Streaming-truncation variant — the same fixture sliced to drop the
@@ -2602,11 +2823,22 @@ mod tests {
         let path = Path::new("/tmp/budi-fixtures-r1-2/vscode_chat_0_47_0_streaming.jsonl");
         let (msgs, _) = parse_copilot_chat(path, content, 0);
 
+        // 7 assistant rows from the inline-completionTokens requests, plus
+        // 2 user rows from the synthetic `message.text` on the first two
+        // requests (#686). The kind:2 stub for the in-flight final request
+        // carries neither tokens nor a message, so it must not emit at all.
+        let assistant_count = msgs.iter().filter(|m| m.role == "assistant").count();
+        let user_count = msgs.iter().filter(|m| m.role == "user").count();
         assert_eq!(
-            msgs.len(),
-            7,
+            assistant_count, 7,
             "truncated fixture: 7 inline-completionTokens requests must \
-             still emit; the kind:2 stub for the in-flight request must NOT"
+             still emit assistant rows; the kind:2 stub for the in-flight \
+             request must NOT"
+        );
+        assert_eq!(
+            user_count, 2,
+            "truncated fixture: 2 user rows from the synthetic message.text \
+             on the first two requests"
         );
 
         // The patched-only request's completion-token value (39) is the
@@ -2618,9 +2850,13 @@ mod tests {
              wait-for-completion-token contract from R1.1 #668"
         );
 
-        // Every emitted row carries a non-zero output_tokens — none are
-        // synthesized from the bare stub.
-        assert!(msgs.iter().all(|m| m.output_tokens > 0));
+        // Every assistant row carries a non-zero output_tokens — none are
+        // synthesized from the bare stub. User rows always have output=0.
+        assert!(
+            msgs.iter()
+                .filter(|m| m.role == "assistant")
+                .all(|m| m.output_tokens > 0)
+        );
     }
 
     // ---- #681: workspace.json cwd enrichment --------------------------
@@ -2861,5 +3097,138 @@ mod tests {
         assert_eq!(arr.len(), 3);
         assert_eq!(arr[0].get("requestId").and_then(|v| v.as_str()), Some("a"));
         assert_eq!(arr[2].get("requestId").and_then(|v| v.as_str()), Some("c"));
+    }
+
+    // ---- #686: user-role row capture ---------------------------------
+
+    /// Reducer path: a kind:0 snapshot whose request carries `message.text`
+    /// emits both a user row (role=user, tokens=0, prompt content fed to
+    /// the classifier) and an assistant row (role=assistant, current
+    /// behavior). Assistant `parent_uuid` references the user `uuid`.
+    #[test]
+    fn reducer_emits_user_and_assistant_for_message_text() {
+        let content = concat!(
+            r#"{"kind":0,"v":{"sessionId":"s-user","requests":[{"requestId":"r-1","modelId":"copilot/claude-sonnet-4-5","timestamp":1715000000000,"message":{"text":"fix the login bug please","timestamp":1714999999000},"result":{"metadata":{"promptTokens":50,"outputTokens":12}}}]}}"#,
+            "\n",
+        );
+        let path = Path::new("/tmp/budi-fixtures/sess-user-role-1.jsonl");
+        let (msgs, _) = parse_copilot_chat(path, content, 0);
+        assert_eq!(msgs.len(), 2, "one turn ⇒ user + assistant rows");
+        let user = &msgs[0];
+        let assistant = &msgs[1];
+        assert_eq!(user.role, "user");
+        assert_eq!(assistant.role, "assistant");
+        assert_eq!(user.input_tokens, 0);
+        assert_eq!(user.output_tokens, 0);
+        assert_eq!(assistant.input_tokens, 50);
+        assert_eq!(assistant.output_tokens, 12);
+        assert_eq!(user.session_id.as_deref(), Some("s-user"));
+        assert_eq!(assistant.session_id.as_deref(), Some("s-user"));
+        assert_ne!(user.uuid, assistant.uuid);
+        assert_eq!(
+            assistant.parent_uuid.as_deref(),
+            Some(user.uuid.as_str()),
+            "assistant row points back at the paired user row"
+        );
+        // The classifier ran against `message.text` — "fix the login bug" is
+        // a textbook bugfix prompt, so the user row carries a category.
+        assert_eq!(user.prompt_category.as_deref(), Some("bugfix"));
+        assert!(user.prompt_category_source.is_some());
+        assert!(user.prompt_category_confidence.is_some());
+        // User-row provenance: `cost_confidence` is "n/a" (no cost on a
+        // user prompt), `model` stays None, parent_uuid is None.
+        assert_eq!(user.cost_confidence, "n/a");
+        assert!(user.model.is_none());
+        assert!(user.parent_uuid.is_none());
+        // Provider tag is preserved on both rows.
+        assert!(msgs.iter().all(|m| m.provider == "copilot_chat"));
+    }
+
+    /// Reducer path: `message.parts[]` joins text-typed parts in order.
+    /// Non-text parts (file references, ephemeral cache markers) are
+    /// skipped. The joined text feeds the classifier just like the
+    /// `message.text` shape.
+    #[test]
+    fn reducer_user_row_concatenates_message_parts() {
+        let content = concat!(
+            r#"{"kind":0,"v":{"sessionId":"s-parts","requests":[{"requestId":"r-p","modelId":"copilot/gpt-4.1","message":{"parts":[{"text":"add a new "},{"kind":3,"cacheType":"ephemeral"},{"text":"button to the dashboard"}]},"result":{"metadata":{"promptTokens":7,"outputTokens":3}}}]}}"#,
+            "\n",
+        );
+        let path = Path::new("/tmp/budi-fixtures/sess-parts.jsonl");
+        let (msgs, _) = parse_copilot_chat(path, content, 0);
+        assert_eq!(msgs.len(), 2);
+        assert_eq!(msgs[0].role, "user");
+        // `add a new button to the dashboard` classifies as "feature".
+        assert_eq!(msgs[0].prompt_category.as_deref(), Some("feature"));
+    }
+
+    /// Missing or empty `message` ⇒ no user row, but the assistant row
+    /// still emits. Per ticket #686 — interrupted / replayed-via-API
+    /// sessions are rare but legal; the assistant row carries the tokens.
+    #[test]
+    fn reducer_no_user_row_when_message_missing_or_empty() {
+        // No message at all.
+        let content_a = concat!(
+            r#"{"kind":0,"v":{"sessionId":"s-no-msg","requests":[{"requestId":"r","modelId":"copilot/auto","completionTokens":42}]}}"#,
+            "\n",
+        );
+        let path = Path::new("/tmp/budi-fixtures/sess-no-msg.jsonl");
+        let (msgs, _) = parse_copilot_chat(path, content_a, 0);
+        assert_eq!(msgs.len(), 1, "only the assistant row");
+        assert_eq!(msgs[0].role, "assistant");
+
+        // Empty `message.text` — also no user row.
+        let content_b = concat!(
+            r#"{"kind":0,"v":{"sessionId":"s-empty","requests":[{"requestId":"r","modelId":"copilot/auto","completionTokens":42,"message":{"text":""}}]}}"#,
+            "\n",
+        );
+        let path = Path::new("/tmp/budi-fixtures/sess-empty.jsonl");
+        let (msgs, _) = parse_copilot_chat(path, content_b, 0);
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0].role, "assistant");
+        assert!(msgs[0].parent_uuid.is_none());
+    }
+
+    /// Re-emit guard: re-parsing the same file must produce the same
+    /// pair of UUIDs. The `:user` suffix on the user-row emit key keeps
+    /// it stable across ticks, just like the assistant row.
+    #[test]
+    fn user_row_uuid_stable_across_reparse() {
+        let content = concat!(
+            r#"{"kind":2,"k":["requests"],"v":[{"requestId":"stable-pair","modelId":"copilot/x","completionTokens":7,"message":{"text":"how does this work?"}}]}"#,
+            "\n",
+        );
+        let path = Path::new("/tmp/budi-fixtures/sess-stable-pair.jsonl");
+        let (first, _) = parse_copilot_chat(path, content, 0);
+        let (second, _) = parse_copilot_chat(path, content, 0);
+        assert_eq!(first.len(), 2);
+        assert_eq!(second.len(), 2);
+        assert_eq!(first[0].uuid, second[0].uuid);
+        assert_eq!(first[1].uuid, second[1].uuid);
+        assert_ne!(first[0].uuid, first[1].uuid);
+    }
+
+    /// JSON-document path: same shape, same emit. A single
+    /// `{"requests": [...]}` snapshot with `message.text` on a request
+    /// produces user + assistant rows.
+    #[test]
+    fn json_document_emits_user_and_assistant_rows() {
+        let content = r#"{
+            "sessionId": "doc-user-1",
+            "requests": [
+                {
+                    "modelId": "copilot/claude-sonnet-4-5",
+                    "requestId": "r-doc-1",
+                    "message": {"text": "explain the auth flow"},
+                    "result": {"metadata": {"promptTokens": 20, "outputTokens": 4}}
+                }
+            ]
+        }"#;
+        let path = Path::new("/tmp/budi-fixtures/sess-doc-user.json");
+        let (msgs, _) = parse_copilot_chat(path, content, 0);
+        assert_eq!(msgs.len(), 2);
+        assert_eq!(msgs[0].role, "user");
+        assert_eq!(msgs[1].role, "assistant");
+        assert_eq!(msgs[1].parent_uuid.as_deref(), Some(msgs[0].uuid.as_str()));
     }
 }
