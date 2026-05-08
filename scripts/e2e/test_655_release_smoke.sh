@@ -31,7 +31,11 @@
 #       the R1.2 (#669) `vscode_chat_0_47_0.jsonl` fixture into the
 #       daemon's watched workspaceStorage path and assert rows materialize
 #       through parser → tailer → DB. Would have FAILed on the 8.4.0
-#       broken parser; PASSes on the post-#R1.1 reducer.
+#       broken parser; PASSes on the post-#R1.1 reducer. Also pins the
+#       #681 enrichment contract: drop a sibling `workspace.json`
+#       pointing at $ROOT and assert cwd / repo_id / git_branch are
+#       non-null on every materialized row (pre-#681 they were all
+#       NULL because the parser hard-skipped workspace enrichment).
 #   21. Streaming-truncation resilience (8.4.1 R1.5 #672) — append a
 #       kind:2 stub (no completionTokens yet) and assert no row emits;
 #       then append the kind:1 completionTokens patch and assert exactly
@@ -328,11 +332,23 @@ fi
 # file from offset 0 (post-boot materialization is treated as live
 # content, not history — see tailer.rs `backstop_scan`).
 FIXTURE_SESSION_ID="35a2ecbc-1144-4ac2-993e-1ca6850280a3"
-FIXTURE_DEST_DIR="$USER_ROOT/workspaceStorage/r1-5-smoke-hash/chatSessions"
+FIXTURE_HASH_DIR="$USER_ROOT/workspaceStorage/r1-5-smoke-hash"
+FIXTURE_DEST_DIR="$FIXTURE_HASH_DIR/chatSessions"
 FIXTURE_DEST="$FIXTURE_DEST_DIR/$FIXTURE_SESSION_ID.jsonl"
 mkdir -p "$FIXTURE_DEST_DIR"
 cp "$FIXTURE_SRC" "$FIXTURE_DEST"
+# #681: drop a sibling workspace.json so the parser resolves cwd via the
+# workspaceStorage enrichment path and the GitEnricher fills in repo_id
+# from the resulting cwd. Point at $ROOT (the budi repo itself) so the
+# enrichment chain has a real git repo with an origin remote — the only
+# way the post-step assertion below can pin all three fields non-null.
+cat >"$FIXTURE_HASH_DIR/workspace.json" <<JSON
+{
+  "folder": "file://$ROOT"
+}
+JSON
 echo "[e2e] dropped fixture: $FIXTURE_DEST"
+echo "[e2e] dropped workspace.json -> $ROOT"
 
 EXPECTED_COUNT=$(python3 -c "import json; d=json.load(open('$FIXTURE_EXPECTED')); print(len(d))")
 EXPECTED_OUTPUT_TOKENS=$(python3 -c "import json; d=json.load(open('$FIXTURE_EXPECTED')); print(sum(int(r['output_tokens']) for r in d))")
@@ -361,6 +377,30 @@ if [[ "$OUTPUT_TOKENS" != "$EXPECTED_OUTPUT_TOKENS" ]]; then
   exit 1
 fi
 echo "[e2e] OK: SUM(output_tokens) for session $FIXTURE_SESSION_ID == $OUTPUT_TOKENS"
+
+# #681 acceptance: workspace.json -> cwd, repo_id, git_branch on every
+# materialized row. Pre-#681 every copilot_chat row landed with all three
+# NULL because the parser hard-skipped workspace enrichment (cwd: None
+# in build_message[_for_request]); the GitEnricher then no-op'd because
+# `cwd is None`. With the workspace.json sibling pointing at $ROOT (a
+# real git repo), the parser resolves cwd, the parser-side HEAD read
+# resolves git_branch, and the GitEnricher resolves repo_id from cwd.
+NULL_CWD=$(sqlite3 "$DB" \
+  "SELECT COUNT(*) FROM messages WHERE provider='copilot_chat' AND session_id='$FIXTURE_SESSION_ID' AND cwd IS NULL;")
+NULL_REPO=$(sqlite3 "$DB" \
+  "SELECT COUNT(*) FROM messages WHERE provider='copilot_chat' AND session_id='$FIXTURE_SESSION_ID' AND repo_id IS NULL;")
+NULL_BRANCH=$(sqlite3 "$DB" \
+  "SELECT COUNT(*) FROM messages WHERE provider='copilot_chat' AND session_id='$FIXTURE_SESSION_ID' AND git_branch IS NULL;")
+if [[ "$NULL_CWD" != "0" || "$NULL_REPO" != "0" || "$NULL_BRANCH" != "0" ]]; then
+  echo "[e2e] FAIL: copilot_chat cwd/repo_id/git_branch enrichment regressed (#681)" >&2
+  echo "  rows with NULL cwd:        $NULL_CWD (expected 0)" >&2
+  echo "  rows with NULL repo_id:    $NULL_REPO (expected 0)" >&2
+  echo "  rows with NULL git_branch: $NULL_BRANCH (expected 0)" >&2
+  sqlite3 "$DB" \
+    "SELECT id, cwd, repo_id, git_branch FROM messages WHERE provider='copilot_chat' AND session_id='$FIXTURE_SESSION_ID' LIMIT 5;" >&2 || true
+  exit 1
+fi
+echo "[e2e] OK: cwd / repo_id / git_branch all non-null on $EXPECTED_COUNT row(s) (#681)"
 
 # ---------------------------------------------------------------------------
 # Step 21 — streaming-truncation resilience (8.4.1 R1.5, #672).
