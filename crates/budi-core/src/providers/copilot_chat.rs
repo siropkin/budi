@@ -735,7 +735,7 @@ fn looks_absolute(s: &str) -> bool {
 /// `/` or `\` so the result is identical regardless of the host
 /// platform. Returns `"/"` for a root-level file like `"/foo"`.
 fn parent_dir_string(path: &str) -> Option<String> {
-    let last = path.rfind(|c: char| c == '/' || c == '\\')?;
+    let last = path.rfind(['/', '\\'])?;
     if last == 0 {
         return Some("/".to_string());
     }
