@@ -333,6 +333,7 @@ fn parse_usage_event(
         tool_use_ids: Vec::new(),
         tool_files: Vec::new(),
         tool_outcomes: Vec::new(),
+        cwd_source: None,
     })
 }
 

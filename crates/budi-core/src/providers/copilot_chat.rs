@@ -595,14 +595,151 @@ fn git_branch_for_cwd(cwd: &str) -> Option<String> {
 struct SessionEnrichment {
     cwd: Option<String>,
     git_branch: Option<String>,
+    /// Provenance label for `cwd` when it came from a fallback signal
+    /// rather than the authoritative `workspace.json`. `Some` only for
+    /// the emptyWindow editor-context hint path (#688). Workspace-anchored
+    /// cwds and absent cwds both leave this `None`.
+    cwd_source: Option<&'static str>,
 }
 
 impl SessionEnrichment {
     fn for_path(session_path: &Path) -> Self {
         let cwd = workspace_cwd_for_session_path(session_path);
         let git_branch = cwd.as_deref().and_then(git_branch_for_cwd);
-        Self { cwd, git_branch }
+        Self {
+            cwd,
+            git_branch,
+            cwd_source: None,
+        }
     }
+}
+
+/// `result.metadata.renderedUserMessage` `cwd_source` label for the
+/// emptyWindow editor-context hint path (#688). Mirrors the constant
+/// shape `<provider>:<signal>` used elsewhere in the analytics
+/// vocabulary.
+const CWD_SOURCE_EDITOR_CONTEXT_HINT: &str = "copilot_chat:editor_context_hint";
+
+/// True iff the session lives under `globalStorage/emptyWindowChatSessions/`.
+/// `workspace_cwd_for_session_path` already short-circuits this case to
+/// `None`, but the editor-context hint fallback only applies *here* —
+/// workspace-anchored sessions with a transiently-missing `workspace.json`
+/// must not silently drift onto the hint path.
+fn is_empty_window_session_path(session_path: &Path) -> bool {
+    session_path.ancestors().any(|a| {
+        a.file_name()
+            .and_then(|s| s.to_str())
+            .is_some_and(|n| n.eq_ignore_ascii_case("emptyWindowChatSessions"))
+    })
+}
+
+/// Scan the materialized session state's `requests[*].result.metadata
+/// .renderedUserMessage[*].text` for the first `<editorContext>` block
+/// and return its `parent` directory as a cwd hint. The block's
+/// canonical shape (#688):
+///
+/// ```text
+/// <editorContext>
+/// The user's current file is /Users/.../foo.md. The current selection is from line 9 to line 9.
+/// </editorContext>
+/// ```
+///
+/// Only absolute paths are accepted — relative paths cannot be resolved
+/// without a workspace root and we have none in the emptyWindow case.
+/// Returns the `parent()` of the file, not the file itself: the cwd
+/// dimension is "what folder were they in", not "what file did they
+/// have open".
+fn editor_context_cwd_hint_from_state(state: &serde_json::Value) -> Option<String> {
+    let requests = state.get("requests").and_then(|v| v.as_array())?;
+    for request in requests {
+        let arr = request
+            .pointer("/result/metadata/renderedUserMessage")
+            .and_then(|v| v.as_array());
+        let Some(arr) = arr else {
+            continue;
+        };
+        for item in arr {
+            let Some(text) = item.get("text").and_then(|v| v.as_str()) else {
+                continue;
+            };
+            if let Some(parent) = parent_dir_from_editor_context_text(text) {
+                return Some(parent);
+            }
+        }
+    }
+    None
+}
+
+/// Extract the parent directory of `<editorContext>`'s "current file"
+/// path from a single `renderedUserMessage` text. Returns `None` if no
+/// `<editorContext>` block is present, no path was extractable, or the
+/// path was not absolute.
+fn parent_dir_from_editor_context_text(text: &str) -> Option<String> {
+    const OPEN: &str = "<editorContext>";
+    const CLOSE: &str = "</editorContext>";
+    const PREFIX: &str = "The user's current file is ";
+
+    let open_at = text.find(OPEN)?;
+    let after_open = &text[open_at + OPEN.len()..];
+    let block_end = after_open.find(CLOSE).unwrap_or(after_open.len());
+    let block = &after_open[..block_end];
+
+    let p_start = block.find(PREFIX)?;
+    let after_prefix = &block[p_start + PREFIX.len()..];
+
+    // The path runs to the next sentence terminator (`. ` followed by a
+    // capitalised word, in practice "The current selection is...") or to
+    // the end of the block. Splitting on `". "` is more robust than a
+    // bare `.` because absolute file paths legitimately contain `.`s
+    // (extensions, dotted user-dirs like `ivan.seredkin`).
+    let raw_path = match after_prefix.find(". ") {
+        Some(end) => &after_prefix[..end],
+        None => after_prefix.trim_end_matches('.').trim_end(),
+    };
+    let raw_path = raw_path.trim();
+    if raw_path.is_empty() {
+        return None;
+    }
+
+    // The editor-context path is whatever shape VS Code wrote on the user's
+    // machine — POSIX-style on macOS/Linux, drive-letter or UNC on Windows.
+    // `Path::is_absolute()` is platform-conditional (returns false for
+    // `/Users/...` when the test runs on Windows CI), so we recognise the
+    // three shapes explicitly and parse the parent off the literal string
+    // rather than via `Path::parent()`.
+    if !looks_absolute(raw_path) {
+        return None;
+    }
+    parent_dir_string(raw_path)
+}
+
+/// Cross-platform "looks absolute" check that mirrors what VS Code may
+/// write into `<editorContext>` regardless of which OS this code runs
+/// on:
+///
+/// - POSIX: leading `/`.
+/// - Windows UNC: leading `\\`.
+/// - Windows drive: `<letter>:` followed by `\` or `/`.
+fn looks_absolute(s: &str) -> bool {
+    if s.starts_with('/') || s.starts_with("\\\\") {
+        return true;
+    }
+    let bytes = s.as_bytes();
+    bytes.len() >= 3
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && (bytes[2] == b'\\' || bytes[2] == b'/')
+}
+
+/// Parent-directory of an absolute path string, splitting on the last
+/// `/` or `\` so the result is identical regardless of the host
+/// platform. Returns `"/"` for a root-level file like `"/foo"`.
+fn parent_dir_string(path: &str) -> Option<String> {
+    let last = path.rfind(['/', '\\'])?;
+    if last == 0 {
+        return Some("/".to_string());
+    }
+    Some(path[..last].to_string())
 }
 
 fn parse_jsonl(path: &Path, content: &str, start_offset: usize) -> (Vec<ParsedMessage>, usize) {
@@ -641,7 +778,14 @@ fn parse_jsonl(path: &Path, content: &str, start_offset: usize) -> (Vec<ParsedMe
     // every emitted row — `parse_jsonl` corresponds 1:1 to a session, so
     // re-reading `workspace.json` per emit would be wasteful (per #681
     // "cwd should be cached per session").
-    let enrichment = SessionEnrichment::for_path(path);
+    let mut enrichment = SessionEnrichment::for_path(path);
+    // #688: emptyWindow sessions have no `workspace.json`. Defer the
+    // editor-context hint scan until after the mutation log has been
+    // replayed below — the hint reads off `result.metadata
+    // .renderedUserMessage[]`, which only materialises once kind:0/1/2
+    // patches are applied to `state`. We back-fill emitted rows after
+    // the loop rather than racing emit order against patch order.
+    let is_empty_window = is_empty_window_session_path(path);
     let mut session_default_model: Option<String> = None;
     let mut messages = Vec::new();
     // Tracks emit keys (typically `requestId`) so a request that
@@ -746,6 +890,38 @@ fn parse_jsonl(path: &Path, content: &str, start_offset: usize) -> (Vec<ParsedMe
                 } else {
                     messages.extend(rows);
                 }
+            }
+        }
+    }
+
+    // #688: emptyWindow editor-context cwd hint back-fill.
+    //
+    // Workspace-anchored sessions are already fully enriched via
+    // `workspace.json`; this fallback only applies to
+    // `globalStorage/emptyWindowChatSessions/*` where there is no
+    // workspace. We scan the *materialised* `state.requests[*].result
+    // .metadata.renderedUserMessage[*].text` for the first
+    // `<editorContext>` block and surface its file's parent directory as
+    // a hint cwd, tagging every row with `cwd_source =
+    // copilot_chat:editor_context_hint` so analytics can distinguish hint
+    // cwds from authoritative ones.
+    if is_empty_window
+        && enrichment.cwd.is_none()
+        && let Some(hint_cwd) = editor_context_cwd_hint_from_state(&state)
+    {
+        let hint_branch = git_branch_for_cwd(&hint_cwd);
+        enrichment.cwd = Some(hint_cwd.clone());
+        enrichment.git_branch = hint_branch.clone();
+        enrichment.cwd_source = Some(CWD_SOURCE_EDITOR_CONTEXT_HINT);
+        for msg in &mut messages {
+            if msg.cwd.is_none() {
+                msg.cwd = Some(hint_cwd.clone());
+            }
+            if msg.git_branch.is_none() {
+                msg.git_branch.clone_from(&hint_branch);
+            }
+            if msg.cwd_source.is_none() {
+                msg.cwd_source = Some(CWD_SOURCE_EDITOR_CONTEXT_HINT.to_string());
             }
         }
     }
@@ -1043,6 +1219,7 @@ fn build_messages_for_request(
             tool_use_ids: Vec::new(),
             tool_files: Vec::new(),
             tool_outcomes: Vec::new(),
+            cwd_source: enrichment.cwd_source.map(str::to_string),
         }
     });
 
@@ -1083,6 +1260,7 @@ fn build_messages_for_request(
         tool_use_ids: tool_data.ids,
         tool_files: tool_data.files,
         tool_outcomes: Vec::new(),
+        cwd_source: enrichment.cwd_source.map(str::to_string),
     });
 
     rows
@@ -1260,6 +1438,7 @@ fn build_message(
             tool_use_ids: Vec::new(),
             tool_files: Vec::new(),
             tool_outcomes: Vec::new(),
+            cwd_source: enrichment.cwd_source.map(str::to_string),
         }
     });
 
@@ -1300,6 +1479,7 @@ fn build_message(
         tool_use_ids: tool_data.ids,
         tool_files: tool_data.files,
         tool_outcomes: Vec::new(),
+        cwd_source: enrichment.cwd_source.map(str::to_string),
     });
 
     rows
@@ -3465,6 +3645,204 @@ mod tests {
              workspace.json (got: {:?})",
             msgs.iter().map(|m| m.cwd.as_deref()).collect::<Vec<_>>()
         );
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    // ---- #688: emptyWindow editor-context cwd hint -------------------
+
+    /// Pure-text extractor: the canonical sentence shape from
+    /// `result.metadata.renderedUserMessage[*].text` resolves to the
+    /// file's parent directory. Pins the format documented on #688.
+    #[test]
+    fn editor_context_text_extracts_parent_dir() {
+        let body = "<editorContext>\n\
+                    The user's current file is /Users/ivan.seredkin/Desktop/CP4X-GQMY-GH9C.md. \
+                    The current selection is from line 9 to line 9.\n\
+                    </editorContext>";
+        assert_eq!(
+            parent_dir_from_editor_context_text(body).as_deref(),
+            Some("/Users/ivan.seredkin/Desktop")
+        );
+    }
+
+    /// Path with spaces — the parent dir is preserved verbatim. The
+    /// editor-context block carries a literal local path, not a URI, so
+    /// no percent-decoding is needed (unlike the workspace.json `folder`
+    /// field which does require it).
+    #[test]
+    fn editor_context_text_handles_spaces_and_dots() {
+        let body = "<editorContext>\n\
+                    The user's current file is /Users/me/My Project/src/file.v2.rs. \
+                    The current selection is from line 1 to line 1.\n\
+                    </editorContext>";
+        assert_eq!(
+            parent_dir_from_editor_context_text(body).as_deref(),
+            Some("/Users/me/My Project/src")
+        );
+    }
+
+    /// Relative path — skipped. We have no workspace root in the
+    /// emptyWindow case, so a relative path cannot be turned into a
+    /// concrete cwd hint.
+    #[test]
+    fn editor_context_text_rejects_relative_path() {
+        let body = "<editorContext>\n\
+                    The user's current file is src/main.rs. \
+                    The current selection is from line 1 to line 1.\n\
+                    </editorContext>";
+        assert!(parent_dir_from_editor_context_text(body).is_none());
+    }
+
+    /// No `<editorContext>` block — None. Sessions sent before editor
+    /// focus is established legitimately omit the block.
+    #[test]
+    fn editor_context_text_absent_returns_none() {
+        let body = "<workspace_info>There is no workspace currently open.</workspace_info>";
+        assert!(parent_dir_from_editor_context_text(body).is_none());
+    }
+
+    /// End-to-end: an emptyWindow session whose first request carries an
+    /// `<editorContext>` block in `result.metadata.renderedUserMessage`
+    /// emits rows with `cwd` populated from the file's parent dir and a
+    /// `cwd_source = copilot_chat:editor_context_hint` marker so
+    /// downstream analytics can distinguish the hint from an
+    /// authoritative `workspace.json` cwd.
+    #[test]
+    fn empty_window_session_uses_editor_context_hint() {
+        let tmp = std::env::temp_dir().join("budi-copilot-chat-empty-window-hint");
+        let _ = std::fs::remove_dir_all(&tmp);
+        let empty_dir =
+            tmp.join("Library/Application Support/Code/User/globalStorage/emptyWindowChatSessions");
+        std::fs::create_dir_all(&empty_dir).unwrap();
+        let session_path = empty_dir.join("bda343f1.jsonl");
+
+        // Synthetic but shape-faithful kind:0 snapshot — one request with
+        // tokens (so it emits) and an editorContext-bearing
+        // renderedUserMessage entry.
+        let line = serde_json::json!({
+            "kind": 0,
+            "v": {
+                "sessionId": "empty-1",
+                "requests": [{
+                    "requestId": "r-1",
+                    "modelId": "copilot/gpt-4.1",
+                    "timestamp": 1715000000000_u64,
+                    "message": {"text": "summarise this file"},
+                    "result": {
+                        "metadata": {
+                            "promptTokens": 10,
+                            "outputTokens": 5,
+                            "renderedUserMessage": [{
+                                "text": "<editorContext>\nThe user's current file is /Users/ivan.seredkin/Desktop/CP4X-GQMY-GH9C.md. The current selection is from line 9 to line 9.\n</editorContext>\n<workspace_info>\nThere is no workspace currently open.\n</workspace_info>"
+                            }]
+                        }
+                    }
+                }]
+            }
+        })
+        .to_string();
+        std::fs::write(&session_path, format!("{line}\n")).unwrap();
+
+        let (msgs, _) = parse_copilot_chat(&session_path, &format!("{line}\n"), 0);
+        assert!(
+            !msgs.is_empty(),
+            "session must emit at least the assistant row"
+        );
+        for msg in &msgs {
+            assert_eq!(
+                msg.cwd.as_deref(),
+                Some("/Users/ivan.seredkin/Desktop"),
+                "every row carries the editor-context hint cwd (got role={:?}, cwd={:?})",
+                msg.role,
+                msg.cwd
+            );
+            assert_eq!(
+                msg.cwd_source.as_deref(),
+                Some(CWD_SOURCE_EDITOR_CONTEXT_HINT),
+                "every row carries the hint cwd_source marker"
+            );
+        }
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// Workspace-anchored sessions are unaffected: when `workspace.json`
+    /// resolves the cwd, the editor-context hint must NOT override it
+    /// and `cwd_source` stays `None` so analytics see the row as
+    /// authoritative. Pins the "primary path of #681 is unaffected"
+    /// acceptance criterion.
+    #[test]
+    fn workspace_anchored_session_does_not_apply_editor_context_hint() {
+        let tmp = std::env::temp_dir().join("budi-copilot-chat-ws-anchored-no-hint");
+        let _ = std::fs::remove_dir_all(&tmp);
+        let hash_dir = tmp.join("workspaceStorage/abc-hash");
+        let chat_dir = hash_dir.join("chatSessions");
+        std::fs::create_dir_all(&chat_dir).unwrap();
+        std::fs::write(
+            hash_dir.join("workspace.json"),
+            r#"{"folder":"file:///Users/me/repos/proj"}"#,
+        )
+        .unwrap();
+        let session_path = chat_dir.join("sess.jsonl");
+
+        // Even though the renderedUserMessage carries an editorContext
+        // block pointing somewhere else, the workspace.json folder wins
+        // and cwd_source stays None.
+        let line = serde_json::json!({
+            "kind": 0,
+            "v": {
+                "sessionId": "ws-1",
+                "requests": [{
+                    "requestId": "r-1",
+                    "modelId": "copilot/gpt-4.1",
+                    "timestamp": 1715000000000_u64,
+                    "result": {
+                        "metadata": {
+                            "promptTokens": 10,
+                            "outputTokens": 5,
+                            "renderedUserMessage": [{
+                                "text": "<editorContext>\nThe user's current file is /Users/ivan.seredkin/Desktop/foo.md. The current selection is from line 1 to line 1.\n</editorContext>"
+                            }]
+                        }
+                    }
+                }]
+            }
+        })
+        .to_string();
+        std::fs::write(&session_path, format!("{line}\n")).unwrap();
+
+        let (msgs, _) = parse_copilot_chat(&session_path, &format!("{line}\n"), 0);
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0].cwd.as_deref(), Some("/Users/me/repos/proj"));
+        assert!(
+            msgs[0].cwd_source.is_none(),
+            "workspace-anchored cwd is authoritative; cwd_source must stay None"
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// emptyWindow session with no `<editorContext>` block in any
+    /// renderedUserMessage — cwd stays None and cwd_source stays None
+    /// (no spurious hint). Mirrors the existing #681 emptyWindow test
+    /// but goes further by also asserting the new tag.
+    #[test]
+    fn empty_window_session_without_editor_context_leaves_cwd_none() {
+        let tmp = std::env::temp_dir().join("budi-copilot-chat-empty-window-no-hint");
+        let _ = std::fs::remove_dir_all(&tmp);
+        let empty_dir =
+            tmp.join("Library/Application Support/Code/User/globalStorage/emptyWindowChatSessions");
+        std::fs::create_dir_all(&empty_dir).unwrap();
+        let session_path = empty_dir.join("e22dad3b.jsonl");
+
+        let line = r#"{"kind":2,"v":[{"requestId":"r-1","modelId":"copilot/gpt-4.1","completionTokens":42,"result":{"metadata":{"resolvedModel":"x"}}}]}"#;
+        std::fs::write(&session_path, format!("{line}\n")).unwrap();
+
+        let (msgs, _) = parse_copilot_chat(&session_path, &format!("{line}\n"), 0);
+        assert_eq!(msgs.len(), 1);
+        assert!(msgs[0].cwd.is_none());
+        assert!(msgs[0].cwd_source.is_none());
 
         let _ = std::fs::remove_dir_all(&tmp);
     }

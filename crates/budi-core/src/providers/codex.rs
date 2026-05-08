@@ -310,6 +310,7 @@ fn parse_token_count(
         tool_use_ids: Vec::new(),
         tool_files: Vec::new(),
         tool_outcomes: Vec::new(),
+        cwd_source: None,
     })
 }
 
