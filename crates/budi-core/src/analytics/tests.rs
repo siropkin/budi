@@ -5382,6 +5382,192 @@ fn health_cursor_multi_reply_session_not_false_red() {
     );
 }
 
+// --- #691: session_msg_cost denominator = user-prompt count -----------------
+
+fn user_prompt_msg(uuid: &str, session_id: &str, idx: u64, provider: &str) -> ParsedMessage {
+    let ts = chrono::NaiveDateTime::parse_from_str(
+        &format!("2026-03-14 10:{idx:02}:00"),
+        "%Y-%m-%d %H:%M:%S",
+    )
+    .unwrap()
+    .and_utc();
+    ParsedMessage {
+        uuid: uuid.to_string(),
+        session_id: Some(session_id.to_string()),
+        timestamp: ts,
+        role: "user".to_string(),
+        provider: provider.to_string(),
+        cost_cents: None,
+        cost_confidence: "exact".to_string(),
+        ..Default::default()
+    }
+}
+
+fn assistant_msg_with_request(
+    uuid: &str,
+    session_id: &str,
+    idx: u64,
+    provider: &str,
+    request_id: Option<&str>,
+    cost: f64,
+) -> ParsedMessage {
+    let mut m = health_msg(uuid, session_id, idx, 100, 900, cost);
+    m.provider = provider.to_string();
+    m.request_id = request_id.map(|s| s.to_string());
+    m
+}
+
+#[test]
+fn health_user_prompt_count_single_turn() {
+    // One user + one assistant → denominator stays at 1, avg == session_cost.
+    let mut conn = test_db();
+    conn.execute(
+        "INSERT INTO sessions (id, provider, started_at) VALUES ('s1', 'claude_code', '2026-03-14')",
+        [],
+    ).unwrap();
+
+    let msgs = vec![
+        user_prompt_msg("u1", "s1", 0, "claude_code"),
+        assistant_msg_with_request("a1", "s1", 1, "claude_code", Some("req-1"), 7.5),
+    ];
+    ingest_messages(&mut conn, &msgs, None).unwrap();
+
+    let h = session_health(&conn, Some("s1")).unwrap();
+    assert_eq!(h.user_prompt_count, 1);
+    assert_eq!(h.total_cost_cents, 7.5);
+    let avg = h.total_cost_cents / h.user_prompt_count as f64;
+    assert!((avg - 7.5).abs() < f64::EPSILON);
+}
+
+#[test]
+fn health_user_prompt_count_subagent_fanout_stays_one() {
+    // One user prompt → main assistant + 2 subagent assistants. Denominator
+    // must still be 1 even though dedup-by-request_id keeps three rows.
+    let mut conn = test_db();
+    conn.execute(
+        "INSERT INTO sessions (id, provider, started_at) VALUES ('s1', 'claude_code', '2026-03-14')",
+        [],
+    ).unwrap();
+
+    let msgs = vec![
+        user_prompt_msg("u1", "s1", 0, "claude_code"),
+        assistant_msg_with_request("a-main", "s1", 1, "claude_code", Some("req-main"), 4.0),
+        assistant_msg_with_request("a-sub-1", "s1", 2, "claude_code", Some("req-sub-1"), 3.0),
+        assistant_msg_with_request("a-sub-2", "s1", 3, "claude_code", Some("req-sub-2"), 5.0),
+    ];
+    ingest_messages(&mut conn, &msgs, None).unwrap();
+
+    let h = session_health(&conn, Some("s1")).unwrap();
+    assert_eq!(h.user_prompt_count, 1);
+    assert_eq!(h.total_cost_cents, 12.0);
+    let avg = h.total_cost_cents / h.user_prompt_count as f64;
+    assert!((avg - 12.0).abs() < f64::EPSILON);
+}
+
+#[test]
+fn health_user_prompt_count_zero_cost_assistant_does_not_inflate_denominator() {
+    // 2 user prompts + 2 assistants where one is unpriced (cost_cents = 0).
+    // Denominator = 2 (user count, untouched by zero-cost row), numerator =
+    // sum of priced rows only → avg = session_cost / 2.
+    let mut conn = test_db();
+    conn.execute(
+        "INSERT INTO sessions (id, provider, started_at) VALUES ('s1', 'claude_code', '2026-03-14')",
+        [],
+    ).unwrap();
+
+    let msgs = vec![
+        user_prompt_msg("u1", "s1", 0, "claude_code"),
+        assistant_msg_with_request("a1", "s1", 1, "claude_code", Some("req-1"), 6.0),
+        user_prompt_msg("u2", "s1", 2, "claude_code"),
+        assistant_msg_with_request("a2", "s1", 3, "claude_code", Some("req-2"), 0.0),
+    ];
+    ingest_messages(&mut conn, &msgs, None).unwrap();
+
+    let h = session_health(&conn, Some("s1")).unwrap();
+    assert_eq!(h.user_prompt_count, 2);
+    assert_eq!(h.total_cost_cents, 6.0);
+    let avg = h.total_cost_cents / h.user_prompt_count as f64;
+    assert!((avg - 3.0).abs() < f64::EPSILON);
+}
+
+#[test]
+fn health_user_prompt_count_empty_user_returns_zero_for_priced_provider() {
+    // Provider that captures user rows but the session has none yet (e.g.
+    // assistant rows arrived first, or it's a degenerate sample). Denominator
+    // is 0 → queries.rs returns None → statusline `message` slot is absent.
+    let mut conn = test_db();
+    conn.execute(
+        "INSERT INTO sessions (id, provider, started_at) VALUES ('s1', 'claude_code', '2026-03-14')",
+        [],
+    ).unwrap();
+
+    let msgs = vec![assistant_msg_with_request(
+        "a1",
+        "s1",
+        0,
+        "claude_code",
+        Some("req-1"),
+        5.0,
+    )];
+    ingest_messages(&mut conn, &msgs, None).unwrap();
+
+    let h = session_health(&conn, Some("s1")).unwrap();
+    assert_eq!(h.user_prompt_count, 0);
+}
+
+#[test]
+fn health_user_prompt_count_copilot_chat_fallback_uses_priced_distinct_requests() {
+    // Pre-#686 copilot_chat session: zero user rows, three assistant rows
+    // where one is unpriced (cost_cents = 0). The fallback counts DISTINCT
+    // request_id WHERE cost_cents > 0, so the unpriced row is excluded from
+    // the denominator and contributes 0 to the numerator. Expected:
+    // denominator = 2, avg = sum_cost / 2 (matches ticket #691 acceptance).
+    let mut conn = test_db();
+    conn.execute(
+        "INSERT INTO sessions (id, provider, started_at) VALUES ('s1', 'copilot_chat', '2026-03-14')",
+        [],
+    ).unwrap();
+
+    let msgs = vec![
+        assistant_msg_with_request("a1", "s1", 0, "copilot_chat", Some("req-A"), 3.0),
+        assistant_msg_with_request("a2", "s1", 1, "copilot_chat", Some("req-B"), 0.0),
+        assistant_msg_with_request("a3", "s1", 2, "copilot_chat", Some("req-C"), 5.0),
+    ];
+    ingest_messages(&mut conn, &msgs, None).unwrap();
+
+    let h = session_health(&conn, Some("s1")).unwrap();
+    assert_eq!(h.user_prompt_count, 2);
+    assert_eq!(h.total_cost_cents, 8.0);
+    let avg = h.total_cost_cents / h.user_prompt_count as f64;
+    assert!((avg - 4.0).abs() < f64::EPSILON);
+}
+
+#[test]
+fn health_user_prompt_count_copilot_chat_user_rows_take_precedence() {
+    // Once #686 lands, copilot_chat sessions capture user rows and the
+    // user-row path wins — fallback is silently inert.
+    let mut conn = test_db();
+    conn.execute(
+        "INSERT INTO sessions (id, provider, started_at) VALUES ('s1', 'copilot_chat', '2026-03-14')",
+        [],
+    ).unwrap();
+
+    let msgs = vec![
+        user_prompt_msg("u1", "s1", 0, "copilot_chat"),
+        user_prompt_msg("u2", "s1", 1, "copilot_chat"),
+        user_prompt_msg("u3", "s1", 2, "copilot_chat"),
+        // Three assistants; one shares a request_id with another. If the
+        // fallback ran it would return 2; user-row path returns 3.
+        assistant_msg_with_request("a1", "s1", 3, "copilot_chat", Some("req-A"), 2.0),
+        assistant_msg_with_request("a2", "s1", 4, "copilot_chat", Some("req-A"), 1.0),
+        assistant_msg_with_request("a3", "s1", 5, "copilot_chat", Some("req-B"), 6.0),
+    ];
+    ingest_messages(&mut conn, &msgs, None).unwrap();
+
+    let h = session_health(&conn, Some("s1")).unwrap();
+    assert_eq!(h.user_prompt_count, 3);
+}
+
 #[test]
 fn health_no_sessions_returns_green() {
     let conn = test_db();

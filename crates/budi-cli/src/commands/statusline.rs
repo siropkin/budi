@@ -892,6 +892,26 @@ mod tests {
     }
 
     #[test]
+    fn build_slot_values_message_matches_session_cost_for_single_user_turn_with_fanout() {
+        // #691: a session with one user prompt that fanned out into multiple
+        // assistant calls should render `message` ≈ `session` because the
+        // user-typed prompt count (1) is the denominator. Pre-#691 the
+        // denominator was every assistant row (3 here) and the slot read low.
+        // The daemon emits session_msg_cost in cents (=$6.23 * 100 / 1 prompt
+        // = 623 cents); the slot divides by 100 for dollars.
+        let data = json!({
+            "cost_1d": 10.0,
+            "cost_7d": 50.0,
+            "cost_30d": 200.0,
+            "session_cost": 6.23,
+            "session_msg_cost": 623.0,
+        });
+        let vals = build_slot_values(&data);
+        assert_eq!(vals.get("session").unwrap(), "$6.23");
+        assert_eq!(vals.get("message").unwrap(), "$6.23");
+    }
+
+    #[test]
     fn build_slot_values_message_absent_without_session_msg_cost() {
         let data = json!({
             "cost_1d": 1.0,
