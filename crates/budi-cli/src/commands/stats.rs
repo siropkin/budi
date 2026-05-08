@@ -402,7 +402,14 @@ pub fn cmd_stats(
     }
 
     if files {
-        return cmd_stats_files(&client, period, limit, label_width, json_output);
+        return cmd_stats_files(
+            &client,
+            period,
+            provider.as_deref(),
+            limit,
+            label_width,
+            json_output,
+        );
     }
 
     if let Some(ref ac) = activity {
@@ -410,7 +417,14 @@ pub fn cmd_stats(
     }
 
     if activities {
-        return cmd_stats_activities(&client, period, limit, label_width, json_output);
+        return cmd_stats_activities(
+            &client,
+            period,
+            provider.as_deref(),
+            limit,
+            label_width,
+            json_output,
+        );
     }
 
     if let Some(ref tk) = ticket {
@@ -418,7 +432,14 @@ pub fn cmd_stats(
     }
 
     if tickets {
-        return cmd_stats_tickets(&client, period, limit, label_width, json_output);
+        return cmd_stats_tickets(
+            &client,
+            period,
+            provider.as_deref(),
+            limit,
+            label_width,
+            json_output,
+        );
     }
 
     if let Some(ref br) = branch {
@@ -426,13 +447,21 @@ pub fn cmd_stats(
     }
 
     if branches {
-        return cmd_stats_branches(&client, period, limit, label_width, json_output);
+        return cmd_stats_branches(
+            &client,
+            period,
+            provider.as_deref(),
+            limit,
+            label_width,
+            json_output,
+        );
     }
 
     if models {
         return cmd_stats_models(
             &client,
             period,
+            provider.as_deref(),
             limit,
             label_width,
             include_pending,
@@ -444,6 +473,7 @@ pub fn cmd_stats(
         return cmd_stats_projects(
             &client,
             period,
+            provider.as_deref(),
             limit,
             label_width,
             include_non_repo,
@@ -796,13 +826,14 @@ fn cmd_stats_summary(
 fn cmd_stats_projects(
     client: &DaemonClient,
     period: StatsPeriod,
+    provider: Option<&str>,
     limit: usize,
     label_width: usize,
     include_non_repo: bool,
     json_output: bool,
 ) -> Result<()> {
     let (since, until) = period_date_range(period);
-    let page = client.projects(since.as_deref(), until.as_deref(), limit)?;
+    let page = client.projects(since.as_deref(), until.as_deref(), provider, limit)?;
     let non_repo_rows = if include_non_repo {
         // #442: fetch per-cwd-basename detail for the non-repo bucket so
         // operators who want the pre-8.3 folder-name view can still get
@@ -907,12 +938,13 @@ fn cmd_stats_projects(
 fn cmd_stats_branches(
     client: &DaemonClient,
     period: StatsPeriod,
+    provider: Option<&str>,
     limit: usize,
     label_width: usize,
     json_output: bool,
 ) -> Result<()> {
     let (since, until) = period_date_range(period);
-    let page = client.branches(since.as_deref(), until.as_deref(), limit)?;
+    let page = client.branches(since.as_deref(), until.as_deref(), provider, limit)?;
 
     if json_output {
         super::print_json(&page)?;
@@ -1056,12 +1088,13 @@ fn cmd_stats_branch_detail(
 fn cmd_stats_tickets(
     client: &DaemonClient,
     period: StatsPeriod,
+    provider: Option<&str>,
     limit: usize,
     label_width: usize,
     json_output: bool,
 ) -> Result<()> {
     let (since, until) = period_date_range(period);
-    let page = client.tickets(since.as_deref(), until.as_deref(), limit)?;
+    let page = client.tickets(since.as_deref(), until.as_deref(), provider, limit)?;
 
     if json_output {
         super::print_json(&page)?;
@@ -1259,12 +1292,13 @@ fn cmd_stats_ticket_detail(
 fn cmd_stats_activities(
     client: &DaemonClient,
     period: StatsPeriod,
+    provider: Option<&str>,
     limit: usize,
     label_width: usize,
     json_output: bool,
 ) -> Result<()> {
     let (since, until) = period_date_range(period);
-    let page = client.activities(since.as_deref(), until.as_deref(), limit)?;
+    let page = client.activities(since.as_deref(), until.as_deref(), provider, limit)?;
 
     if json_output {
         super::print_json(&page)?;
@@ -1494,12 +1528,13 @@ fn validate_file_path_arg(path: &str) -> Result<()> {
 fn cmd_stats_files(
     client: &DaemonClient,
     period: StatsPeriod,
+    provider: Option<&str>,
     limit: usize,
     label_width: usize,
     json_output: bool,
 ) -> Result<()> {
     let (since, until) = period_date_range(period);
-    let page = client.files(since.as_deref(), until.as_deref(), limit)?;
+    let page = client.files(since.as_deref(), until.as_deref(), provider, limit)?;
 
     if json_output {
         super::print_json(&page)?;
@@ -1705,13 +1740,14 @@ fn cmd_stats_file_detail(
 fn cmd_stats_models(
     client: &DaemonClient,
     period: StatsPeriod,
+    provider: Option<&str>,
     limit: usize,
     label_width: usize,
     include_pending: bool,
     json_output: bool,
 ) -> Result<()> {
     let (since, until) = period_date_range(period);
-    let page = client.models(since.as_deref(), until.as_deref(), limit)?;
+    let page = client.models(since.as_deref(), until.as_deref(), provider, limit)?;
 
     if json_output {
         // #443 acceptance: JSON exposes the Budi-canonical `display_name`
