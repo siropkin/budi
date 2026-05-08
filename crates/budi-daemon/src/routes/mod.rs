@@ -3,11 +3,14 @@ pub mod cloud;
 pub mod hooks;
 pub mod pricing;
 
+use std::collections::HashSet;
 use std::net::SocketAddr;
+use std::sync::Arc;
 
 use axum::Json;
-use axum::extract::{ConnectInfo, Request};
+use axum::extract::{ConnectInfo, Request, State};
 use axum::http::StatusCode;
+use axum::http::header;
 use axum::middleware::Next;
 use axum::response::Response;
 
@@ -171,6 +174,102 @@ pub fn forbidden(msg: impl std::fmt::Display) -> (StatusCode, Json<serde_json::V
         StatusCode::FORBIDDEN,
         Json(serde_json::json!({ "ok": false, "error": format!("{msg}") })),
     )
+}
+
+/// Allowlist of `Host` header values the daemon accepts.
+///
+/// DNS-rebinding defense (#695): a malicious page can resolve a hostile
+/// name to `127.0.0.1` and then have the user's browser hit the daemon
+/// on a loopback connection.  `require_loopback` only inspects the peer
+/// IP, which is loopback in that scenario, so it lets the request
+/// through.  Layering [`require_local_host`] in front of every route
+/// closes the gap: the rebound page sends `Host: attacker.example`,
+/// which is not in the allowlist, so the request is rejected before any
+/// handler runs.
+///
+/// The allowlist contains, with and without an explicit port:
+/// - `127.0.0.1`
+/// - `[::1]` (canonical bracketed IPv6)
+/// - `localhost`
+/// - the literal `--host` value the daemon was started with (so
+///   `--host 0.0.0.0 --port 7878` still accepts `Host: 0.0.0.0:7878`
+///   for the operator who explicitly opened the listener).
+///
+/// Anything else returns `403` with `invalid Host header` and a
+/// `tracing::warn!` line for ops visibility.
+#[derive(Clone, Debug)]
+pub struct HostAllowlist {
+    hosts: Arc<HashSet<String>>,
+}
+
+impl HostAllowlist {
+    pub fn new(configured_host: &str, port: u16) -> Self {
+        let mut hosts = HashSet::new();
+        let bases = ["127.0.0.1", "[::1]", "localhost", configured_host];
+        for base in bases {
+            // `0.0.0.0` is a wildcard bind sentinel, never a valid Host
+            // value — skip it so an operator running `--host 0.0.0.0`
+            // doesn't silently widen the allowlist with an unreachable
+            // literal.
+            if base.is_empty() || base == "0.0.0.0" {
+                continue;
+            }
+            hosts.insert(base.to_string());
+            hosts.insert(format!("{base}:{port}"));
+        }
+        Self {
+            hosts: Arc::new(hosts),
+        }
+    }
+
+    /// Test/dev convenience: a permissive default whose only consumers
+    /// are router-level unit tests where the Host header is unset.
+    /// Production callers always go through `HostAllowlist::new`.
+    #[cfg(test)]
+    pub fn for_tests() -> Self {
+        Self::new("127.0.0.1", 0)
+    }
+
+    pub fn allows(&self, host: &str) -> bool {
+        self.hosts.contains(host)
+    }
+}
+
+/// Reject any request whose `Host` header is not in the local-host
+/// allowlist.  Layered onto every route (public and protected) to defend
+/// against DNS-rebinding (#695) — the peer IP is loopback in that
+/// scenario, so `require_loopback` alone is insufficient.
+pub async fn require_local_host(
+    State(allowlist): State<HostAllowlist>,
+    req: Request,
+    next: Next,
+) -> Result<Response, (StatusCode, Json<serde_json::Value>)> {
+    let host = req
+        .headers()
+        .get(header::HOST)
+        .and_then(|v| v.to_str().ok());
+    match host {
+        Some(h) if allowlist.allows(h) => Ok(next.run(req).await),
+        Some(h) => {
+            tracing::warn!(
+                host = %h,
+                path = %req.uri().path(),
+                "blocked request with non-local Host header (DNS-rebinding defense, #695)"
+            );
+            Err(forbidden("invalid Host header"))
+        }
+        None => {
+            // HTTP/1.1 requires a Host header; HTTP/2 carries `:authority`
+            // which axum surfaces as `Host` here. A missing/non-ASCII Host
+            // is anomalous on a loopback API and not worth distinguishing
+            // from an explicitly bad value.
+            tracing::warn!(
+                path = %req.uri().path(),
+                "blocked request with missing or non-ASCII Host header"
+            );
+            Err(forbidden("invalid Host header"))
+        }
+    }
 }
 
 pub async fn require_loopback(
