@@ -35,6 +35,13 @@ pub struct DimensionFilters {
     pub projects: Vec<String>,
     #[serde(default)]
     pub branches: Vec<String>,
+    /// Host environment filter — `vscode`, `cursor`, `jetbrains`, `terminal`,
+    /// `unknown`. Mirrors `agents` shape: lowercased + trimmed + deduped on
+    /// normalize, unknown values pass through and yield empty results so a
+    /// new-host extension hitting an old daemon does not crash. See
+    /// `crate::surface` and ticket #702.
+    #[serde(default)]
+    pub surfaces: Vec<String>,
 }
 
 impl DimensionFilters {
@@ -43,6 +50,7 @@ impl DimensionFilters {
         self.models = normalize_values(&self.models);
         self.projects = normalize_values(&self.projects);
         self.branches = normalize_branches(&self.branches);
+        self.surfaces = normalize_surfaces(&self.surfaces);
         self
     }
 }
@@ -123,6 +131,28 @@ fn normalize_values(values: &[String]) -> Vec<String> {
     out
 }
 
+/// Normalize a surface filter list: trim, lowercase, drop empties, dedupe.
+/// Lowercasing is safe because surface values are canonical lowercase
+/// (`vscode`, `cursor`, `jetbrains`, `terminal`, `unknown`); we accept
+/// mixed-case input from CLI users without rejecting it. Unknown values
+/// pass through unchanged so the caller (host-extension or curl) gets a
+/// clean empty result rather than an error — same shape as agents/providers.
+pub(crate) fn normalize_surfaces(values: &[String]) -> Vec<String> {
+    let mut seen = HashSet::new();
+    let mut out = Vec::new();
+    for value in values {
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let normalized = trimmed.to_ascii_lowercase();
+        if seen.insert(normalized.clone()) {
+            out.push(normalized);
+        }
+    }
+    out
+}
+
 fn normalize_branches(values: &[String]) -> Vec<String> {
     let mut seen = HashSet::new();
     let mut out = Vec::new();
@@ -178,6 +208,17 @@ fn normalized_branch_expr(expr: &str) -> String {
     )
 }
 
+/// SQL fragment that COALESCE-normalizes a surface column to the canonical
+/// lowercase form, falling back to `'unknown'` for NULL / empty rows. Used
+/// by the surface filter (`?surface=` / `?surfaces=`) so a row with
+/// `surface = NULL` still matches `?surface=unknown` instead of silently
+/// dropping out — same pattern `normalized_*_expr` use for the other
+/// dimensions. (#702)
+fn normalized_surface_expr(expr: &str) -> String {
+    format!("COALESCE(NULLIF(LOWER({expr}), ''), 'unknown')")
+}
+
+#[allow(clippy::too_many_arguments)]
 fn apply_dimension_filters(
     conditions: &mut Vec<String>,
     param_values: &mut Vec<String>,
@@ -186,11 +227,13 @@ fn apply_dimension_filters(
     model_expr: &str,
     project_expr: &str,
     branch_expr: &str,
+    surface_expr: &str,
 ) {
     append_in_condition(conditions, param_values, provider_expr, &filters.agents);
     append_in_condition(conditions, param_values, model_expr, &filters.models);
     append_in_condition(conditions, param_values, project_expr, &filters.projects);
     append_in_condition(conditions, param_values, branch_expr, &filters.branches);
+    append_in_condition(conditions, param_values, surface_expr, &filters.surfaces);
 }
 
 fn rollups_available(conn: &Connection) -> bool {
@@ -581,6 +624,7 @@ fn usage_summary_from_rollups(
         "model",
         "repo_id",
         "git_branch",
+        "surface",
     );
 
     let where_clause = if conditions.is_empty() {
@@ -679,6 +723,7 @@ pub fn usage_summary_with_filters(
     let model_expr = normalized_model_expr("model");
     let project_expr = normalized_project_expr("repo_id");
     let branch_expr = normalized_branch_expr("git_branch");
+    let surface_expr = normalized_surface_expr("surface");
     apply_dimension_filters(
         &mut conditions,
         &mut params,
@@ -687,6 +732,7 @@ pub fn usage_summary_with_filters(
         &model_expr,
         &project_expr,
         &branch_expr,
+        &surface_expr,
     );
 
     let where_clause = if conditions.is_empty() {
@@ -797,6 +843,7 @@ pub fn message_list(conn: &Connection, p: &MessageListParams) -> Result<Paginate
     let model_expr = normalized_model_expr("messages.model");
     let project_expr = normalized_project_expr("messages.repo_id");
     let branch_expr = normalized_branch_expr("COALESCE(messages.git_branch, s.git_branch)");
+    let surface_expr = normalized_surface_expr("messages.surface");
     apply_dimension_filters(
         &mut conditions,
         &mut param_values,
@@ -805,6 +852,7 @@ pub fn message_list(conn: &Connection, p: &MessageListParams) -> Result<Paginate
         &model_expr,
         &project_expr,
         &branch_expr,
+        &surface_expr,
     );
     if let Some(q) = p.search
         && !q.is_empty()
@@ -961,6 +1009,7 @@ fn repo_usage_from_rollups(
         "model",
         "repo_id",
         "git_branch",
+        "surface",
     );
     params.push(limit.to_string());
     let limit_idx = params.len();
@@ -1046,6 +1095,7 @@ pub fn repo_usage_with_filters(
     let model_expr = normalized_model_expr("model");
     let project_expr = normalized_project_expr("repo_id");
     let branch_expr = normalized_branch_expr("git_branch");
+    let surface_expr = normalized_surface_expr("surface");
     apply_dimension_filters(
         &mut conditions,
         &mut param_values,
@@ -1054,6 +1104,7 @@ pub fn repo_usage_with_filters(
         &model_expr,
         &project_expr,
         &branch_expr,
+        &surface_expr,
     );
 
     param_values.push(limit.to_string());
@@ -1275,6 +1326,7 @@ fn activity_chart_from_rollups(
         "model",
         "repo_id",
         "git_branch",
+        "surface",
     );
     let where_clause = format!("WHERE {}", conditions.join(" AND "));
     let time_col = rollup_time_column(window.level);
@@ -1370,6 +1422,7 @@ pub fn activity_chart_with_filters(
     let model_expr = normalized_model_expr("model");
     let project_expr = normalized_project_expr("repo_id");
     let branch_expr = normalized_branch_expr("git_branch");
+    let surface_expr = normalized_surface_expr("surface");
     apply_dimension_filters(
         &mut conditions,
         &mut param_values,
@@ -1378,6 +1431,7 @@ pub fn activity_chart_with_filters(
         &model_expr,
         &project_expr,
         &branch_expr,
+        &surface_expr,
     );
     let where_clause = format!("WHERE {}", conditions.join(" AND "));
     let param_refs: Vec<&dyn rusqlite::types::ToSql> = param_values
@@ -1496,6 +1550,7 @@ pub fn branch_cost_with_filters(
     let model_expr = normalized_model_expr("model");
     let project_expr = normalized_project_expr("repo_id");
     let branch_expr = normalized_branch_expr("git_branch");
+    let surface_expr = normalized_surface_expr("surface");
     apply_dimension_filters(
         &mut conditions,
         &mut param_values,
@@ -1504,6 +1559,7 @@ pub fn branch_cost_with_filters(
         &model_expr,
         &project_expr,
         &branch_expr,
+        &surface_expr,
     );
     param_values.push(limit.to_string());
     let limit_idx = param_values.len();
@@ -1731,6 +1787,7 @@ pub fn tag_stats_with_filters(
     let model_expr = normalized_model_expr("m.model");
     let project_expr = normalized_project_expr("m.repo_id");
     let branch_expr = normalized_branch_expr("m.git_branch");
+    let surface_expr = normalized_surface_expr("m.surface");
     apply_dimension_filters(
         &mut where_parts,
         &mut param_values,
@@ -1739,6 +1796,7 @@ pub fn tag_stats_with_filters(
         &model_expr,
         &project_expr,
         &branch_expr,
+        &surface_expr,
     );
     param_values.push(limit.to_string());
     let limit_idx = param_values.len();
@@ -1871,6 +1929,7 @@ fn tag_stats_repo_from_messages(
     let model_expr = normalized_model_expr("model");
     let project_expr = normalized_project_expr("repo_id");
     let branch_expr = normalized_branch_expr("git_branch");
+    let surface_expr = normalized_surface_expr("surface");
     apply_dimension_filters(
         &mut conditions,
         &mut param_values,
@@ -1879,6 +1938,7 @@ fn tag_stats_repo_from_messages(
         &model_expr,
         &project_expr,
         &branch_expr,
+        &surface_expr,
     );
     param_values.push(limit.to_string());
     let limit_idx = param_values.len();
@@ -1940,6 +2000,7 @@ fn tag_stats_branch_from_messages(
     let model_expr = normalized_model_expr("model");
     let project_expr = normalized_project_expr("repo_id");
     let branch_expr = normalized_branch_expr("git_branch");
+    let surface_expr = normalized_surface_expr("surface");
     apply_dimension_filters(
         &mut conditions,
         &mut param_values,
@@ -1948,6 +2009,7 @@ fn tag_stats_branch_from_messages(
         &model_expr,
         &project_expr,
         &branch_expr,
+        &surface_expr,
     );
     param_values.push(limit.to_string());
     let limit_idx = param_values.len();
@@ -2113,6 +2175,7 @@ pub fn ticket_cost_with_filters(
     let model_expr = normalized_model_expr("m.model");
     let project_expr = normalized_project_expr("m.repo_id");
     let branch_expr = normalized_branch_expr("m.git_branch");
+    let surface_expr = normalized_surface_expr("m.surface");
     apply_dimension_filters(
         &mut conditions,
         &mut param_values,
@@ -2121,6 +2184,7 @@ pub fn ticket_cost_with_filters(
         &model_expr,
         &project_expr,
         &branch_expr,
+        &surface_expr,
     );
     let where_clause = format!("WHERE {}", conditions.join(" AND "));
 
@@ -2648,6 +2712,7 @@ pub fn activity_cost_with_filters(
     let model_expr = normalized_model_expr("m.model");
     let project_expr = normalized_project_expr("m.repo_id");
     let branch_expr = normalized_branch_expr("m.git_branch");
+    let surface_expr = normalized_surface_expr("m.surface");
     apply_dimension_filters(
         &mut conditions,
         &mut param_values,
@@ -2656,6 +2721,7 @@ pub fn activity_cost_with_filters(
         &model_expr,
         &project_expr,
         &branch_expr,
+        &surface_expr,
     );
     let where_clause = format!("WHERE {}", conditions.join(" AND "));
 
@@ -3124,6 +3190,7 @@ fn model_usage_from_rollups(
         "model",
         "repo_id",
         "git_branch",
+        "surface",
     );
     params.push(limit.to_string());
     let limit_idx = params.len();
@@ -3198,6 +3265,7 @@ pub fn model_usage_with_filters(
     let model_expr = normalized_model_expr("model");
     let project_expr = normalized_project_expr("repo_id");
     let branch_expr = normalized_branch_expr("git_branch");
+    let surface_expr = normalized_surface_expr("surface");
     apply_dimension_filters(
         &mut conditions,
         &mut param_values,
@@ -3206,6 +3274,7 @@ pub fn model_usage_with_filters(
         &model_expr,
         &project_expr,
         &branch_expr,
+        &surface_expr,
     );
     let where_clause = format!("WHERE {}", conditions.join(" AND "));
     param_values.push(limit.to_string());
@@ -3674,6 +3743,7 @@ fn provider_stats_from_rollups(
         "model",
         "repo_id",
         "git_branch",
+        "surface",
     );
     let where_clause = if conditions.is_empty() {
         String::new()
@@ -3789,6 +3859,7 @@ pub fn provider_stats_with_filters(
     let model_expr = normalized_model_expr("model");
     let project_expr = normalized_project_expr("repo_id");
     let branch_expr = normalized_branch_expr("git_branch");
+    let surface_expr = normalized_surface_expr("surface");
     apply_dimension_filters(
         &mut conditions,
         &mut param_values,
@@ -3797,6 +3868,7 @@ pub fn provider_stats_with_filters(
         &model_expr,
         &project_expr,
         &branch_expr,
+        &surface_expr,
     );
     let where_clause = if conditions.is_empty() {
         String::new()
@@ -3889,6 +3961,210 @@ pub fn provider_stats_with_filters(
 }
 
 // ---------------------------------------------------------------------------
+// Surface Stats (#702)
+// ---------------------------------------------------------------------------
+
+/// Per-surface aggregate stats. Mirror of [`ProviderStats`] keyed on the
+/// `surface` axis (`vscode` / `cursor` / `jetbrains` / `terminal` /
+/// `unknown`) introduced in #701. `surface` answers *which host* an AI
+/// conversation happened in; `provider` answers *which agent*. Surfaced as
+/// its own breakdown so a multi-IDE user can answer "how much am I
+/// spending in JetBrains vs VS Code today?" without surface-aware scripts.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct SurfaceStats {
+    pub surface: String,
+    /// Assistant-side message count.
+    pub assistant_messages: u64,
+    /// User-side message count.
+    pub user_messages: u64,
+    /// User + assistant. Reconciles to `UsageSummary.total_messages` when
+    /// summed across surfaces.
+    pub total_messages: u64,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cache_creation_tokens: u64,
+    pub cache_read_tokens: u64,
+    pub estimated_cost: f64,
+    pub total_cost_cents: f64,
+}
+
+/// Query per-surface aggregate stats. Empty surfaces (no rows in the
+/// window) are excluded so a fresh user with only `terminal` rows does
+/// not see four empty rows.
+pub fn surface_stats(
+    conn: &Connection,
+    since: Option<&str>,
+    until: Option<&str>,
+) -> Result<Vec<SurfaceStats>> {
+    let filters = DimensionFilters::default();
+    surface_stats_with_filters(conn, since, until, &filters)
+}
+
+fn surface_stats_from_rollups(
+    conn: &Connection,
+    window: &RollupWindow,
+    filters: &DimensionFilters,
+) -> Result<Vec<SurfaceStats>> {
+    let mut conditions: Vec<String> = Vec::new();
+    let mut params: Vec<String> = Vec::new();
+    append_rollup_time_filters(&mut conditions, &mut params, window);
+    apply_dimension_filters(
+        &mut conditions,
+        &mut params,
+        filters,
+        "provider",
+        "model",
+        "repo_id",
+        "git_branch",
+        "surface",
+    );
+    let where_clause = if conditions.is_empty() {
+        String::new()
+    } else {
+        format!("WHERE {}", conditions.join(" AND "))
+    };
+    let sql = format!(
+        "SELECT COALESCE(NULLIF(LOWER(surface), ''), 'unknown') as s,
+                COALESCE(SUM(message_count), 0) as total_msgs,
+                COALESCE(SUM(CASE WHEN role = 'user' THEN message_count ELSE 0 END), 0) as user_msgs,
+                COALESCE(SUM(CASE WHEN role = 'assistant' THEN message_count ELSE 0 END), 0) as asst_msgs,
+                COALESCE(SUM(CASE WHEN role = 'assistant' THEN input_tokens ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN role = 'assistant' THEN output_tokens ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN role = 'assistant' THEN cache_creation_tokens ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN role = 'assistant' THEN cache_read_tokens ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN role = 'assistant' THEN cost_cents ELSE 0.0 END), 0.0)
+         FROM {}
+         {}
+         GROUP BY s
+         ORDER BY asst_msgs DESC, s ASC",
+        rollup_table(window.level),
+        where_clause
+    );
+    let param_refs: Vec<&dyn rusqlite::types::ToSql> = params
+        .iter()
+        .map(|s| s as &dyn rusqlite::types::ToSql)
+        .collect();
+    let mut stmt = conn.prepare(&sql)?;
+    let rows: Vec<SurfaceStats> = stmt
+        .query_map(param_refs.as_slice(), |row| {
+            Ok(SurfaceStats {
+                surface: row.get(0)?,
+                total_messages: row.get(1)?,
+                user_messages: row.get(2)?,
+                assistant_messages: row.get(3)?,
+                input_tokens: row.get(4)?,
+                output_tokens: row.get(5)?,
+                cache_creation_tokens: row.get(6)?,
+                cache_read_tokens: row.get(7)?,
+                total_cost_cents: row.get(8)?,
+                estimated_cost: 0.0,
+            })
+        })?
+        .filter_map(|r| r.ok())
+        .map(|mut s| {
+            s.estimated_cost = s.total_cost_cents.round() / 100.0;
+            s
+        })
+        .collect();
+    Ok(rows)
+}
+
+pub fn surface_stats_with_filters(
+    conn: &Connection,
+    since: Option<&str>,
+    until: Option<&str>,
+    filters: &DimensionFilters,
+) -> Result<Vec<SurfaceStats>> {
+    if rollups_available(conn)
+        && let Some(window) = choose_rollup_window(since, until, true)
+    {
+        return surface_stats_from_rollups(conn, &window, filters);
+    }
+
+    let mut conditions: Vec<String> = Vec::new();
+    let mut param_values: Vec<String> = Vec::new();
+    if let Some(s) = since
+        && is_valid_timestamp(s)
+    {
+        param_values.push(s.to_string());
+        conditions.push(format!("timestamp >= ?{}", param_values.len()));
+    }
+    if let Some(u) = until
+        && is_valid_timestamp(u)
+    {
+        param_values.push(u.to_string());
+        conditions.push(format!("timestamp < ?{}", param_values.len()));
+    }
+    let model_expr = normalized_model_expr("model");
+    let project_expr = normalized_project_expr("repo_id");
+    let branch_expr = normalized_branch_expr("git_branch");
+    let surface_expr = normalized_surface_expr("surface");
+    apply_dimension_filters(
+        &mut conditions,
+        &mut param_values,
+        filters,
+        "COALESCE(provider, 'claude_code')",
+        &model_expr,
+        &project_expr,
+        &branch_expr,
+        &surface_expr,
+    );
+    let where_clause = if conditions.is_empty() {
+        String::new()
+    } else {
+        format!("WHERE {}", conditions.join(" AND "))
+    };
+    let param_refs: Vec<&dyn rusqlite::types::ToSql> = param_values
+        .iter()
+        .map(|s| s as &dyn rusqlite::types::ToSql)
+        .collect();
+    let sql = format!(
+        "SELECT COALESCE(NULLIF(LOWER(surface), ''), 'unknown') as s,
+                COUNT(*) as total_msgs,
+                COALESCE(SUM(CASE WHEN role = 'user' THEN 1 ELSE 0 END), 0) as user_msgs,
+                COALESCE(SUM(CASE WHEN role = 'assistant' THEN 1 ELSE 0 END), 0) as asst_msgs,
+                COALESCE(SUM(CASE WHEN role = 'assistant' THEN input_tokens ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN role = 'assistant' THEN output_tokens ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN role = 'assistant' THEN cache_creation_tokens ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN role = 'assistant' THEN cache_read_tokens ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN role = 'assistant' THEN cost_cents ELSE 0.0 END), 0.0)
+         FROM messages {}
+         GROUP BY s
+         ORDER BY asst_msgs DESC, s ASC",
+        where_clause
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let rows: Vec<SurfaceStats> = stmt
+        .query_map(param_refs.as_slice(), |row| {
+            Ok(SurfaceStats {
+                surface: row.get(0)?,
+                total_messages: row.get(1)?,
+                user_messages: row.get(2)?,
+                assistant_messages: row.get(3)?,
+                input_tokens: row.get(4)?,
+                output_tokens: row.get(5)?,
+                cache_creation_tokens: row.get(6)?,
+                cache_read_tokens: row.get(7)?,
+                total_cost_cents: row.get(8)?,
+                estimated_cost: 0.0,
+            })
+        })?
+        .filter_map(|r| match r {
+            Ok(v) => Some(v),
+            Err(e) => {
+                tracing::warn!("skipping row: {e}");
+                None
+            }
+        })
+        .map(|mut s| {
+            s.estimated_cost = s.total_cost_cents.round() / 100.0;
+            s
+        })
+        .collect();
+    Ok(rows)
+}
+
+// ---------------------------------------------------------------------------
 // Status Snapshot (#619)
 // ---------------------------------------------------------------------------
 
@@ -3969,6 +4245,7 @@ pub fn cache_efficiency_with_filters(
     let model_expr = normalized_model_expr("model");
     let project_expr = normalized_project_expr("repo_id");
     let branch_expr = normalized_branch_expr("git_branch");
+    let surface_expr = normalized_surface_expr("surface");
     apply_dimension_filters(
         &mut conditions,
         &mut param_values,
@@ -3977,6 +4254,7 @@ pub fn cache_efficiency_with_filters(
         &model_expr,
         &project_expr,
         &branch_expr,
+        &surface_expr,
     );
     let where_clause = format!("WHERE {}", conditions.join(" AND "));
     let param_refs: Vec<&dyn rusqlite::types::ToSql> = param_values
@@ -4087,6 +4365,7 @@ pub fn session_cost_curve_with_filters(
     let model_expr = normalized_model_expr("model");
     let project_expr = normalized_project_expr("repo_id");
     let branch_expr = normalized_branch_expr("git_branch");
+    let surface_expr = normalized_surface_expr("surface");
     apply_dimension_filters(
         &mut conditions,
         &mut param_values,
@@ -4095,6 +4374,7 @@ pub fn session_cost_curve_with_filters(
         &model_expr,
         &project_expr,
         &branch_expr,
+        &surface_expr,
     );
     let where_clause = format!("WHERE {}", conditions.join(" AND "));
     let param_refs: Vec<&dyn rusqlite::types::ToSql> = param_values
@@ -4192,6 +4472,7 @@ pub fn cost_confidence_stats_with_filters(
     let model_expr = normalized_model_expr("model");
     let project_expr = normalized_project_expr("repo_id");
     let branch_expr = normalized_branch_expr("git_branch");
+    let surface_expr = normalized_surface_expr("surface");
     apply_dimension_filters(
         &mut conditions,
         &mut param_values,
@@ -4200,6 +4481,7 @@ pub fn cost_confidence_stats_with_filters(
         &model_expr,
         &project_expr,
         &branch_expr,
+        &surface_expr,
     );
     let where_clause = format!("WHERE {}", conditions.join(" AND "));
     let param_refs: Vec<&dyn rusqlite::types::ToSql> = param_values
@@ -4278,6 +4560,7 @@ pub fn subagent_cost_stats_with_filters(
     let model_expr = normalized_model_expr("model");
     let project_expr = normalized_project_expr("repo_id");
     let branch_expr = normalized_branch_expr("git_branch");
+    let surface_expr = normalized_surface_expr("surface");
     apply_dimension_filters(
         &mut conditions,
         &mut param_values,
@@ -4286,6 +4569,7 @@ pub fn subagent_cost_stats_with_filters(
         &model_expr,
         &project_expr,
         &branch_expr,
+        &surface_expr,
     );
     let where_clause = format!("WHERE {}", conditions.join(" AND "));
     let param_refs: Vec<&dyn rusqlite::types::ToSql> = param_values
@@ -4601,6 +4885,7 @@ pub fn file_cost_with_filters(
     let model_expr = normalized_model_expr("m.model");
     let project_expr = normalized_project_expr("m.repo_id");
     let branch_expr = normalized_branch_expr("m.git_branch");
+    let surface_expr = normalized_surface_expr("m.surface");
     apply_dimension_filters(
         &mut conditions,
         &mut param_values,
@@ -4609,6 +4894,7 @@ pub fn file_cost_with_filters(
         &model_expr,
         &project_expr,
         &branch_expr,
+        &surface_expr,
     );
     let where_clause = format!("WHERE {}", conditions.join(" AND "));
 

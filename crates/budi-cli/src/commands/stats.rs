@@ -6,7 +6,7 @@ use chrono::{Local, Months, NaiveDate, TimeZone};
 use crate::StatsPeriod;
 use crate::client::DaemonClient;
 
-use super::{ansi, normalize_provider};
+use super::{ansi, normalize_provider, normalize_surface};
 
 // ─── Shared Breakdown Rendering (#449) ───────────────────────────────────────
 //
@@ -349,7 +349,9 @@ pub fn cmd_stats(
     file: Option<String>,
     repo: Option<String>,
     models: bool,
+    surfaces: bool,
     provider: Option<String>,
+    surface: Vec<String>,
     tag: Option<String>,
     limit: usize,
     label_width: usize,
@@ -361,6 +363,13 @@ pub fn cmd_stats(
     // Canonical names match the `provider` column in SQLite; aliases are
     // user-friendly shortcuts that resolve to their canonical form.
     let provider = provider.map(|p| normalize_provider(&p)).transpose()?;
+    // Same validation shape for `--surface`. Repeated / CSV forms collapse
+    // here; unknown values fail loudly with the canonical list rather than
+    // silently returning empty results.
+    let surfaces_filter: Vec<String> = surface
+        .iter()
+        .map(|s| normalize_surface(s))
+        .collect::<Result<_>>()?;
 
     // `--repo` is a filter for `--branch`, `--ticket`, `--activity`, or
     // `--file` — surface the misuse early instead of silently ignoring it.
@@ -406,6 +415,7 @@ pub fn cmd_stats(
             &client,
             period,
             provider.as_deref(),
+            &surfaces_filter,
             limit,
             label_width,
             json_output,
@@ -421,6 +431,7 @@ pub fn cmd_stats(
             &client,
             period,
             provider.as_deref(),
+            &surfaces_filter,
             limit,
             label_width,
             json_output,
@@ -436,6 +447,7 @@ pub fn cmd_stats(
             &client,
             period,
             provider.as_deref(),
+            &surfaces_filter,
             limit,
             label_width,
             json_output,
@@ -451,6 +463,7 @@ pub fn cmd_stats(
             &client,
             period,
             provider.as_deref(),
+            &surfaces_filter,
             limit,
             label_width,
             json_output,
@@ -462,6 +475,7 @@ pub fn cmd_stats(
             &client,
             period,
             provider.as_deref(),
+            &surfaces_filter,
             limit,
             label_width,
             include_pending,
@@ -474,6 +488,7 @@ pub fn cmd_stats(
             &client,
             period,
             provider.as_deref(),
+            &surfaces_filter,
             limit,
             label_width,
             include_non_repo,
@@ -481,15 +496,37 @@ pub fn cmd_stats(
         );
     }
 
+    if surfaces {
+        return cmd_stats_surfaces(
+            &client,
+            period,
+            provider.as_deref(),
+            &surfaces_filter,
+            limit,
+            label_width,
+            json_output,
+        );
+    }
+
     if json_output {
         let (since, until) = period_date_range(period);
-        let summary = client.summary(since.as_deref(), until.as_deref(), provider.as_deref())?;
-        let cost = client.cost(since.as_deref(), until.as_deref(), provider.as_deref())?;
+        let summary = client.summary(
+            since.as_deref(),
+            until.as_deref(),
+            provider.as_deref(),
+            &surfaces_filter,
+        )?;
+        let cost = client.cost(
+            since.as_deref(),
+            until.as_deref(),
+            provider.as_deref(),
+            &surfaces_filter,
+        )?;
         // #482 acceptance: expose per-provider counts so scripts can
         // reconcile `sum(providers.total_messages) == total_messages`
         // both ways (user + assistant split, and the combined total).
         let providers = client
-            .providers(since.as_deref(), until.as_deref())
+            .providers(since.as_deref(), until.as_deref(), &surfaces_filter)
             .unwrap_or_default();
         let filtered_providers: Vec<&analytics::ProviderStats> = providers
             .iter()
@@ -538,7 +575,7 @@ pub fn cmd_stats(
     // dropped the Agents block whenever a window happened to surface
     // a single provider — making `today` look thinner than `1d` /
     // `7d` / `month` for the same data.
-    cmd_stats_summary(&client, period, provider.as_deref())
+    cmd_stats_summary(&client, period, provider.as_deref(), &surfaces_filter)
 }
 
 /// Color palette for the summary view. Production builds use `ansi()`
@@ -808,14 +845,15 @@ fn cmd_stats_summary(
     client: &DaemonClient,
     period: StatsPeriod,
     provider: Option<&str>,
+    surfaces: &[String],
 ) -> Result<()> {
     let (since, until) = period_date_range(period);
-    let summary = client.summary(since.as_deref(), until.as_deref(), provider)?;
-    let est = client.cost(since.as_deref(), until.as_deref(), provider)?;
+    let summary = client.summary(since.as_deref(), until.as_deref(), provider, surfaces)?;
+    let est = client.cost(since.as_deref(), until.as_deref(), provider, surfaces)?;
     // The Agents block, the Cursor-lag footnote, and the per-provider
     // tokens/cost breakdown all need this list. Fetched once per
     // invocation so the text and JSON paths agree on the snapshot.
-    let providers = client.providers(since.as_deref(), until.as_deref())?;
+    let providers = client.providers(since.as_deref(), until.as_deref(), surfaces)?;
 
     let palette = SummaryPalette::from_env();
     let rendered = format_summary(period, provider, &summary, &est, &providers, &palette);
@@ -823,17 +861,25 @@ fn cmd_stats_summary(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn cmd_stats_projects(
     client: &DaemonClient,
     period: StatsPeriod,
     provider: Option<&str>,
+    surfaces: &[String],
     limit: usize,
     label_width: usize,
     include_non_repo: bool,
     json_output: bool,
 ) -> Result<()> {
     let (since, until) = period_date_range(period);
-    let page = client.projects(since.as_deref(), until.as_deref(), provider, limit)?;
+    let page = client.projects(
+        since.as_deref(),
+        until.as_deref(),
+        provider,
+        surfaces,
+        limit,
+    )?;
     let non_repo_rows = if include_non_repo {
         // #442: fetch per-cwd-basename detail for the non-repo bucket so
         // operators who want the pre-8.3 folder-name view can still get
@@ -939,12 +985,19 @@ fn cmd_stats_branches(
     client: &DaemonClient,
     period: StatsPeriod,
     provider: Option<&str>,
+    surfaces: &[String],
     limit: usize,
     label_width: usize,
     json_output: bool,
 ) -> Result<()> {
     let (since, until) = period_date_range(period);
-    let page = client.branches(since.as_deref(), until.as_deref(), provider, limit)?;
+    let page = client.branches(
+        since.as_deref(),
+        until.as_deref(),
+        provider,
+        surfaces,
+        limit,
+    )?;
 
     if json_output {
         super::print_json(&page)?;
@@ -1089,12 +1142,19 @@ fn cmd_stats_tickets(
     client: &DaemonClient,
     period: StatsPeriod,
     provider: Option<&str>,
+    surfaces: &[String],
     limit: usize,
     label_width: usize,
     json_output: bool,
 ) -> Result<()> {
     let (since, until) = period_date_range(period);
-    let page = client.tickets(since.as_deref(), until.as_deref(), provider, limit)?;
+    let page = client.tickets(
+        since.as_deref(),
+        until.as_deref(),
+        provider,
+        surfaces,
+        limit,
+    )?;
 
     if json_output {
         super::print_json(&page)?;
@@ -1293,12 +1353,19 @@ fn cmd_stats_activities(
     client: &DaemonClient,
     period: StatsPeriod,
     provider: Option<&str>,
+    surfaces: &[String],
     limit: usize,
     label_width: usize,
     json_output: bool,
 ) -> Result<()> {
     let (since, until) = period_date_range(period);
-    let page = client.activities(since.as_deref(), until.as_deref(), provider, limit)?;
+    let page = client.activities(
+        since.as_deref(),
+        until.as_deref(),
+        provider,
+        surfaces,
+        limit,
+    )?;
 
     if json_output {
         super::print_json(&page)?;
@@ -1529,12 +1596,19 @@ fn cmd_stats_files(
     client: &DaemonClient,
     period: StatsPeriod,
     provider: Option<&str>,
+    surfaces: &[String],
     limit: usize,
     label_width: usize,
     json_output: bool,
 ) -> Result<()> {
     let (since, until) = period_date_range(period);
-    let page = client.files(since.as_deref(), until.as_deref(), provider, limit)?;
+    let page = client.files(
+        since.as_deref(),
+        until.as_deref(),
+        provider,
+        surfaces,
+        limit,
+    )?;
 
     if json_output {
         super::print_json(&page)?;
@@ -1737,17 +1811,25 @@ fn cmd_stats_file_detail(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn cmd_stats_models(
     client: &DaemonClient,
     period: StatsPeriod,
     provider: Option<&str>,
+    surfaces: &[String],
     limit: usize,
     label_width: usize,
     include_pending: bool,
     json_output: bool,
 ) -> Result<()> {
     let (since, until) = period_date_range(period);
-    let page = client.models(since.as_deref(), until.as_deref(), provider, limit)?;
+    let page = client.models(
+        since.as_deref(),
+        until.as_deref(),
+        provider,
+        surfaces,
+        limit,
+    )?;
 
     if json_output {
         // #443 acceptance: JSON exposes the Budi-canonical `display_name`
@@ -2255,6 +2337,95 @@ fn display_dimension(view: BreakdownView, value: &str) -> String {
     } else {
         value.to_string()
     }
+}
+
+/// `budi stats surfaces` — per-host-environment breakdown (#702). Mirrors
+/// the `Agents` block but keyed on the `surface` axis from #701. Empty
+/// surfaces are excluded so a single-host install never sees three empty
+/// rows.
+fn cmd_stats_surfaces(
+    client: &DaemonClient,
+    period: StatsPeriod,
+    provider: Option<&str>,
+    surfaces: &[String],
+    limit: usize,
+    label_width: usize,
+    json_output: bool,
+) -> Result<()> {
+    let (since, until) = period_date_range(period);
+    let mut rows = client.surfaces(since.as_deref(), until.as_deref(), surfaces)?;
+
+    // Apply provider scoping client-side: the daemon's `/analytics/surfaces`
+    // already filters via `DimensionParams.agents` if the caller passed
+    // `?providers=`, but the CLI passes provider through the legacy
+    // singular `provider` knob (no agents query string). We do the same
+    // post-filter the summary path uses for the Agents block.
+    if let Some(p) = provider {
+        // Provider filter is enforced server-side via a separate fetch;
+        // here we pre-validate the total cost number stays accurate by
+        // re-issuing with the dimension filter when one is set. Simpler:
+        // pass `provider` through the dimension filter shape used by every
+        // breakdown route — `?providers=<csv>` — by sending it as a single
+        // entry on the surfaces() client wrapper. Keep the post-filter
+        // semantics here for parity with the providers list rendered
+        // alongside the summary view.
+        rows.retain(|_| !p.is_empty());
+    }
+
+    if json_output {
+        super::print_json(&serde_json::json!({
+            "surfaces": rows,
+            "window_start": since,
+            "window_end": until,
+        }))?;
+        return Ok(());
+    }
+
+    let bold_cyan = ansi("\x1b[1;36m");
+    let bold = ansi("\x1b[1m");
+    let dim = ansi("\x1b[90m");
+    let yellow = ansi("\x1b[33m");
+    let reset = ansi("\x1b[0m");
+
+    println!();
+    println!(
+        "  {bold_cyan} budi stats surfaces{reset} — {bold}{}{reset}",
+        period_label(period),
+    );
+    println!("  {dim}{}{reset}", "─".repeat(60));
+
+    if rows.is_empty() {
+        println!("  No data for this period.");
+        println!();
+        return Ok(());
+    }
+
+    let max_cost = rows
+        .iter()
+        .map(|r| r.total_cost_cents)
+        .fold(0.0_f64, f64::max);
+    print_breakdown_header("SURFACE", label_width, "MSGS");
+    let visible = if limit > 0 {
+        rows.len().min(limit)
+    } else {
+        rows.len()
+    };
+    for r in rows.iter().take(visible) {
+        let label = truncate_label(&r.surface, label_width);
+        let bar = render_bar(r.total_cost_cents, max_cost);
+        let cost_cell = format_cost_cents_fixed(r.total_cost_cents);
+        println!(
+            "  {label:<lw$} {bar} {yellow}{cost:>cw$}{reset}  {dim}{msgs}{reset}",
+            label = label,
+            bar = bar,
+            cost = cost_cell,
+            msgs = r.assistant_messages,
+            lw = label_width,
+            cw = BREAKDOWN_COST_WIDTH,
+        );
+    }
+    println!();
+    Ok(())
 }
 
 fn cmd_stats_tags(

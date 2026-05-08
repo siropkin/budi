@@ -33,6 +33,14 @@ pub struct DimensionParams {
     pub projects: Option<String>,
     #[serde(alias = "branch")]
     pub branches: Option<String>,
+    /// `?surface=<name>` / `?surfaces=<csv>` host-environment filter (#702).
+    /// Mirrors the `agents`/`providers` shape: lowercase canonical names
+    /// (`vscode` / `cursor` / `jetbrains` / `terminal` / `unknown`),
+    /// CSV-joined when multiple. Singular `surface=` and plural `surfaces=`
+    /// both land here so a host extension and a curl one-liner share the
+    /// same query string.
+    #[serde(alias = "surface")]
+    pub surfaces: Option<String>,
 }
 
 fn parse_filter_values(value: Option<&str>) -> Vec<String> {
@@ -51,6 +59,7 @@ fn parse_dimension_filters(params: &DimensionParams) -> analytics::DimensionFilt
         models: parse_filter_values(params.models.as_deref()),
         projects: parse_filter_values(params.projects.as_deref()),
         branches: parse_filter_values(params.branches.as_deref()),
+        surfaces: parse_filter_values(params.surfaces.as_deref()),
     }
     .normalize()
 }
@@ -396,6 +405,32 @@ pub async fn analytics_providers(
         let db_path = analytics::db_path()?;
         let conn = analytics::open_db(&db_path)?;
         analytics::provider_stats_with_filters(
+            &conn,
+            params.since.as_deref(),
+            params.until.as_deref(),
+            &filters,
+        )
+    })
+    .await
+    .map_err(|e| internal_error(anyhow::anyhow!("{e}")))?
+    .map_err(internal_error)?;
+
+    Ok(Json(result))
+}
+
+/// `GET /analytics/surfaces` — per-host-environment breakdown (#702).
+/// Mirror of `/analytics/providers` keyed on the `surface` axis from #701
+/// (`vscode` / `cursor` / `jetbrains` / `terminal` / `unknown`). Empty
+/// surfaces (no rows in window) are excluded so a single-host install
+/// never sees three empty rows.
+pub async fn analytics_surfaces(
+    Query(params): Query<DateRangeParams>,
+) -> Result<Json<Vec<analytics::SurfaceStats>>, (StatusCode, Json<serde_json::Value>)> {
+    let filters = parse_dimension_filters(&params.filters);
+    let result = tokio::task::spawn_blocking(move || {
+        let db_path = analytics::db_path()?;
+        let conn = analytics::open_db(&db_path)?;
+        analytics::surface_stats_with_filters(
             &conn,
             params.since.as_deref(),
             params.until.as_deref(),
