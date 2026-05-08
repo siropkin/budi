@@ -143,7 +143,7 @@ Examples:
         /// Filter sessions by host environment (`vscode`, `cursor`,
         /// `jetbrains`, `terminal`, `unknown`). Repeat the flag or pass a
         /// CSV (`--surface vscode,cursor`) to combine. `provider` answers
-        /// "which agent"; `--surface` answers "which host". (#702)
+        /// "which agent"; `--surface` answers "which host".
         #[arg(long, value_name = "NAME", value_delimiter = ',')]
         surface: Vec<String>,
         /// Filter sessions by ticket id (e.g. ENG-123). Matches the
@@ -291,7 +291,7 @@ pub struct StatsOpts {
     /// Filter by provider (e.g. claude_code, cursor, codex, copilot_cli, copilot_chat, openai). Applies to the default summary view and every breakdown subcommand (`models`, `projects`, `branches`, `tickets`, `activities`, `files`).
     #[arg(long, global = true)]
     pub provider: Option<String>,
-    /// Filter by host environment (`vscode`, `cursor`, `jetbrains`, `terminal`, `unknown`). Applies to the default summary view and every breakdown subcommand (`models`, `projects`, `branches`, `tickets`, `activities`, `files`, `surfaces`). Repeat or pass CSV to combine. (#702)
+    /// Filter by host environment (`vscode`, `cursor`, `jetbrains`, `terminal`, `unknown`). Applies to the default summary view and every breakdown subcommand (`models`, `projects`, `branches`, `tickets`, `activities`, `files`, `surfaces`). Repeat or pass CSV to combine.
     #[arg(long, global = true, value_name = "NAME", value_delimiter = ',')]
     pub surface: Vec<String>,
     /// Maximum rows in breakdown views (`projects`, `branches`, `tickets`,
@@ -358,7 +358,7 @@ pub enum StatsView {
     /// Cost breakdown by model
     Models,
     /// Cost breakdown by host environment (vscode / cursor / jetbrains / terminal / unknown).
-    /// Mirrors the per-provider Agents block but keyed on the surface axis from #701.
+    /// Mirrors the per-provider Agents block but keyed on the surface axis.
     Surfaces,
     /// Raw cost breakdown by tag KEY (escape hatch for custom tag keys)
     Tag {
