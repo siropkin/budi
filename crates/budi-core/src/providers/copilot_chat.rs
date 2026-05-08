@@ -473,7 +473,9 @@ fn workspace_cwd_for_session_path(session_path: &Path) -> Option<String> {
 /// JSON, or unrecognised shape — the caller treats `None` as "no
 /// enrichment" and emits the row without a cwd.
 fn read_workspace_json(path: &Path) -> Option<String> {
-    let content = std::fs::read_to_string(path).ok()?;
+    let content = crate::fs_util::read_capped(path, crate::fs_util::PROBE_FILE_CAP)
+        .ok()
+        .flatten()?;
     let doc: serde_json::Value = serde_json::from_str(&content).ok()?;
 
     // Single-root: `{"folder": "file:///path"}` (or `vscode-remote://...`,
@@ -500,7 +502,9 @@ fn read_workspace_json(path: &Path) -> Option<String> {
 /// path. Folder paths in `.code-workspace` are typically relative to the
 /// workspace file's parent directory; absolute paths pass through.
 fn first_folder_from_workspace_file(config_path: &Path) -> Option<String> {
-    let content = std::fs::read_to_string(config_path).ok()?;
+    let content = crate::fs_util::read_capped(config_path, crate::fs_util::PROBE_FILE_CAP)
+        .ok()
+        .flatten()?;
     let ws: serde_json::Value = serde_json::from_str(&content).ok()?;
     let folders = ws.get("folders").and_then(|v| v.as_array())?;
     let first = folders.first()?;
@@ -580,7 +584,9 @@ fn hex_digit(b: u8) -> Option<u8> {
 fn git_branch_for_cwd(cwd: &str) -> Option<String> {
     let root = crate::repo_id::repo_root_for(Path::new(cwd))?;
     let head = root.join(".git").join("HEAD");
-    let contents = std::fs::read_to_string(&head).ok()?;
+    let contents = crate::fs_util::read_capped(&head, crate::fs_util::PROBE_FILE_CAP)
+        .ok()
+        .flatten()?;
     contents
         .trim()
         .strip_prefix("ref: refs/heads/")

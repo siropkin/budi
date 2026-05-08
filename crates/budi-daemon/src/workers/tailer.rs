@@ -84,6 +84,17 @@ const DEBOUNCE: Duration = Duration::from_millis(500);
 /// missed events on WSL2 / network shares) without adding meaningful CPU.
 const BACKSTOP_POLL: Duration = Duration::from_secs(5);
 
+/// Per-tick byte cap for `read_tail` (see #696). The tailer reads at most
+/// this many bytes from a transcript in a single tick; remaining bytes are
+/// consumed on subsequent ticks. 32 MB is well above any realistic
+/// single-tick append for any current provider (Claude Code / Codex /
+/// Copilot Chat / Cursor / OpenCode all stream KB-class deltas) and well
+/// below the OOM threshold on a modest laptop. Without this cap a runaway
+/// agent / corrupted transcript / oversized fixture could grow a JSONL
+/// file to multi-GB and the daemon would allocate that much RSS in a
+/// single `read_to_end`.
+const MAX_TAIL_BYTES: usize = 32 * 1024 * 1024;
+
 /// Spawn the tailer in a blocking task and return immediately.
 ///
 /// The caller (`daemon::main`) owns the `shutdown` flag — flipping it
@@ -535,6 +546,25 @@ fn is_jsonl(path: &Path) -> bool {
 /// incomplete-final-line contract `jsonl::parse_transcript` already
 /// applies at the line layer.
 fn read_tail(path: &Path, stored_offset: usize, file_len: usize) -> Result<(String, usize)> {
+    read_tail_capped(path, stored_offset, file_len, MAX_TAIL_BYTES)
+}
+
+/// Cap-aware implementation of [`read_tail`], parameterised on the
+/// per-tick byte cap so tests can drive the truncation path without
+/// having to materialise a 32 MB fixture (see #696).
+///
+/// When `file_len - effective_offset > cap`, we read exactly `cap` bytes,
+/// drop the trailing partial line / partial UTF-8 (same contract as the
+/// uncapped path), and advance the offset by the line-aligned amount we
+/// actually consumed. The remaining bytes get picked up on the next
+/// tick. Per-truncation `tracing::warn!` so ops can spot the pathological
+/// case in `daemon.log`.
+fn read_tail_capped(
+    path: &Path,
+    stored_offset: usize,
+    file_len: usize,
+    cap: usize,
+) -> Result<(String, usize)> {
     let effective_offset = if stored_offset > file_len {
         tracing::info!(
             target: "budi_daemon::tailer",
@@ -550,11 +580,27 @@ fn read_tail(path: &Path, stored_offset: usize, file_len: usize) -> Result<(Stri
     if effective_offset == file_len {
         return Ok((String::new(), effective_offset));
     }
+    let pending = file_len.saturating_sub(effective_offset);
+    let to_read = pending.min(cap);
+    if pending > cap {
+        tracing::warn!(
+            target: "budi_daemon::tailer",
+            path = %path.display(),
+            file_len = file_len,
+            offset = effective_offset,
+            pending = pending,
+            consumed = to_read,
+            cap = cap,
+            "tail append exceeds per-tick cap; truncating this tick (next tick will consume the rest)"
+        );
+    }
     let mut file = std::fs::File::open(path).with_context(|| format!("open {}", path.display()))?;
     file.seek(SeekFrom::Start(effective_offset as u64))
         .with_context(|| format!("seek {}", path.display()))?;
-    let mut bytes = Vec::with_capacity(file_len.saturating_sub(effective_offset));
-    file.read_to_end(&mut bytes)
+    let mut bytes = Vec::with_capacity(to_read);
+    file.by_ref()
+        .take(to_read as u64)
+        .read_to_end(&mut bytes)
         .with_context(|| format!("read {}", path.display()))?;
     let valid_up_to = match std::str::from_utf8(&bytes) {
         Ok(s) => s.len(),
@@ -1195,5 +1241,75 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(new_offset, std::fs::metadata(&f).unwrap().len() as usize);
+    }
+
+    /// #696 — when the pending tail exceeds the per-tick cap, `read_tail`
+    /// reads exactly `cap` bytes (line-aligned), reports the offset it
+    /// started at, and leaves the trailing bytes for the next tick.
+    /// Driving `cap=24` with three 8-byte lines means tick 1 returns the
+    /// first two complete lines (16 bytes consumed) and the third line
+    /// stays on disk for tick 2 to pick up.
+    #[test]
+    fn read_tail_caps_per_tick_and_resumes() {
+        let dir = tempdir();
+        let path = dir.join("big.jsonl");
+        // Three 8-byte lines: "AAAAAAA\n", "BBBBBBB\n", "CCCCCCC\n"
+        std::fs::write(&path, b"AAAAAAA\nBBBBBBB\nCCCCCCC\n").unwrap();
+        let len = std::fs::metadata(&path).unwrap().len() as usize;
+        assert_eq!(len, 24);
+
+        // Tick 1: cap=20 forces a truncated read — we get 20 raw bytes,
+        // line-align down to 16 (drops the partial third line), report
+        // start_offset=0 so the caller resumes at 16.
+        let (content, start) = read_tail_capped(&path, 0, len, 20).unwrap();
+        assert_eq!(start, 0);
+        assert_eq!(content, "AAAAAAA\nBBBBBBB\n");
+
+        // Tick 2: cap=20 again, but only 8 bytes pending, so cap is
+        // moot — full remainder consumed.
+        let consumed = content.len();
+        let (content2, start2) = read_tail_capped(&path, consumed, len, 20).unwrap();
+        assert_eq!(start2, consumed);
+        assert_eq!(content2, "CCCCCCC\n");
+    }
+
+    /// Without the cap, the caller would request a buffer sized to the
+    /// full pending range. With the cap, the buffer never exceeds `cap`
+    /// even when the file is far larger. (Indirect check: read returns at
+    /// most `cap` raw bytes.)
+    #[test]
+    fn read_tail_buffer_bounded_by_cap() {
+        let dir = tempdir();
+        let path = dir.join("huge.jsonl");
+        // 100 lines of 100 bytes + newline = ~10 KB. Cap at 256 bytes.
+        let mut payload = String::new();
+        for i in 0..100 {
+            payload.push_str(&format!(
+                "{:0>99}\n",
+                format!("line-{i}").chars().collect::<String>()
+            ));
+        }
+        std::fs::write(&path, &payload).unwrap();
+        let len = std::fs::metadata(&path).unwrap().len() as usize;
+
+        let (content, start) = read_tail_capped(&path, 0, len, 256).unwrap();
+        assert_eq!(start, 0);
+        assert!(content.len() <= 256);
+        assert!(content.ends_with('\n'));
+        // And the truncation is line-aligned: every line in `content`
+        // ends with `\n`.
+        for line in content.lines() {
+            assert!(!line.is_empty());
+        }
+    }
+
+    fn tempdir() -> PathBuf {
+        use std::sync::atomic::AtomicU64;
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let n = SEQ.fetch_add(1, Ordering::SeqCst);
+        let p = std::env::temp_dir().join(format!("budi-tailer-cap-{}-{n}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&p);
+        std::fs::create_dir_all(&p).unwrap();
+        p
     }
 }

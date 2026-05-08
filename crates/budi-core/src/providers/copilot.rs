@@ -83,7 +83,11 @@ impl Provider for CopilotProvider {
         let workspace = path
             .parent()
             .map(|dir| dir.join("workspace.yaml"))
-            .and_then(|p| std::fs::read_to_string(p).ok())
+            .and_then(|p| {
+                crate::fs_util::read_capped(&p, crate::fs_util::PROBE_FILE_CAP)
+                    .ok()
+                    .flatten()
+            })
             .and_then(|yaml| parse_workspace_yaml(&yaml));
 
         Ok(parse_copilot_transcript(

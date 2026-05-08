@@ -1876,7 +1876,9 @@ fn backfill_cursor_session_ids(conn: &mut Connection, sessions: &[SessionContext
 /// Returns `None` for detached HEAD or if the file can't be read.
 pub fn resolve_git_branch_from_head(dir: &str) -> Option<String> {
     let head_path = Path::new(dir).join(".git/HEAD");
-    let contents = std::fs::read_to_string(&head_path).ok()?;
+    let contents = crate::fs_util::read_capped(&head_path, crate::fs_util::PROBE_FILE_CAP)
+        .ok()
+        .flatten()?;
     let trimmed = contents.trim();
     trimmed
         .strip_prefix("ref: refs/heads/")
@@ -1952,7 +1954,9 @@ fn cwd_from_path(path: &Path) -> Option<String> {
 /// project storage path (`~/.cursor/projects/<slug>`).
 fn workspace_root_from_project_dir(project_dir: &Path) -> Option<String> {
     let worker_log = project_dir.join("worker.log");
-    let content = std::fs::read_to_string(worker_log).ok()?;
+    let content = crate::fs_util::read_capped(&worker_log, crate::fs_util::WORKER_LOG_CAP)
+        .ok()
+        .flatten()?;
 
     let mut last_seen: Option<String> = None;
     for line in content.lines() {

@@ -4,6 +4,7 @@ pub mod cloud_sync;
 pub mod config;
 pub mod cost;
 pub mod file_attribution;
+pub mod fs_util;
 pub mod hooks;
 pub mod identity;
 pub mod installer_residue;
