@@ -3,7 +3,7 @@ use std::net::SocketAddr;
 use anyhow::Result;
 use axum::Router;
 use axum::extract::DefaultBodyLimit;
-use axum::middleware::from_fn;
+use axum::middleware::{from_fn, from_fn_with_state};
 use axum::routing::{get, post};
 use budi_core::analytics;
 use budi_core::config::{DEFAULT_DAEMON_HOST, DEFAULT_DAEMON_PORT};
@@ -49,10 +49,10 @@ pub struct AppState {
     pub sync_progress: std::sync::Arc<std::sync::Mutex<Option<budi_core::analytics::SyncProgress>>>,
 }
 
-fn build_router(app_state: AppState) -> Router {
+fn build_router(app_state: AppState, host_allowlist: routes::HostAllowlist) -> Router {
     use routes::{
         analytics as a, cloud as c, hooks as h, pricing as p, require_current_schema,
-        require_loopback,
+        require_local_host, require_loopback,
     };
 
     // Loopback-only admin / sync / cloud mutation routes.
@@ -183,6 +183,12 @@ fn build_router(app_state: AppState) -> Router {
         .merge(analytics_routes)
         .merge(protected_routes)
         .layer(DefaultBodyLimit::max(2 * 1024 * 1024))
+        // DNS-rebinding defense (#695): every route — public, protected,
+        // and the schema-gated analytics surface — must pass the Host
+        // header allowlist before any handler runs. The peer IP is
+        // loopback in the rebinding scenario, so `require_loopback`
+        // alone is not enough.
+        .layer(from_fn_with_state(host_allowlist, require_local_host))
         .with_state(app_state)
 }
 
@@ -223,7 +229,8 @@ async fn main() -> Result<()> {
         sync_progress: std::sync::Arc::new(std::sync::Mutex::new(None)),
     };
 
-    let app = build_router(app_state);
+    let host_allowlist = routes::HostAllowlist::new(&host, port);
+    let app = build_router(app_state, host_allowlist);
 
     // Ensure the database exists and schema is up-to-date.
     // This makes the daemon self-sufficient — it doesn't require `budi init` to have run first.
@@ -378,13 +385,22 @@ async fn main() -> Result<()> {
             target: "budi_daemon::dummy_proxy",
             "legacy proxy residue detected; starting dummy proxy on 9878 to return actionable 400s to agents"
         );
+        // #695: same Host-header allowlist as the main listener — the
+        // dummy 9878 server is also bound to loopback, so DNS-rebinding
+        // would otherwise let a browser drive arbitrary requests at it.
+        let dummy_allowlist = routes::HostAllowlist::new("127.0.0.1", 9878);
         tokio::spawn(async move {
-            let dummy_app = axum::Router::new().fallback(axum::routing::any(|| async {
-                (
-                    axum::http::StatusCode::BAD_REQUEST,
-                    "Budi proxy was removed in 8.2.0. Run `budi doctor` to see which managed blocks remain in your shell profile, then remove them by hand or run `budi uninstall`."
-                )
-            }));
+            let dummy_app = axum::Router::new()
+                .fallback(axum::routing::any(|| async {
+                    (
+                        axum::http::StatusCode::BAD_REQUEST,
+                        "Budi proxy was removed in 8.2.0. Run `budi doctor` to see which managed blocks remain in your shell profile, then remove them by hand or run `budi uninstall`."
+                    )
+                }))
+                .layer(from_fn_with_state(
+                    dummy_allowlist,
+                    routes::require_local_host,
+                ));
             if let Ok(listener) = tokio::net::TcpListener::bind("127.0.0.1:9878").await {
                 let _ = axum::serve(listener, dummy_app).await;
             }
@@ -655,12 +671,31 @@ mod tests {
     use tower::ServiceExt;
 
     fn test_app() -> Router {
-        build_router(AppState {
-            syncing: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            integrations_installing: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            cloud_syncing: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            sync_progress: std::sync::Arc::new(std::sync::Mutex::new(None)),
-        })
+        build_router(
+            AppState {
+                syncing: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                integrations_installing: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(
+                    false,
+                )),
+                cloud_syncing: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                sync_progress: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            },
+            routes::HostAllowlist::for_tests(),
+        )
+    }
+
+    /// Helper: attach `Host: 127.0.0.1` and a loopback `ConnectInfo` so
+    /// requests pass both `require_local_host` and `require_loopback`.
+    fn with_loopback(mut req: Request<Body>) -> Request<Body> {
+        if !req.headers().contains_key(axum::http::header::HOST) {
+            req.headers_mut().insert(
+                axum::http::header::HOST,
+                axum::http::HeaderValue::from_static("127.0.0.1"),
+            );
+        }
+        req.extensions_mut()
+            .insert(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 54545))));
+        req
     }
 
     #[test]
@@ -690,10 +725,8 @@ mod tests {
     #[tokio::test]
     async fn health_returns_ok() {
         let app = test_app();
-        let resp = app
-            .oneshot(Request::get("/health").body(Body::empty()).unwrap())
-            .await
-            .unwrap();
+        let req = with_loopback(Request::get("/health").body(Body::empty()).unwrap());
+        let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         let body = resp.into_body().collect().await.unwrap().to_bytes();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
@@ -708,35 +741,36 @@ mod tests {
     #[tokio::test]
     async fn favicon_returns_ok() {
         let app = test_app();
-        let resp = app
-            .oneshot(Request::get("/favicon.ico").body(Body::empty()).unwrap())
-            .await
-            .unwrap();
+        let req = with_loopback(Request::get("/favicon.ico").body(Body::empty()).unwrap());
+        let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
     }
 
     #[tokio::test]
     async fn protected_admin_route_requires_connect_info() {
+        // No `ConnectInfo` extension — but still set a valid Host so we
+        // exercise the require_loopback branch instead of being short-
+        // circuited by the new require_local_host middleware (#695).
         let app = test_app();
-        let resp = app
-            .oneshot(
-                Request::get("/admin/providers")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
+        let mut req = Request::get("/admin/providers")
+            .body(Body::empty())
             .unwrap();
+        req.headers_mut().insert(
+            axum::http::header::HOST,
+            axum::http::HeaderValue::from_static("127.0.0.1"),
+        );
+        let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::FORBIDDEN);
     }
 
     #[tokio::test]
     async fn protected_admin_route_allows_loopback_client() {
         let app = test_app();
-        let mut req = Request::get("/admin/providers")
-            .body(Body::empty())
-            .unwrap();
-        req.extensions_mut()
-            .insert(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 54545))));
+        let req = with_loopback(
+            Request::get("/admin/providers")
+                .body(Body::empty())
+                .unwrap(),
+        );
         let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
     }
@@ -747,6 +781,10 @@ mod tests {
         let mut req = Request::get("/admin/providers")
             .body(Body::empty())
             .unwrap();
+        req.headers_mut().insert(
+            axum::http::header::HOST,
+            axum::http::HeaderValue::from_static("127.0.0.1"),
+        );
         req.extensions_mut()
             .insert(ConnectInfo(SocketAddr::from(([192, 168, 1, 10], 54545))));
         let resp = app.oneshot(req).await.unwrap();
@@ -757,6 +795,10 @@ mod tests {
     async fn sync_mutation_route_blocks_non_loopback_client() {
         let app = test_app();
         let mut req = Request::post("/sync").body(Body::empty()).unwrap();
+        req.headers_mut().insert(
+            axum::http::header::HOST,
+            axum::http::HeaderValue::from_static("127.0.0.1"),
+        );
         req.extensions_mut()
             .insert(ConnectInfo(SocketAddr::from(([10, 0, 0, 4], 43434))));
         let resp = app.oneshot(req).await.unwrap();
@@ -767,6 +809,10 @@ mod tests {
     async fn cloud_sync_route_blocks_non_loopback_client() {
         let app = test_app();
         let mut req = Request::post("/cloud/sync").body(Body::empty()).unwrap();
+        req.headers_mut().insert(
+            axum::http::header::HOST,
+            axum::http::HeaderValue::from_static("127.0.0.1"),
+        );
         req.extensions_mut()
             .insert(ConnectInfo(SocketAddr::from(([10, 0, 0, 4], 43434))));
         let resp = app.oneshot(req).await.unwrap();
@@ -776,10 +822,8 @@ mod tests {
     #[tokio::test]
     async fn cloud_status_route_public_and_reports_shape() {
         let app = test_app();
-        let resp = app
-            .oneshot(Request::get("/cloud/status").body(Body::empty()).unwrap())
-            .await
-            .unwrap();
+        let req = with_loopback(Request::get("/cloud/status").body(Body::empty()).unwrap());
+        let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         let body = resp.into_body().collect().await.unwrap().to_bytes();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
@@ -795,6 +839,141 @@ mod tests {
             json.get("endpoint").is_some(),
             "cloud/status should include `endpoint`"
         );
+    }
+
+    // ─── #695 DNS-rebinding / Host-header allowlist regression tests ─────
+    //
+    // These tests pin the spec contract from the ticket acceptance:
+    //
+    // - GET /health with Host: attacker.example   → 403
+    // - GET /health with Host: 127.0.0.1[:port]   → 200
+    // - GET /analytics/sessions with bad Host     → 403
+    // - POST /admin/integrations/install with bad Host AND a loopback
+    //   peer IP → 403 (the rebinding-attack shape).
+    //
+    // The peer IP is loopback in every "bad Host" case below — that's
+    // the whole point of DNS rebinding. The middleware closes the gap
+    // that `require_loopback` leaves open.
+
+    fn with_host_and_loopback(
+        uri: &str,
+        host: &'static str,
+        method: axum::http::Method,
+    ) -> Request<Body> {
+        let mut req = Request::builder()
+            .method(method)
+            .uri(uri)
+            .body(Body::empty())
+            .unwrap();
+        req.headers_mut().insert(
+            axum::http::header::HOST,
+            axum::http::HeaderValue::from_static(host),
+        );
+        req.extensions_mut()
+            .insert(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 54545))));
+        req
+    }
+
+    #[tokio::test]
+    async fn host_allowlist_rejects_rebound_host_on_health() {
+        let app = test_app();
+        let req = with_host_and_loopback("/health", "attacker.example", axum::http::Method::GET);
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["ok"], false);
+        assert_eq!(json["error"], "invalid Host header");
+    }
+
+    #[tokio::test]
+    async fn host_allowlist_accepts_loopback_host_on_health() {
+        let app = test_app();
+        // Bare `127.0.0.1` (no port) is accepted — the allowlist contains
+        // the bare host as well as `host:port`.
+        let req = with_host_and_loopback("/health", "127.0.0.1", axum::http::Method::GET);
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn host_allowlist_accepts_localhost_with_port() {
+        let app = test_app();
+        // `for_tests()` allowlist was built with port 0, so `localhost:0`
+        // is valid; `localhost` (bare) is also valid.
+        let req = with_host_and_loopback("/health", "localhost:0", axum::http::Method::GET);
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn host_allowlist_rejects_rebound_host_on_analytics_sessions() {
+        let app = test_app();
+        let req = with_host_and_loopback(
+            "/analytics/sessions",
+            "rebound.example",
+            axum::http::Method::GET,
+        );
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn host_allowlist_rejects_rebound_host_on_admin_install_even_with_loopback_peer() {
+        // The rebinding-attack shape: peer IP is loopback (because the
+        // browser dialed 127.0.0.1), Host header is the attacker's
+        // rebound name. Pre-#695 the loopback peer alone let this
+        // through; with the Host check, it is rejected before the
+        // handler runs.
+        let app = test_app();
+        let req = with_host_and_loopback(
+            "/admin/integrations/install",
+            "attacker.example",
+            axum::http::Method::POST,
+        );
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn host_allowlist_rejects_missing_host_header() {
+        let app = test_app();
+        // No Host header at all — `oneshot` does not synthesize one.
+        // Anomalous on a loopback API and treated as bad.
+        let mut req = Request::get("/health").body(Body::empty()).unwrap();
+        req.extensions_mut()
+            .insert(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 54545))));
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[test]
+    fn host_allowlist_includes_configured_override_host() {
+        // Operator runs `budi-daemon serve --host 192.168.1.50 --port 7878`
+        // — that exact `host:port` literal is added to the allowlist so
+        // requests issued by tools using the configured base URL still
+        // reach the daemon.
+        let allow = routes::HostAllowlist::new("192.168.1.50", 7878);
+        assert!(allow.allows("192.168.1.50:7878"));
+        assert!(allow.allows("192.168.1.50"));
+        assert!(allow.allows("127.0.0.1:7878"));
+        assert!(allow.allows("[::1]:7878"));
+        assert!(allow.allows("localhost:7878"));
+        assert!(!allow.allows("attacker.example"));
+        assert!(!allow.allows("attacker.example:7878"));
+    }
+
+    #[test]
+    fn host_allowlist_skips_wildcard_bind_sentinel() {
+        // `--host 0.0.0.0` is a wildcard listener bind; the literal
+        // `0.0.0.0` is never a valid Host value clients would send, so
+        // it must not become an allowlist entry. Loopback variants are
+        // still admitted (those are the real client paths).
+        let allow = routes::HostAllowlist::new("0.0.0.0", 7878);
+        assert!(!allow.allows("0.0.0.0"));
+        assert!(!allow.allows("0.0.0.0:7878"));
+        assert!(allow.allows("127.0.0.1:7878"));
+        assert!(allow.allows("localhost:7878"));
     }
 
     // ─── #366 stale-schema 503 regression tests ──────────────────────────
