@@ -276,7 +276,7 @@ pub struct StatsOpts {
     /// `file` detail views (recommended when names repeat across repos).
     #[arg(long, global = true)]
     pub repo: Option<String>,
-    /// Filter by provider (e.g. claude_code, cursor, codex, copilot_cli, copilot_chat, openai). Only meaningful for the default summary view.
+    /// Filter by provider (e.g. claude_code, cursor, codex, copilot_cli, copilot_chat, openai). Applies to the default summary view and every breakdown subcommand (`models`, `projects`, `branches`, `tickets`, `activities`, `files`).
     #[arg(long, global = true)]
     pub provider: Option<String>,
     /// Maximum rows in breakdown views (`projects`, `branches`, `tickets`,

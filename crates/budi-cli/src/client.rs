@@ -269,6 +269,20 @@ impl DaemonClient {
         Ok(Self { base_url, client })
     }
 
+    /// Build a client pinned to a specific base URL. Test-only — production
+    /// callers use [`DaemonClient::connect`] which auto-starts the daemon.
+    #[cfg(test)]
+    pub(crate) fn for_tests(base_url: impl Into<String>) -> Self {
+        Self {
+            base_url: base_url.into(),
+            client: Client::builder()
+                .timeout(Duration::from_secs(5))
+                .connect_timeout(Duration::from_secs(2))
+                .build()
+                .expect("build test client"),
+        }
+    }
+
     pub(crate) fn load_config() -> BudiConfig {
         std::env::current_dir()
             .ok()
@@ -566,6 +580,7 @@ impl DaemonClient {
         &self,
         since: Option<&str>,
         until: Option<&str>,
+        providers: Option<&str>,
         limit: usize,
     ) -> Result<BreakdownPage<RepoUsage>> {
         let mut params: Vec<(&str, String)> = Vec::new();
@@ -574,6 +589,9 @@ impl DaemonClient {
         }
         if let Some(u) = until {
             params.push(("until", u.to_string()));
+        }
+        if let Some(p) = providers {
+            params.push(("providers", p.to_string()));
         }
         params.push(("limit", limit.to_string()));
         let resp = self
@@ -616,6 +634,7 @@ impl DaemonClient {
         &self,
         since: Option<&str>,
         until: Option<&str>,
+        providers: Option<&str>,
         limit: usize,
     ) -> Result<BreakdownPage<BranchCost>> {
         let mut params: Vec<(&str, String)> = Vec::new();
@@ -624,6 +643,9 @@ impl DaemonClient {
         }
         if let Some(u) = until {
             params.push(("until", u.to_string()));
+        }
+        if let Some(p) = providers {
+            params.push(("providers", p.to_string()));
         }
         params.push(("limit", limit.to_string()));
         let resp = self
@@ -680,6 +702,7 @@ impl DaemonClient {
         &self,
         since: Option<&str>,
         until: Option<&str>,
+        providers: Option<&str>,
         limit: usize,
     ) -> Result<BreakdownPage<TicketCost>> {
         let mut params: Vec<(&str, String)> = Vec::new();
@@ -688,6 +711,9 @@ impl DaemonClient {
         }
         if let Some(u) = until {
             params.push(("until", u.to_string()));
+        }
+        if let Some(p) = providers {
+            params.push(("providers", p.to_string()));
         }
         params.push(("limit", limit.to_string()));
         let resp = self
@@ -746,6 +772,7 @@ impl DaemonClient {
         &self,
         since: Option<&str>,
         until: Option<&str>,
+        providers: Option<&str>,
         limit: usize,
     ) -> Result<BreakdownPage<ActivityCost>> {
         let mut params: Vec<(&str, String)> = Vec::new();
@@ -754,6 +781,9 @@ impl DaemonClient {
         }
         if let Some(u) = until {
             params.push(("until", u.to_string()));
+        }
+        if let Some(p) = providers {
+            params.push(("providers", p.to_string()));
         }
         params.push(("limit", limit.to_string()));
         let resp = self
@@ -811,6 +841,7 @@ impl DaemonClient {
         &self,
         since: Option<&str>,
         until: Option<&str>,
+        providers: Option<&str>,
         limit: usize,
     ) -> Result<BreakdownPage<FileCost>> {
         let mut params: Vec<(&str, String)> = Vec::new();
@@ -819,6 +850,9 @@ impl DaemonClient {
         }
         if let Some(u) = until {
             params.push(("until", u.to_string()));
+        }
+        if let Some(p) = providers {
+            params.push(("providers", p.to_string()));
         }
         params.push(("limit", limit.to_string()));
         let resp = self
@@ -873,6 +907,7 @@ impl DaemonClient {
         &self,
         since: Option<&str>,
         until: Option<&str>,
+        providers: Option<&str>,
         limit: usize,
     ) -> Result<BreakdownPage<ModelUsage>> {
         let mut params: Vec<(&str, String)> = Vec::new();
@@ -881,6 +916,9 @@ impl DaemonClient {
         }
         if let Some(u) = until {
             params.push(("until", u.to_string()));
+        }
+        if let Some(p) = providers {
+            params.push(("providers", p.to_string()));
         }
         params.push(("limit", limit.to_string()));
         let resp = self
@@ -1144,6 +1182,138 @@ mod tests {
                 "Failed to validate or restart budi daemon. Run `budi doctor` to diagnose."
             ),
             "unexpected error: {err}"
+        );
+    }
+
+    // ─── #682: breakdown methods forward `--provider` as `?providers=` ───
+    //
+    // Each breakdown HTTP method must thread the CLI `--provider` flag into
+    // a `providers=` query parameter so the daemon's `DimensionParams` (which
+    // aliases `providers` → `agents`) can scope the SQL filter. Pre-#682 the
+    // CLI accepted `--provider X` for the summary view only and silently
+    // dropped it on every breakdown — the bug this ticket fixes.
+
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::sync::mpsc;
+    use std::thread;
+
+    /// Spin up a one-shot HTTP server on 127.0.0.1, capture the first
+    /// request's path+query, respond with `body`, and return the captured
+    /// request line. The empty JSON body matches `BreakdownPage<T>` for any
+    /// `T` that has no required fields beyond the ones below.
+    fn one_shot_server(body: &'static str) -> (String, mpsc::Receiver<String>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let port = listener.local_addr().unwrap().port();
+        let (tx, rx) = mpsc::channel();
+        thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept");
+            let mut buf = [0u8; 4096];
+            let n = stream.read(&mut buf).unwrap_or(0);
+            let req = String::from_utf8_lossy(&buf[..n]).to_string();
+            // First line is `GET /path?query HTTP/1.1`.
+            let request_line = req.lines().next().unwrap_or("").to_string();
+            let _ = tx.send(request_line);
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            let _ = stream.write_all(resp.as_bytes());
+        });
+        (format!("http://127.0.0.1:{port}"), rx)
+    }
+
+    fn assert_providers_forwarded(request_line: &str, expected: &str) {
+        assert!(
+            request_line.contains(&format!("providers={expected}")),
+            "expected `providers={expected}` in request line, got: {request_line}"
+        );
+    }
+
+    /// Empty `BreakdownPage` JSON. Works for every `T` because both
+    /// `rows` and `other` are absent / empty. Produced as a `&'static str`
+    /// so the spawned thread has no lifetime issues.
+    const EMPTY_PAGE_BODY: &str =
+        r#"{"rows":[],"total_cost_cents":0.0,"total_rows":0,"shown_rows":0,"limit":5}"#;
+
+    #[test]
+    fn projects_forwards_provider_filter() {
+        let (base, rx) = one_shot_server(EMPTY_PAGE_BODY);
+        let client = DaemonClient::for_tests(base);
+        let _ = client
+            .projects(None, None, Some("copilot_chat"), 5)
+            .expect("projects call");
+        let req = rx.recv_timeout(Duration::from_secs(5)).expect("captured");
+        assert_providers_forwarded(&req, "copilot_chat");
+    }
+
+    #[test]
+    fn branches_forwards_provider_filter() {
+        let (base, rx) = one_shot_server(EMPTY_PAGE_BODY);
+        let client = DaemonClient::for_tests(base);
+        let _ = client
+            .branches(None, None, Some("copilot_chat"), 5)
+            .expect("branches call");
+        let req = rx.recv_timeout(Duration::from_secs(5)).expect("captured");
+        assert_providers_forwarded(&req, "copilot_chat");
+    }
+
+    #[test]
+    fn tickets_forwards_provider_filter() {
+        let (base, rx) = one_shot_server(EMPTY_PAGE_BODY);
+        let client = DaemonClient::for_tests(base);
+        let _ = client
+            .tickets(None, None, Some("copilot_chat"), 5)
+            .expect("tickets call");
+        let req = rx.recv_timeout(Duration::from_secs(5)).expect("captured");
+        assert_providers_forwarded(&req, "copilot_chat");
+    }
+
+    #[test]
+    fn activities_forwards_provider_filter() {
+        let (base, rx) = one_shot_server(EMPTY_PAGE_BODY);
+        let client = DaemonClient::for_tests(base);
+        let _ = client
+            .activities(None, None, Some("copilot_chat"), 5)
+            .expect("activities call");
+        let req = rx.recv_timeout(Duration::from_secs(5)).expect("captured");
+        assert_providers_forwarded(&req, "copilot_chat");
+    }
+
+    #[test]
+    fn files_forwards_provider_filter() {
+        let (base, rx) = one_shot_server(EMPTY_PAGE_BODY);
+        let client = DaemonClient::for_tests(base);
+        let _ = client
+            .files(None, None, Some("copilot_chat"), 5)
+            .expect("files call");
+        let req = rx.recv_timeout(Duration::from_secs(5)).expect("captured");
+        assert_providers_forwarded(&req, "copilot_chat");
+    }
+
+    #[test]
+    fn models_forwards_provider_filter() {
+        let (base, rx) = one_shot_server(EMPTY_PAGE_BODY);
+        let client = DaemonClient::for_tests(base);
+        let _ = client
+            .models(None, None, Some("copilot_chat"), 5)
+            .expect("models call");
+        let req = rx.recv_timeout(Duration::from_secs(5)).expect("captured");
+        assert_providers_forwarded(&req, "copilot_chat");
+    }
+
+    #[test]
+    fn breakdown_omits_providers_when_filter_is_none() {
+        // `--provider` unset must not synthesize a stray `providers=` —
+        // the daemon would treat empty-string as "filter to nothing".
+        let (base, rx) = one_shot_server(EMPTY_PAGE_BODY);
+        let client = DaemonClient::for_tests(base);
+        let _ = client.models(None, None, None, 5).expect("models call");
+        let req = rx.recv_timeout(Duration::from_secs(5)).expect("captured");
+        assert!(
+            !req.contains("providers="),
+            "no provider filter must omit the param entirely, got: {req}"
         );
     }
 }
