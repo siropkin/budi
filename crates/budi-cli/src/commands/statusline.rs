@@ -162,7 +162,9 @@ fn build_slot_values(data: &Value) -> HashMap<String, String> {
         vals.insert("session".to_string(), fmt_cost(v));
     }
     if let Some(v) = data.get("session_msg_cost").and_then(|v| v.as_f64()) {
-        vals.insert("message".to_string(), fmt_cost(v / 100.0));
+        // #692: daemon now hands `session_msg_cost` in dollars (matching every
+        // other `*_cost` field). No client-side unit conversion.
+        vals.insert("message".to_string(), fmt_cost(v));
     }
     if let Some(v) = data.get("branch_cost").and_then(|v| v.as_f64()) {
         vals.insert("branch".to_string(), fmt_cost(v));
@@ -879,12 +881,15 @@ mod tests {
 
     #[test]
     fn build_slot_values_includes_session_and_message() {
+        // #692: daemon now hands `session_msg_cost` in dollars (matching every
+        // other `*_cost` field). The slot value is rendered straight, with no
+        // client-side unit conversion.
         let data = json!({
             "cost_1d": 10.0,
             "cost_7d": 50.0,
             "cost_30d": 200.0,
             "session_cost": 6.23,
-            "session_msg_cost": 8.0,
+            "session_msg_cost": 0.08,
         });
         let vals = build_slot_values(&data);
         assert_eq!(vals.get("session").unwrap(), "$6.23");
@@ -897,18 +902,35 @@ mod tests {
         // assistant calls should render `message` ≈ `session` because the
         // user-typed prompt count (1) is the denominator. Pre-#691 the
         // denominator was every assistant row (3 here) and the slot read low.
-        // The daemon emits session_msg_cost in cents (=$6.23 * 100 / 1 prompt
-        // = 623 cents); the slot divides by 100 for dollars.
+        // #692: daemon emits both `session_cost` and `session_msg_cost` in
+        // dollars; with one user prompt the two fields are equal.
         let data = json!({
             "cost_1d": 10.0,
             "cost_7d": 50.0,
             "cost_30d": 200.0,
             "session_cost": 6.23,
-            "session_msg_cost": 623.0,
+            "session_msg_cost": 6.23,
         });
         let vals = build_slot_values(&data);
         assert_eq!(vals.get("session").unwrap(), "$6.23");
         assert_eq!(vals.get("message").unwrap(), "$6.23");
+    }
+
+    #[test]
+    fn build_slot_values_message_does_not_double_divide_by_100() {
+        // #692 regression pin: a fixture with `session_msg_cost: 8.0` is
+        // dollars now, so the rendered slot is "$8.00" — NOT "$0.08" (which
+        // is what the old cents-then-/100 code path produced). This catches
+        // any future drift where the CLI silently re-introduces the divide.
+        let data = json!({
+            "cost_1d": 10.0,
+            "cost_7d": 50.0,
+            "cost_30d": 200.0,
+            "session_cost": 8.0,
+            "session_msg_cost": 8.0,
+        });
+        let vals = build_slot_values(&data);
+        assert_eq!(vals.get("message").unwrap(), "$8.00");
     }
 
     #[test]

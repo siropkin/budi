@@ -3310,7 +3310,9 @@ pub struct StatuslineStats {
     pub health_state: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub health_tip: Option<String>,
-    /// Per-message cost in cents for the active session (for statusline rate display).
+    /// Per-user-prompt cost in dollars for the active session (for statusline
+    /// rate display). #692: this is in dollars to match every other `*_cost`
+    /// field in the response — pre-#692 it was in cents and the CLI divided.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub session_msg_cost: Option<f64>,
     /// Disclaimer for Cursor sessions that ended recently, as their cost data
@@ -3545,8 +3547,12 @@ pub fn statusline_stats(
             // without inflating the denominator. `user_prompt_count` carries
             // the copilot_chat fallback for sessions with no captured user
             // rows (see `compute_user_prompt_count`).
+            //
+            // #692: convert to dollars on the daemon side so every `*_cost`
+            // field in the statusline response is in the same unit. CLI no
+            // longer divides by 100.
             let avg = if h.user_prompt_count > 0 {
-                Some(h.total_cost_cents / h.user_prompt_count as f64)
+                Some((h.total_cost_cents / h.user_prompt_count as f64) / 100.0)
             } else {
                 None
             };
