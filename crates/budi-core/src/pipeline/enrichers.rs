@@ -66,6 +66,19 @@ impl Enricher for GitEnricher {
             emit::ticket(&mut tags, &ticket, source);
         }
 
+        // #688: surface non-authoritative cwd provenance. Set by upstream
+        // parsers (e.g. Copilot Chat emptyWindow editor-context fallback)
+        // when `cwd` did not come from the provider's primary workspace
+        // location. Authoritative cwds leave `msg.cwd_source = None` and
+        // produce no tag, keeping the workspace-anchored path of #681
+        // unaffected.
+        if let Some(ref source) = msg.cwd_source {
+            tags.push(Tag {
+                key: tk::CWD_SOURCE.to_string(),
+                value: source.clone(),
+            });
+        }
+
         tags
     }
 }

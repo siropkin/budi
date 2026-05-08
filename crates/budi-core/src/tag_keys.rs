@@ -93,6 +93,19 @@ pub const FILE_PATH_SOURCE: &str = "file_path_source";
 /// per message.
 pub const FILE_PATH_CONFIDENCE: &str = "file_path_confidence";
 
+/// Source of a non-authoritative cwd. Emitted only when the cwd was
+/// derived from a fallback signal rather than the primary
+/// workspace-anchored path. Stable values:
+/// - `copilot_chat:editor_context_hint` — Copilot Chat emptyWindow
+///   session whose cwd was derived from the user's currently-open file
+///   in `result.metadata.renderedUserMessage[*].text`'s `<editorContext>`
+///   block (#688).
+///
+/// Absent when cwd came from the authoritative source for the provider
+/// (e.g. workspace.json for Copilot Chat). Lets analytics distinguish
+/// authoritative cwds from hint cwds.
+pub const CWD_SOURCE: &str = "cwd_source";
+
 /// Identity tags: constant for the entire session, deduplicated to one
 /// assistant message per session.
 pub const SESSION_IDENTITY_KEYS: &[&str] = &[

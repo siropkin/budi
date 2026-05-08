@@ -206,6 +206,14 @@ pub struct ParsedMessage {
     /// originating assistant message by `tool_use_id` and emits
     /// `tool_outcome` tags there. Added in R1.5 (#293); see ADR-0088 §5.
     pub tool_outcomes: Vec<ToolOutcome>,
+    /// Source label for `cwd` when the cwd was derived from a fallback
+    /// signal rather than the provider's authoritative location. `None`
+    /// means cwd is either absent or came from the authoritative source
+    /// (workspace.json for Copilot Chat, transcript metadata for Claude
+    /// Code, etc.). When set, the pipeline emits a sibling `cwd_source`
+    /// tag via `tag_keys::CWD_SOURCE`. Added in #688 for Copilot Chat
+    /// emptyWindow editor-context hints.
+    pub cwd_source: Option<String>,
 }
 
 /// One provider-reported tool outcome. Content is never stored — we only
@@ -254,6 +262,7 @@ impl Default for ParsedMessage {
             tool_use_ids: Vec::new(),
             tool_files: Vec::new(),
             tool_outcomes: Vec::new(),
+            cwd_source: None,
         }
     }
 }
@@ -543,6 +552,7 @@ fn parse_line(line: &str) -> Option<ParsedMessage> {
                 tool_use_ids: Vec::new(),
                 tool_files: Vec::new(),
                 tool_outcomes,
+                cwd_source: None,
             })
         }
         TranscriptEntry::Assistant(a) => {
@@ -595,6 +605,7 @@ fn parse_line(line: &str) -> Option<ParsedMessage> {
                 tool_use_ids,
                 tool_files,
                 tool_outcomes: Vec::new(),
+                cwd_source: None,
             })
         }
         TranscriptEntry::Other => None,
@@ -660,6 +671,7 @@ fn parse_flat_line(line: &str) -> Option<ParsedMessage> {
                 tool_use_ids,
                 tool_files,
                 tool_outcomes: Vec::new(),
+                cwd_source: None,
             })
         }
         "user" => Some(ParsedMessage {

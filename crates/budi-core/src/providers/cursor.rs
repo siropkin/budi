@@ -1069,6 +1069,7 @@ fn usage_events_to_messages(
                 tool_use_ids: Vec::new(),
                 tool_files: Vec::new(),
                 tool_outcomes: Vec::new(),
+                cwd_source: None,
             }
         })
         .collect()
@@ -1492,6 +1493,7 @@ fn bubble_to_parsed_message(
             tool_use_ids: Vec::new(),
             tool_files: Vec::new(),
             tool_outcomes: Vec::new(),
+            cwd_source: None,
         })
     } else {
         let resolved_model = match row.model.as_deref().map(str::trim) {
@@ -1539,6 +1541,7 @@ fn bubble_to_parsed_message(
             tool_use_ids: Vec::new(),
             tool_files: Vec::new(),
             tool_outcomes: Vec::new(),
+            cwd_source: None,
         })
     }
 }
@@ -2180,6 +2183,7 @@ fn parse_cursor_line(
                 tool_use_ids: Vec::new(),
                 tool_files: Vec::new(),
                 tool_outcomes: Vec::new(),
+                cwd_source: None,
             })
         }
         "assistant" | "ai" | "model" => {
@@ -2216,6 +2220,7 @@ fn parse_cursor_line(
                 tool_use_ids: Vec::new(),
                 tool_files,
                 tool_outcomes: Vec::new(),
+                cwd_source: None,
             })
         }
         _ => None,
