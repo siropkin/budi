@@ -90,16 +90,118 @@ fn backup_invalid_json(path: &Path) -> Result<PathBuf> {
 }
 
 /// Write JSON to a file atomically (write to .tmp, then rename).
+///
+/// Two contracts beyond the bare write-then-rename (#697):
+///
+/// 1. **Mode bits preserved.** If the target file already exists, its
+///    `st_mode` is captured before the rename and restored after, so a
+///    user-set `chmod 600 ~/.claude/settings.json` survives `budi init`
+///    rather than reverting to the writer's umask (typically 644).
+///    Unix only — Windows is a no-op.
+/// 2. **Symlinks preserved.** If `path` is a symlink (dotfile managers
+///    like `chezmoi`/`stow`/`yadm` symlink configs into a Git-tracked
+///    repo), the symlink itself is left intact and the new content is
+///    written atomically at its canonicalized target. If we can't
+///    place the tmp inside the target's parent (cross-filesystem
+///    rename, permissions, etc.), we fall back to a non-atomic
+///    in-place write through the symlink and emit a warning so
+///    dotfile managers don't desync silently.
 pub fn atomic_write_json(path: &Path, value: &Value) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("Failed to create {}", parent.display()))?;
-    }
     let out = serde_json::to_string_pretty(value)?;
-    let tmp = path.with_extension(format!("json.{}.tmp", std::process::id()));
+
+    // If `path` is a symlink, write to its canonical target so the
+    // symlink survives — dotfile managers expect the source-of-truth
+    // file (in their tracked repo) to be the one mutated, not the
+    // symlink itself.
+    let symlink_meta = fs::symlink_metadata(path).ok();
+    let is_symlink = symlink_meta
+        .as_ref()
+        .map(|m| m.file_type().is_symlink())
+        .unwrap_or(false);
+
+    let write_target: PathBuf = if is_symlink {
+        match fs::canonicalize(path) {
+            Ok(real) => real,
+            Err(e) => {
+                tracing::warn!(
+                    "atomic_write_json: {} is a symlink but its target could not be \
+                     resolved ({}); writing through the symlink (non-atomic)",
+                    path.display(),
+                    e
+                );
+                fs::write(path, &out)
+                    .with_context(|| format!("Failed to write {}", path.display()))?;
+                return Ok(());
+            }
+        }
+    } else {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)
+                .with_context(|| format!("Failed to create {}", parent.display()))?;
+        }
+        path.to_path_buf()
+    };
+
+    // Capture the target's mode bits before we replace it so the
+    // umask-derived mode of the freshly written tmp doesn't silently
+    // relax a user-set `chmod 600`.
+    #[cfg(unix)]
+    let preserved_mode: Option<u32> = fs::metadata(&write_target).ok().map(|m| {
+        use std::os::unix::fs::PermissionsExt;
+        m.permissions().mode()
+    });
+
+    // Place the tmp next to the resolved target so the rename stays on
+    // the same filesystem.
+    let tmp_dir = write_target
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| PathBuf::from("."));
+    let tmp_name = format!(
+        "{}.{}.tmp",
+        write_target
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("budi"),
+        std::process::id()
+    );
+    let tmp = tmp_dir.join(tmp_name);
+
     fs::write(&tmp, &out).with_context(|| format!("Failed to write {}", tmp.display()))?;
-    fs::rename(&tmp, path)
-        .with_context(|| format!("Failed to rename {} → {}", tmp.display(), path.display()))?;
+
+    if let Err(e) = fs::rename(&tmp, &write_target) {
+        // Cross-filesystem rename, missing-parent race, or similar —
+        // fall back to a plain in-place write so the user sees *some*
+        // update rather than silent loss. The warn lets dotfile-manager
+        // users notice the divergence on next sync.
+        tracing::warn!(
+            "atomic_write_json: rename {} → {} failed ({}); falling back to in-place write",
+            tmp.display(),
+            write_target.display(),
+            e
+        );
+        let _ = fs::remove_file(&tmp);
+        fs::write(&write_target, &out)
+            .with_context(|| format!("Failed to write {}", write_target.display()))?;
+    }
+
+    // Restore the original mode bits captured above (Unix only). The
+    // tmp file picked up the umask of the writing process, so without
+    // this step a `chmod 600` config gets quietly broadened to 644.
+    #[cfg(unix)]
+    if let Some(mode) = preserved_mode {
+        use std::os::unix::fs::PermissionsExt;
+        let perms = std::fs::Permissions::from_mode(mode);
+        if let Err(e) = fs::set_permissions(&write_target, perms) {
+            tracing::warn!(
+                "atomic_write_json: failed to restore mode 0o{:o} on {}: {}",
+                mode,
+                write_target.display(),
+                e
+            );
+        }
+    }
+
     Ok(())
 }
 
@@ -401,6 +503,82 @@ mod tests {
         ] {
             assert!(msg.contains(expected), "error '{msg}' missing '{expected}'");
         }
+    }
+
+    // --- atomic_write_json (#697) ------------------------------------
+
+    /// `chmod 600` on a pre-existing settings.json must survive a
+    /// rewrite. Without mode preservation the tmp file's umask-derived
+    /// mode (typically 644) becomes the new mode after the rename and
+    /// quietly relaxes the user's privacy setting.
+    #[cfg(unix)]
+    #[test]
+    fn atomic_write_json_preserves_mode_bits() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = std::env::temp_dir().join(format!(
+            "budi-atomic-mode-{}-{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        let file = dir.join("settings.json");
+        std::fs::write(&file, "{}\n").expect("seed file");
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600)).expect("chmod 600");
+
+        atomic_write_json(&file, &serde_json::json!({"updated": true}))
+            .expect("atomic write should succeed");
+
+        let mode = std::fs::metadata(&file)
+            .expect("stat after write")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600, "expected mode to stay 0o600, got 0o{mode:o}");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// When the target path is a symlink (dotfile managers like
+    /// chezmoi / stow / yadm rely on this layout), the symlink itself
+    /// must survive and the new content must land at the symlink's
+    /// canonical target.
+    #[cfg(unix)]
+    #[test]
+    fn atomic_write_json_preserves_symlinks() {
+        use std::os::unix::fs;
+
+        let dir = std::env::temp_dir().join(format!(
+            "budi-atomic-symlink-{}-{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        let target = dir.join("target.json");
+        let link = dir.join("settings.json");
+        std::fs::write(&target, "{}\n").expect("seed target");
+        fs::symlink(&target, &link).expect("create symlink");
+
+        atomic_write_json(&link, &serde_json::json!({"via": "symlink"}))
+            .expect("atomic write through symlink should succeed");
+
+        let link_meta = std::fs::symlink_metadata(&link).expect("stat the link path itself");
+        assert!(
+            link_meta.file_type().is_symlink(),
+            "link must still be a symlink after write"
+        );
+        let resolved = std::fs::read_link(&link).expect("read symlink target");
+        assert_eq!(
+            resolved, target,
+            "symlink must still point at the original target"
+        );
+        let body = std::fs::read_to_string(&target).expect("read canonical target");
+        assert!(
+            body.contains("\"via\""),
+            "new content must land at the canonical target, got: {body}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
