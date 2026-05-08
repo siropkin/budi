@@ -110,6 +110,13 @@ pub struct MessagesParams {
     pub sort_asc: Option<bool>,
     pub limit: Option<usize>,
     pub offset: Option<usize>,
+    /// Singular `?provider=<name>` filter, mirroring `SummaryParams`.
+    /// Multi-value `?providers=a,b` flows through the flattened
+    /// `DimensionParams.agents` field below (which has `providers` /
+    /// `agent` aliases).
+    pub provider: Option<String>,
+    #[serde(flatten)]
+    pub filters: DimensionParams,
 }
 
 const VALID_MESSAGE_SORT_BY: &[&str] = &[
@@ -151,6 +158,7 @@ pub async fn analytics_messages(
             VALID_MESSAGE_SORT_BY.join(", ")
         )));
     }
+    let filters = parse_dimension_filters(&params.filters);
     let result = tokio::task::spawn_blocking(move || {
         let db_path = analytics::db_path()?;
         let conn = analytics::open_db(&db_path)?;
@@ -164,6 +172,8 @@ pub async fn analytics_messages(
                 sort_asc: params.sort_asc.unwrap_or(false),
                 limit: params.limit.unwrap_or(50).min(200),
                 offset: params.offset.unwrap_or(0),
+                provider: params.provider.as_deref(),
+                filters: &filters,
             },
         )
     })

@@ -987,6 +987,7 @@ impl DaemonClient {
         since: Option<&str>,
         until: Option<&str>,
         search: Option<&str>,
+        provider: Option<&str>,
         ticket: Option<&str>,
         activity: Option<&str>,
         limit: usize,
@@ -1001,6 +1002,14 @@ impl DaemonClient {
         }
         if let Some(q) = search {
             params.push(("search", q.to_string()));
+        }
+        if let Some(p) = provider {
+            // `/analytics/sessions` filters via `DimensionParams` (flattened
+            // into `SessionsQueryParams`), whose `agents` field aliases
+            // `providers`. Send the CLI's already-normalized provider name
+            // through that key so the same SQL predicate breakdown routes
+            // already use kicks in.
+            params.push(("providers", p.to_string()));
         }
         if let Some(t) = ticket {
             params.push(("ticket", t.to_string()));

@@ -661,6 +661,7 @@ fn message_list_returns_messages() {
     let mut conn = test_db();
     ingest_messages(&mut conn, &sample_messages(), None).unwrap();
 
+    let filters = DimensionFilters::default();
     let result = message_list(
         &conn,
         &MessageListParams {
@@ -671,6 +672,8 @@ fn message_list_returns_messages() {
             sort_asc: false,
             limit: 50,
             offset: 0,
+            provider: None,
+            filters: &filters,
         },
     )
     .unwrap();
@@ -678,6 +681,146 @@ fn message_list_returns_messages() {
     assert_eq!(result.messages.len(), 1);
     assert_eq!(result.total_count, 1);
     assert_eq!(result.messages[0].input_tokens, 100);
+}
+
+// #683: `/analytics/messages` previously dropped `?provider=` silently.
+// Mixed-provider rows must split cleanly on the singular flag and on the
+// multi-value `providers` flatten alias used by every breakdown route.
+fn mixed_provider_messages() -> Vec<ParsedMessage> {
+    let mut msgs = sample_messages();
+    // Add a copilot_chat assistant row so the fixture has two providers.
+    msgs.push(ParsedMessage {
+        uuid: "a2".to_string(),
+        session_id: Some("sess-copilot".to_string()),
+        timestamp: "2026-03-14T18:30:00Z".parse().unwrap(),
+        cwd: Some("/home/user/project-a".to_string()),
+        role: "assistant".to_string(),
+        model: Some("gpt-4o".to_string()),
+        input_tokens: 11,
+        output_tokens: 7,
+        cache_creation_tokens: 0,
+        cache_read_tokens: 0,
+        git_branch: None,
+        repo_id: None,
+        provider: "copilot_chat".to_string(),
+        cost_cents: Some(0.3),
+        session_title: None,
+        parent_uuid: None,
+        user_name: None,
+        machine_name: None,
+        cost_confidence: "exact".to_string(),
+        pricing_source: None,
+        request_id: None,
+        speed: None,
+        cache_creation_1h_tokens: 0,
+        web_search_requests: 0,
+        prompt_category: None,
+        prompt_category_source: None,
+        prompt_category_confidence: None,
+        tool_names: Vec::new(),
+        tool_use_ids: Vec::new(),
+        tool_files: Vec::new(),
+        tool_outcomes: Vec::new(),
+    });
+    msgs
+}
+
+#[test]
+fn message_list_singular_provider_filter_partitions_rows() {
+    let mut conn = test_db();
+    ingest_messages(&mut conn, &mixed_provider_messages(), None).unwrap();
+
+    let filters = DimensionFilters::default();
+    let copilot = message_list(
+        &conn,
+        &MessageListParams {
+            since: None,
+            until: None,
+            search: None,
+            sort_by: None,
+            sort_asc: false,
+            limit: 50,
+            offset: 0,
+            provider: Some("copilot_chat"),
+            filters: &filters,
+        },
+    )
+    .unwrap();
+    assert_eq!(copilot.total_count, 1);
+    assert_eq!(copilot.messages.len(), 1);
+    assert_eq!(copilot.messages[0].provider, "copilot_chat");
+
+    let claude = message_list(
+        &conn,
+        &MessageListParams {
+            since: None,
+            until: None,
+            search: None,
+            sort_by: None,
+            sort_asc: false,
+            limit: 50,
+            offset: 0,
+            provider: Some("claude_code"),
+            filters: &filters,
+        },
+    )
+    .unwrap();
+    assert_eq!(claude.total_count, 1);
+    assert_eq!(claude.messages[0].provider, "claude_code");
+}
+
+#[test]
+fn message_list_multi_provider_filter_unions_rows() {
+    let mut conn = test_db();
+    ingest_messages(&mut conn, &mixed_provider_messages(), None).unwrap();
+
+    let filters = DimensionFilters {
+        agents: vec!["copilot_chat".to_string(), "claude_code".to_string()],
+        ..DimensionFilters::default()
+    }
+    .normalize();
+    let result = message_list(
+        &conn,
+        &MessageListParams {
+            since: None,
+            until: None,
+            search: None,
+            sort_by: None,
+            sort_asc: false,
+            limit: 50,
+            offset: 0,
+            provider: None,
+            filters: &filters,
+        },
+    )
+    .unwrap();
+    assert_eq!(result.total_count, 2);
+    assert_eq!(result.messages.len(), 2);
+}
+
+#[test]
+fn message_list_unknown_provider_returns_empty() {
+    let mut conn = test_db();
+    ingest_messages(&mut conn, &mixed_provider_messages(), None).unwrap();
+
+    let filters = DimensionFilters::default();
+    let result = message_list(
+        &conn,
+        &MessageListParams {
+            since: None,
+            until: None,
+            search: None,
+            sort_by: None,
+            sort_asc: false,
+            limit: 50,
+            offset: 0,
+            provider: Some("unknown_name"),
+            filters: &filters,
+        },
+    )
+    .unwrap();
+    assert_eq!(result.total_count, 0);
+    assert!(result.messages.is_empty());
 }
 
 #[test]

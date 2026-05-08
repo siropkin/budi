@@ -768,6 +768,11 @@ pub struct MessageListParams<'a> {
     pub sort_asc: bool,
     pub limit: usize,
     pub offset: usize,
+    /// Singular `?provider=<name>` shape — mirrors `SummaryParams`.
+    pub provider: Option<&'a str>,
+    /// Multi-value dimension filters (`providers`, `models`, `projects`,
+    /// `branches`) — same shape every breakdown route already accepts.
+    pub filters: &'a DimensionFilters,
 }
 
 /// List messages with pagination, search, and sorting.
@@ -782,6 +787,25 @@ pub fn message_list(conn: &Connection, p: &MessageListParams) -> Result<Paginate
         param_values.push(u.to_string());
         conditions.push(format!("messages.timestamp < ?{}", param_values.len()));
     }
+    if let Some(provider) = p.provider {
+        param_values.push(provider.to_string());
+        conditions.push(format!(
+            "COALESCE(messages.provider, 'claude_code') = ?{}",
+            param_values.len()
+        ));
+    }
+    let model_expr = normalized_model_expr("messages.model");
+    let project_expr = normalized_project_expr("messages.repo_id");
+    let branch_expr = normalized_branch_expr("COALESCE(messages.git_branch, s.git_branch)");
+    apply_dimension_filters(
+        &mut conditions,
+        &mut param_values,
+        p.filters,
+        "COALESCE(messages.provider, 'claude_code')",
+        &model_expr,
+        &project_expr,
+        &branch_expr,
+    );
     if let Some(q) = p.search
         && !q.is_empty()
     {
