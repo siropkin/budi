@@ -498,6 +498,13 @@ enum DbAction {
     },
     /// Import historical transcripts from Claude Code, Codex, Copilot CLI, and Cursor into the analytics database.
     ///
+    /// Backfills pre-existing transcripts the daemon seeded as history on
+    /// first boot. The live tailer skips bytes that pre-date budi
+    /// installation so it never re-emits old content as new; `budi db
+    /// import` is the documented way to bring that history into the
+    /// analytics database. `budi doctor` surfaces a corresponding hint
+    /// when there is something to backfill.
+    ///
     /// Use --force to clear all data and re-ingest from scratch (e.g. after upgrades).
     Import {
         /// Clear all data and re-ingest from scratch.
