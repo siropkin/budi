@@ -701,15 +701,45 @@ fn parent_dir_from_editor_context_text(text: &str) -> Option<String> {
         return None;
     }
 
-    let p = Path::new(raw_path);
-    if !p.is_absolute() {
+    // The editor-context path is whatever shape VS Code wrote on the user's
+    // machine — POSIX-style on macOS/Linux, drive-letter or UNC on Windows.
+    // `Path::is_absolute()` is platform-conditional (returns false for
+    // `/Users/...` when the test runs on Windows CI), so we recognise the
+    // three shapes explicitly and parse the parent off the literal string
+    // rather than via `Path::parent()`.
+    if !looks_absolute(raw_path) {
         return None;
     }
-    let parent = p.parent()?;
-    if parent.as_os_str().is_empty() {
-        return None;
+    parent_dir_string(raw_path)
+}
+
+/// Cross-platform "looks absolute" check that mirrors what VS Code may
+/// write into `<editorContext>` regardless of which OS this code runs
+/// on:
+///
+/// - POSIX: leading `/`.
+/// - Windows UNC: leading `\\`.
+/// - Windows drive: `<letter>:` followed by `\` or `/`.
+fn looks_absolute(s: &str) -> bool {
+    if s.starts_with('/') || s.starts_with("\\\\") {
+        return true;
     }
-    Some(parent.to_string_lossy().into_owned())
+    let bytes = s.as_bytes();
+    bytes.len() >= 3
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && (bytes[2] == b'\\' || bytes[2] == b'/')
+}
+
+/// Parent-directory of an absolute path string, splitting on the last
+/// `/` or `\` so the result is identical regardless of the host
+/// platform. Returns `"/"` for a root-level file like `"/foo"`.
+fn parent_dir_string(path: &str) -> Option<String> {
+    let last = path.rfind(|c: char| c == '/' || c == '\\')?;
+    if last == 0 {
+        return Some("/".to_string());
+    }
+    Some(path[..last].to_string())
 }
 
 fn parse_jsonl(path: &Path, content: &str, start_offset: usize) -> (Vec<ParsedMessage>, usize) {
