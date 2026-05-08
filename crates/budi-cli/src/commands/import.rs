@@ -352,7 +352,7 @@ fn print_warnings(warnings: &[String]) {
 /// to hunt for `budi stats -p 30d` (#440 acceptance #4). Any failure here
 /// is silent — the import itself succeeded, and the hint is a nice-to-have.
 fn print_stats_hint(client: &DaemonClient) {
-    let Ok(summary) = client.summary(Some("30d"), None, None) else {
+    let Ok(summary) = client.summary(Some("30d"), None, None, &[]) else {
         return;
     };
     if summary.total_messages == 0 {

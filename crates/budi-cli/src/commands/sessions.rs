@@ -36,6 +36,7 @@ pub fn cmd_sessions(
     period: StatsPeriod,
     search: Option<&str>,
     provider: Option<&str>,
+    surfaces: &[String],
     ticket: Option<&str>,
     activity: Option<&str>,
     limit: usize,
@@ -52,6 +53,7 @@ pub fn cmd_sessions(
         until.as_deref(),
         search,
         provider,
+        surfaces,
         ticket,
         activity,
         limit,
@@ -86,6 +88,9 @@ pub fn cmd_sessions(
     let mut filter_bits: Vec<String> = Vec::new();
     if let Some(p) = provider {
         filter_bits.push(format!("provider: {p}"));
+    }
+    if !surfaces.is_empty() {
+        filter_bits.push(format!("surface: {}", surfaces.join(",")));
     }
     if let Some(t) = ticket {
         filter_bits.push(format!("ticket: {t}"));

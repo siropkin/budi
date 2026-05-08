@@ -913,6 +913,7 @@ fn repo_usage_with_dimension_filters() {
         models: vec!["gpt-5.4".to_string()],
         projects: vec!["github.com/acme/repo-b".to_string()],
         branches: vec!["feature/x".to_string()],
+        surfaces: Vec::new(),
     };
     let rows = repo_usage_with_filters(&conn, None, None, &filters, 20).unwrap();
     assert_eq!(rows.len(), 1);
@@ -964,6 +965,7 @@ fn filter_options_are_normalized_and_match_dimension_filters() {
         models: vec!["(untagged)".to_string()],
         projects: vec!["(untagged)".to_string()],
         branches: vec!["(untagged)".to_string()],
+        surfaces: Vec::new(),
     };
     let summary = usage_summary_with_filters(&conn, None, None, None, &filters).unwrap();
     assert_eq!(summary.total_assistant_messages, 1);
@@ -2801,6 +2803,7 @@ fn session_list_with_dimension_filters() {
         models: vec!["gpt-5.4".to_string()],
         projects: vec!["github.com/acme/repo-b".to_string()],
         branches: vec!["feature/ship".to_string()],
+        surfaces: Vec::new(),
     };
     let result = session_list_with_filters(
         &conn,
@@ -6676,6 +6679,179 @@ fn unknown_provider_filter_yields_zero_messages_and_zero_cost() {
     )
     .unwrap();
     assert_eq!(cost.total_cost, 0.0);
+}
+
+// ─── #702: surface filter parity (HTTP + SQL) ───────────────────────────────
+
+/// Build an assistant message attributed to a specific surface (host
+/// environment). Mirror of `provider_msg` so the surface-filter property
+/// tests can seed cohorts from `vscode` / `cursor` / `jetbrains` /
+/// `terminal` rows in the same window.
+fn surface_msg(
+    uuid: &str,
+    session: &str,
+    provider: &str,
+    surface: &str,
+    cost_cents: f64,
+) -> ParsedMessage {
+    ParsedMessage {
+        uuid: uuid.to_string(),
+        session_id: Some(session.to_string()),
+        timestamp: "2026-03-14T10:00:00Z".parse().unwrap(),
+        cwd: None,
+        role: "assistant".to_string(),
+        model: Some("claude-opus-4-6".to_string()),
+        input_tokens: 100,
+        output_tokens: 50,
+        cache_creation_tokens: 0,
+        cache_read_tokens: 0,
+        git_branch: None,
+        repo_id: None,
+        provider: provider.to_string(),
+        cost_cents: Some(cost_cents),
+        session_title: None,
+        parent_uuid: None,
+        user_name: None,
+        machine_name: None,
+        cost_confidence: "exact".to_string(),
+        pricing_source: None,
+        request_id: None,
+        speed: None,
+        cache_creation_1h_tokens: 0,
+        web_search_requests: 0,
+        prompt_category: None,
+        prompt_category_source: None,
+        prompt_category_confidence: None,
+        tool_names: Vec::new(),
+        tool_use_ids: Vec::new(),
+        tool_files: Vec::new(),
+        tool_outcomes: Vec::new(),
+        cwd_source: None,
+        surface: Some(surface.to_string()),
+    }
+}
+
+#[test]
+fn surface_filter_partitions_summary_to_the_message() {
+    // Acceptance #702: summing `summary(--surface S).total_messages` across
+    // every surface in the window must equal the unfiltered count exactly.
+    // Same partitioning property the `--provider` filter pins.
+    let mut conn = test_db();
+    let msgs = vec![
+        surface_msg("s-vsc-1", "s1", "copilot_chat", "vscode", 11.0),
+        surface_msg("s-vsc-2", "s1", "copilot_chat", "vscode", 12.0),
+        surface_msg("s-cur-1", "s2", "cursor", "cursor", 13.0),
+        surface_msg("s-jet-1", "s3", "copilot_chat", "jetbrains", 14.0),
+        surface_msg("s-term-1", "s4", "claude_code", "terminal", 15.0),
+    ];
+    ingest_messages(&mut conn, &msgs, None).unwrap();
+
+    let unfiltered =
+        usage_summary_with_filters(&conn, None, None, None, &DimensionFilters::default()).unwrap();
+    assert_eq!(unfiltered.total_messages, 5);
+
+    let surfaces = ["vscode", "cursor", "jetbrains", "terminal"];
+    let summed: u64 = surfaces
+        .iter()
+        .map(|s| {
+            let filters = DimensionFilters {
+                surfaces: vec![s.to_string()],
+                ..Default::default()
+            };
+            usage_summary_with_filters(&conn, None, None, None, &filters)
+                .unwrap()
+                .total_messages
+        })
+        .sum();
+    assert_eq!(
+        summed, unfiltered.total_messages,
+        "sum of per-surface message counts must equal unfiltered total"
+    );
+}
+
+#[test]
+fn surface_filter_csv_combines_listed_surfaces() {
+    // `--surface vscode,cursor` returns rows from both surfaces and
+    // nothing else. Mirrors `--provider a,b` semantics.
+    let mut conn = test_db();
+    let msgs = vec![
+        surface_msg("c-vsc-1", "s1", "copilot_chat", "vscode", 10.0),
+        surface_msg("c-cur-1", "s2", "cursor", "cursor", 20.0),
+        surface_msg("c-jet-1", "s3", "copilot_chat", "jetbrains", 30.0),
+    ];
+    ingest_messages(&mut conn, &msgs, None).unwrap();
+
+    let filters = DimensionFilters {
+        surfaces: vec!["vscode".to_string(), "cursor".to_string()],
+        ..Default::default()
+    };
+    let summary = usage_summary_with_filters(&conn, None, None, None, &filters).unwrap();
+    assert_eq!(summary.total_messages, 2);
+}
+
+#[test]
+fn unknown_surface_filter_yields_empty_result() {
+    // Acceptance: `?surface=mars` returns zero rows (parity with
+    // `?provider=mars`). Server side does not reject unknown values so a
+    // host-extension on a stale daemon does not crash; SQL just matches
+    // nothing.
+    let mut conn = test_db();
+    let msgs = vec![surface_msg("u-vsc-1", "s1", "copilot_chat", "vscode", 5.0)];
+    ingest_messages(&mut conn, &msgs, None).unwrap();
+
+    let filters = DimensionFilters {
+        surfaces: vec!["mars".to_string()],
+        ..Default::default()
+    };
+    let summary = usage_summary_with_filters(&conn, None, None, None, &filters).unwrap();
+    assert_eq!(summary.total_messages, 0);
+    assert_eq!(summary.total_cost_cents, 0.0);
+}
+
+#[test]
+fn normalize_surfaces_lowercases_trims_dedupes() {
+    // CLI accepts mixed-case input (`--surface VSCode`) and trims
+    // whitespace from CSV (`--surface=cursor, vscode`). Normalization
+    // collapses duplicates so the SQL `IN (?, ?, ?)` clause stays
+    // minimal.
+    let raw = vec![
+        "  VSCode ".to_string(),
+        "cursor".to_string(),
+        "Cursor".to_string(), // duplicate after lowercasing
+        "".to_string(),       // empty drops out
+    ];
+    let filters = DimensionFilters {
+        surfaces: raw,
+        ..Default::default()
+    }
+    .normalize();
+    assert_eq!(filters.surfaces, vec!["vscode", "cursor"]);
+}
+
+#[test]
+fn surface_stats_returns_one_row_per_surface() {
+    // `/analytics/surfaces` mirrors `/analytics/providers`: one row per
+    // surface present in the window, sorted by assistant_messages DESC.
+    // Empty surfaces are excluded so a single-host install never sees
+    // three empty rows.
+    let mut conn = test_db();
+    let msgs = vec![
+        surface_msg("ss-vsc-1", "s1", "copilot_chat", "vscode", 10.0),
+        surface_msg("ss-vsc-2", "s1", "copilot_chat", "vscode", 11.0),
+        surface_msg("ss-cur-1", "s2", "cursor", "cursor", 20.0),
+    ];
+    ingest_messages(&mut conn, &msgs, None).unwrap();
+
+    let rows = surface_stats(&conn, None, None).unwrap();
+    let names: Vec<&str> = rows.iter().map(|r| r.surface.as_str()).collect();
+    assert!(names.contains(&"vscode"));
+    assert!(names.contains(&"cursor"));
+    assert!(!names.contains(&"jetbrains"));
+
+    // Cost reconciles to dollars/100 of the cent sum.
+    let vsc = rows.iter().find(|r| r.surface == "vscode").unwrap();
+    assert_eq!(vsc.assistant_messages, 2);
+    assert!((vsc.estimated_cost - 0.21).abs() < 0.005);
 }
 
 // ─── #496 D-3: short-UUID prefix resolver contract ──────────────────────────

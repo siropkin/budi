@@ -363,6 +363,16 @@ fn apply_session_dimension_filters(
         ),
         &normalized_branches,
     );
+    // Surface filter (#702): host environment dimension on the message row.
+    // Filtering on `m.surface` (not the per-session dominant surface) so a
+    // single session that recorded rows from multiple hosts still matches
+    // when the user asks for any of its constituent surfaces.
+    append_in_condition(
+        conditions,
+        param_values,
+        "COALESCE(NULLIF(LOWER(m.surface), ''), 'unknown')",
+        &filters.surfaces,
+    );
 }
 
 /// Query sessions with cost aggregated from messages.

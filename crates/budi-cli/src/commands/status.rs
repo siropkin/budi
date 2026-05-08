@@ -61,7 +61,9 @@ fn cmd_status_text() -> Result<()> {
     };
 
     let (since, _until) = period_date_range(StatsPeriod::Today);
-    let snap = client.status_snapshot(since.as_deref(), None, None).ok();
+    let snap = client
+        .status_snapshot(since.as_deref(), None, None, &[])
+        .ok();
 
     if let Some(snap) = &snap {
         println!();
@@ -130,7 +132,7 @@ fn cmd_status_json() -> Result<()> {
             Ok(client) => {
                 let (since, _until) = period_date_range(StatsPeriod::Today);
                 client
-                    .status_snapshot(since.as_deref(), None, None)
+                    .status_snapshot(since.as_deref(), None, None, &[])
                     .ok()
                     .map(|snap| TodayJson {
                         cost_cents: snap.cost.total_cost * 100.0,

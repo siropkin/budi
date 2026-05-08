@@ -126,6 +126,7 @@ fn build_router(app_state: AppState, host_allowlist: routes::HostAllowlist) -> R
             get(a::analytics_file_detail),
         )
         .route("/analytics/providers", get(a::analytics_providers))
+        .route("/analytics/surfaces", get(a::analytics_surfaces))
         .route("/analytics/statusline", get(a::analytics_statusline))
         .route(
             "/analytics/cache-efficiency",

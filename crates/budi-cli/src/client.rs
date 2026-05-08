@@ -502,16 +502,20 @@ impl DaemonClient {
         since: Option<&str>,
         until: Option<&str>,
         provider: Option<&str>,
+        surfaces: &[String],
     ) -> Result<UsageSummary> {
-        let mut params = Vec::new();
+        let mut params: Vec<(&str, String)> = Vec::new();
         if let Some(s) = since {
-            params.push(("since", s));
+            params.push(("since", s.to_string()));
         }
         if let Some(u) = until {
-            params.push(("until", u));
+            params.push(("until", u.to_string()));
         }
         if let Some(p) = provider {
-            params.push(("provider", p));
+            params.push(("provider", p.to_string()));
+        }
+        if !surfaces.is_empty() {
+            params.push(("surfaces", surfaces.join(",")));
         }
         let resp = self
             .client
@@ -528,16 +532,20 @@ impl DaemonClient {
         since: Option<&str>,
         until: Option<&str>,
         provider: Option<&str>,
+        surfaces: &[String],
     ) -> Result<CostEstimate> {
-        let mut params = Vec::new();
+        let mut params: Vec<(&str, String)> = Vec::new();
         if let Some(s) = since {
-            params.push(("since", s));
+            params.push(("since", s.to_string()));
         }
         if let Some(u) = until {
-            params.push(("until", u));
+            params.push(("until", u.to_string()));
         }
         if let Some(p) = provider {
-            params.push(("provider", p));
+            params.push(("provider", p.to_string()));
+        }
+        if !surfaces.is_empty() {
+            params.push(("surfaces", surfaces.join(",")));
         }
         let resp = self
             .client
@@ -555,16 +563,20 @@ impl DaemonClient {
         since: Option<&str>,
         until: Option<&str>,
         provider: Option<&str>,
+        surfaces: &[String],
     ) -> Result<StatusSnapshot> {
-        let mut params = Vec::new();
+        let mut params: Vec<(&str, String)> = Vec::new();
         if let Some(s) = since {
-            params.push(("since", s));
+            params.push(("since", s.to_string()));
         }
         if let Some(u) = until {
-            params.push(("until", u));
+            params.push(("until", u.to_string()));
         }
         if let Some(p) = provider {
-            params.push(("provider", p));
+            params.push(("provider", p.to_string()));
+        }
+        if !surfaces.is_empty() {
+            params.push(("surfaces", surfaces.join(",")));
         }
         let resp = self
             .client
@@ -581,6 +593,7 @@ impl DaemonClient {
         since: Option<&str>,
         until: Option<&str>,
         providers: Option<&str>,
+        surfaces: &[String],
         limit: usize,
     ) -> Result<BreakdownPage<RepoUsage>> {
         let mut params: Vec<(&str, String)> = Vec::new();
@@ -592,6 +605,9 @@ impl DaemonClient {
         }
         if let Some(p) = providers {
             params.push(("providers", p.to_string()));
+        }
+        if !surfaces.is_empty() {
+            params.push(("surfaces", surfaces.join(",")));
         }
         params.push(("limit", limit.to_string()));
         let resp = self
@@ -635,6 +651,7 @@ impl DaemonClient {
         since: Option<&str>,
         until: Option<&str>,
         providers: Option<&str>,
+        surfaces: &[String],
         limit: usize,
     ) -> Result<BreakdownPage<BranchCost>> {
         let mut params: Vec<(&str, String)> = Vec::new();
@@ -646,6 +663,9 @@ impl DaemonClient {
         }
         if let Some(p) = providers {
             params.push(("providers", p.to_string()));
+        }
+        if !surfaces.is_empty() {
+            params.push(("surfaces", surfaces.join(",")));
         }
         params.push(("limit", limit.to_string()));
         let resp = self
@@ -703,6 +723,7 @@ impl DaemonClient {
         since: Option<&str>,
         until: Option<&str>,
         providers: Option<&str>,
+        surfaces: &[String],
         limit: usize,
     ) -> Result<BreakdownPage<TicketCost>> {
         let mut params: Vec<(&str, String)> = Vec::new();
@@ -714,6 +735,9 @@ impl DaemonClient {
         }
         if let Some(p) = providers {
             params.push(("providers", p.to_string()));
+        }
+        if !surfaces.is_empty() {
+            params.push(("surfaces", surfaces.join(",")));
         }
         params.push(("limit", limit.to_string()));
         let resp = self
@@ -773,6 +797,7 @@ impl DaemonClient {
         since: Option<&str>,
         until: Option<&str>,
         providers: Option<&str>,
+        surfaces: &[String],
         limit: usize,
     ) -> Result<BreakdownPage<ActivityCost>> {
         let mut params: Vec<(&str, String)> = Vec::new();
@@ -784,6 +809,9 @@ impl DaemonClient {
         }
         if let Some(p) = providers {
             params.push(("providers", p.to_string()));
+        }
+        if !surfaces.is_empty() {
+            params.push(("surfaces", surfaces.join(",")));
         }
         params.push(("limit", limit.to_string()));
         let resp = self
@@ -842,6 +870,7 @@ impl DaemonClient {
         since: Option<&str>,
         until: Option<&str>,
         providers: Option<&str>,
+        surfaces: &[String],
         limit: usize,
     ) -> Result<BreakdownPage<FileCost>> {
         let mut params: Vec<(&str, String)> = Vec::new();
@@ -853,6 +882,9 @@ impl DaemonClient {
         }
         if let Some(p) = providers {
             params.push(("providers", p.to_string()));
+        }
+        if !surfaces.is_empty() {
+            params.push(("surfaces", surfaces.join(",")));
         }
         params.push(("limit", limit.to_string()));
         let resp = self
@@ -908,6 +940,7 @@ impl DaemonClient {
         since: Option<&str>,
         until: Option<&str>,
         providers: Option<&str>,
+        surfaces: &[String],
         limit: usize,
     ) -> Result<BreakdownPage<ModelUsage>> {
         let mut params: Vec<(&str, String)> = Vec::new();
@@ -919,6 +952,9 @@ impl DaemonClient {
         }
         if let Some(p) = providers {
             params.push(("providers", p.to_string()));
+        }
+        if !surfaces.is_empty() {
+            params.push(("surfaces", surfaces.join(",")));
         }
         params.push(("limit", limit.to_string()));
         let resp = self
@@ -963,17 +999,50 @@ impl DaemonClient {
         &self,
         since: Option<&str>,
         until: Option<&str>,
+        surfaces: &[String],
     ) -> Result<Vec<ProviderStats>> {
-        let mut params = Vec::new();
+        let mut params: Vec<(&str, String)> = Vec::new();
         if let Some(s) = since {
-            params.push(("since", s));
+            params.push(("since", s.to_string()));
         }
         if let Some(u) = until {
-            params.push(("until", u));
+            params.push(("until", u.to_string()));
+        }
+        if !surfaces.is_empty() {
+            params.push(("surfaces", surfaces.join(",")));
         }
         let resp = self
             .client
             .get(format!("{}/analytics/providers", self.base_url))
+            .query(&params)
+            .send()
+            .map_err(describe_send_error)?;
+        let resp = check_response(resp)?;
+        Ok(resp.json()?)
+    }
+
+    /// `GET /analytics/surfaces` — per-host-environment breakdown (#702).
+    /// Mirror of [`Self::providers`] keyed on the surface axis. Returns one
+    /// row per surface present in the window; empty surfaces are excluded.
+    pub fn surfaces(
+        &self,
+        since: Option<&str>,
+        until: Option<&str>,
+        surfaces_filter: &[String],
+    ) -> Result<Vec<budi_core::analytics::SurfaceStats>> {
+        let mut params: Vec<(&str, String)> = Vec::new();
+        if let Some(s) = since {
+            params.push(("since", s.to_string()));
+        }
+        if let Some(u) = until {
+            params.push(("until", u.to_string()));
+        }
+        if !surfaces_filter.is_empty() {
+            params.push(("surfaces", surfaces_filter.join(",")));
+        }
+        let resp = self
+            .client
+            .get(format!("{}/analytics/surfaces", self.base_url))
             .query(&params)
             .send()
             .map_err(describe_send_error)?;
@@ -988,6 +1057,7 @@ impl DaemonClient {
         until: Option<&str>,
         search: Option<&str>,
         provider: Option<&str>,
+        surfaces: &[String],
         ticket: Option<&str>,
         activity: Option<&str>,
         limit: usize,
@@ -1010,6 +1080,13 @@ impl DaemonClient {
             // through that key so the same SQL predicate breakdown routes
             // already use kicks in.
             params.push(("providers", p.to_string()));
+        }
+        if !surfaces.is_empty() {
+            // Same pattern as `providers`: the daemon's `DimensionParams`
+            // accepts `surface=` (singular) and `surfaces=` (plural CSV)
+            // — pass CSV so multiple `--surface` flags collapse to one
+            // query-string entry instead of repeating.
+            params.push(("surfaces", surfaces.join(",")));
         }
         if let Some(t) = ticket {
             params.push(("ticket", t.to_string()));
@@ -1251,7 +1328,7 @@ mod tests {
         let (base, rx) = one_shot_server(EMPTY_PAGE_BODY);
         let client = DaemonClient::for_tests(base);
         let _ = client
-            .projects(None, None, Some("copilot_chat"), 5)
+            .projects(None, None, Some("copilot_chat"), &[], 5)
             .expect("projects call");
         let req = rx.recv_timeout(Duration::from_secs(5)).expect("captured");
         assert_providers_forwarded(&req, "copilot_chat");
@@ -1262,7 +1339,7 @@ mod tests {
         let (base, rx) = one_shot_server(EMPTY_PAGE_BODY);
         let client = DaemonClient::for_tests(base);
         let _ = client
-            .branches(None, None, Some("copilot_chat"), 5)
+            .branches(None, None, Some("copilot_chat"), &[], 5)
             .expect("branches call");
         let req = rx.recv_timeout(Duration::from_secs(5)).expect("captured");
         assert_providers_forwarded(&req, "copilot_chat");
@@ -1273,7 +1350,7 @@ mod tests {
         let (base, rx) = one_shot_server(EMPTY_PAGE_BODY);
         let client = DaemonClient::for_tests(base);
         let _ = client
-            .tickets(None, None, Some("copilot_chat"), 5)
+            .tickets(None, None, Some("copilot_chat"), &[], 5)
             .expect("tickets call");
         let req = rx.recv_timeout(Duration::from_secs(5)).expect("captured");
         assert_providers_forwarded(&req, "copilot_chat");
@@ -1284,7 +1361,7 @@ mod tests {
         let (base, rx) = one_shot_server(EMPTY_PAGE_BODY);
         let client = DaemonClient::for_tests(base);
         let _ = client
-            .activities(None, None, Some("copilot_chat"), 5)
+            .activities(None, None, Some("copilot_chat"), &[], 5)
             .expect("activities call");
         let req = rx.recv_timeout(Duration::from_secs(5)).expect("captured");
         assert_providers_forwarded(&req, "copilot_chat");
@@ -1295,7 +1372,7 @@ mod tests {
         let (base, rx) = one_shot_server(EMPTY_PAGE_BODY);
         let client = DaemonClient::for_tests(base);
         let _ = client
-            .files(None, None, Some("copilot_chat"), 5)
+            .files(None, None, Some("copilot_chat"), &[], 5)
             .expect("files call");
         let req = rx.recv_timeout(Duration::from_secs(5)).expect("captured");
         assert_providers_forwarded(&req, "copilot_chat");
@@ -1306,7 +1383,7 @@ mod tests {
         let (base, rx) = one_shot_server(EMPTY_PAGE_BODY);
         let client = DaemonClient::for_tests(base);
         let _ = client
-            .models(None, None, Some("copilot_chat"), 5)
+            .models(None, None, Some("copilot_chat"), &[], 5)
             .expect("models call");
         let req = rx.recv_timeout(Duration::from_secs(5)).expect("captured");
         assert_providers_forwarded(&req, "copilot_chat");
@@ -1318,7 +1395,9 @@ mod tests {
         // the daemon would treat empty-string as "filter to nothing".
         let (base, rx) = one_shot_server(EMPTY_PAGE_BODY);
         let client = DaemonClient::for_tests(base);
-        let _ = client.models(None, None, None, 5).expect("models call");
+        let _ = client
+            .models(None, None, None, &[], 5)
+            .expect("models call");
         let req = rx.recv_timeout(Duration::from_secs(5)).expect("captured");
         assert!(
             !req.contains("providers="),

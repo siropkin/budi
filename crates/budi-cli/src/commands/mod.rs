@@ -354,6 +354,34 @@ pub fn normalize_provider(input: &str) -> Result<String> {
     }
 }
 
+/// Resolve a user-supplied `--surface` value to its canonical lowercase form.
+///
+/// Mirrors [`normalize_provider`]'s shape: unknown values error with a list
+/// of valid surfaces so a typo in a shell config fails loudly instead of
+/// silently returning empty results. Surfaces are canonical-only at first
+/// (no `code` → `vscode` alias yet) per the #702 ticket's "Out of scope".
+/// Accepts mixed-case input — `--surface VSCode` lowercases to `vscode`.
+pub fn normalize_surface(input: &str) -> Result<String> {
+    const KNOWN_SURFACES: &[&str] = &[
+        budi_core::surface::VSCODE,
+        budi_core::surface::CURSOR,
+        budi_core::surface::JETBRAINS,
+        budi_core::surface::TERMINAL,
+        budi_core::surface::UNKNOWN,
+    ];
+
+    let lowered = input.trim().to_ascii_lowercase();
+    if KNOWN_SURFACES.contains(&lowered.as_str()) {
+        return Ok(lowered);
+    }
+
+    anyhow::bail!(
+        "Unknown surface '{}'. Available surfaces: {}",
+        input,
+        KNOWN_SURFACES.join(", ")
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -479,6 +507,34 @@ mod tests {
     fn normalize_provider_resolves_user_aliases() {
         assert_eq!(normalize_provider("copilot").unwrap(), "copilot_cli");
         assert_eq!(normalize_provider("anthropic").unwrap(), "claude_code");
+    }
+
+    // --- normalize_surface (#702) -----------------------------------
+
+    #[test]
+    fn normalize_surface_accepts_canonical_names() {
+        for name in ["vscode", "cursor", "jetbrains", "terminal", "unknown"] {
+            assert_eq!(normalize_surface(name).unwrap(), name);
+        }
+    }
+
+    #[test]
+    fn normalize_surface_lowercases_mixed_case_input() {
+        assert_eq!(normalize_surface("VSCode").unwrap(), "vscode");
+        assert_eq!(normalize_surface("  Cursor  ").unwrap(), "cursor");
+    }
+
+    #[test]
+    fn normalize_surface_rejects_unknown_with_helpful_list() {
+        let err = normalize_surface("doesnotexist").expect_err("must error");
+        let msg = err.to_string();
+        assert!(msg.contains("doesnotexist"), "error: {msg}");
+        for expected in ["vscode", "cursor", "jetbrains", "terminal", "unknown"] {
+            assert!(
+                msg.contains(expected),
+                "error must mention {expected}: {msg}"
+            );
+        }
     }
 
     #[test]

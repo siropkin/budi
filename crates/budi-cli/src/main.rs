@@ -140,6 +140,12 @@ Examples:
         /// `claude_code`/`vscode`/`codex`.
         #[arg(long, value_name = "NAME")]
         provider: Option<String>,
+        /// Filter sessions by host environment (`vscode`, `cursor`,
+        /// `jetbrains`, `terminal`, `unknown`). Repeat the flag or pass a
+        /// CSV (`--surface vscode,cursor`) to combine. `provider` answers
+        /// "which agent"; `--surface` answers "which host". (#702)
+        #[arg(long, value_name = "NAME", value_delimiter = ',')]
+        surface: Vec<String>,
         /// Filter sessions by ticket id (e.g. ENG-123). Matches the
         /// `ticket_id` tag emitted by the git enricher when the branch name
         /// contains a recognised ID.
@@ -285,6 +291,9 @@ pub struct StatsOpts {
     /// Filter by provider (e.g. claude_code, cursor, codex, copilot_cli, copilot_chat, openai). Applies to the default summary view and every breakdown subcommand (`models`, `projects`, `branches`, `tickets`, `activities`, `files`).
     #[arg(long, global = true)]
     pub provider: Option<String>,
+    /// Filter by host environment (`vscode`, `cursor`, `jetbrains`, `terminal`, `unknown`). Applies to the default summary view and every breakdown subcommand (`models`, `projects`, `branches`, `tickets`, `activities`, `files`, `surfaces`). Repeat or pass CSV to combine. (#702)
+    #[arg(long, global = true, value_name = "NAME", value_delimiter = ',')]
+    pub surface: Vec<String>,
     /// Maximum rows in breakdown views (`projects`, `branches`, `tickets`,
     /// `activities`, `files`, `models`, `tag`). `0` = no cap. Truncated
     /// rows collapse into an `(other N: $X)` aggregate so the Total
@@ -348,6 +357,9 @@ pub enum StatsView {
     },
     /// Cost breakdown by model
     Models,
+    /// Cost breakdown by host environment (vscode / cursor / jetbrains / terminal / unknown).
+    /// Mirrors the per-provider Agents block but keyed on the surface axis from #701.
+    Surfaces,
     /// Raw cost breakdown by tag KEY (escape hatch for custom tag keys)
     Tag {
         /// Tag key (e.g. `ticket_id`, `activity`, or any custom key)
@@ -673,6 +685,7 @@ fn main() -> Result<()> {
                 period,
                 repo,
                 provider,
+                surface,
                 limit,
                 label_width,
                 include_pending,
@@ -694,6 +707,7 @@ fn main() -> Result<()> {
             let mut files = false;
             let mut file: Option<String> = None;
             let mut models = false;
+            let mut surfaces = false;
             let mut tag: Option<String> = None;
             match view {
                 None => {}
@@ -707,6 +721,7 @@ fn main() -> Result<()> {
                 Some(StatsView::Files) => files = true,
                 Some(StatsView::File { path }) => file = Some(path),
                 Some(StatsView::Models) => models = true,
+                Some(StatsView::Surfaces) => surfaces = true,
                 Some(StatsView::Tag { key }) => tag = Some(key),
             }
             commands::stats::cmd_stats(
@@ -722,7 +737,9 @@ fn main() -> Result<()> {
                 file,
                 repo,
                 models,
+                surfaces,
                 provider,
+                surface,
                 tag,
                 limit,
                 label_width,
@@ -759,6 +776,7 @@ fn main() -> Result<()> {
             period,
             search,
             provider,
+            surface,
             ticket,
             activity,
             limit,
@@ -772,10 +790,15 @@ fn main() -> Result<()> {
                 let provider = provider
                     .map(|p| commands::normalize_provider(&p))
                     .transpose()?;
+                let surfaces: Vec<String> = surface
+                    .iter()
+                    .map(|s| commands::normalize_surface(s))
+                    .collect::<Result<_>>()?;
                 commands::sessions::cmd_sessions(
                     period,
                     search.as_deref(),
                     provider.as_deref(),
+                    &surfaces,
                     ticket.as_deref(),
                     activity.as_deref(),
                     limit,
@@ -1082,6 +1105,76 @@ mod tests {
                 assert_eq!(provider.as_deref(), Some("copilot_chat"));
             }
             _ => panic!("expected sessions command"),
+        }
+    }
+
+    /// #702: `budi sessions --surface jetbrains` parses cleanly. CSV +
+    /// repeated forms collapse into the same `Vec<String>` so callers can
+    /// pick whichever shape they prefer.
+    #[test]
+    fn cli_parses_sessions_surface_flag() {
+        let cli = Cli::try_parse_from(["budi", "sessions", "--surface", "jetbrains"])
+            .expect("budi sessions --surface parses");
+        match cli.command {
+            Commands::Sessions { surface, .. } => {
+                assert_eq!(surface, vec!["jetbrains".to_string()]);
+            }
+            _ => panic!("expected sessions command"),
+        }
+
+        // CSV form
+        let cli = Cli::try_parse_from(["budi", "sessions", "--surface", "vscode,cursor"])
+            .expect("budi sessions --surface CSV parses");
+        match cli.command {
+            Commands::Sessions { surface, .. } => {
+                assert_eq!(surface, vec!["vscode".to_string(), "cursor".to_string()]);
+            }
+            _ => panic!("expected sessions command"),
+        }
+
+        // Repeated form
+        let cli = Cli::try_parse_from([
+            "budi",
+            "sessions",
+            "--surface",
+            "vscode",
+            "--surface",
+            "cursor",
+        ])
+        .expect("budi sessions --surface repeated parses");
+        match cli.command {
+            Commands::Sessions { surface, .. } => {
+                assert_eq!(surface, vec!["vscode".to_string(), "cursor".to_string()]);
+            }
+            _ => panic!("expected sessions command"),
+        }
+    }
+
+    /// #702: `budi stats surfaces` is a first-class breakdown subcommand.
+    #[test]
+    fn cli_parses_stats_surfaces_subcommand() {
+        let cli =
+            Cli::try_parse_from(["budi", "stats", "surfaces"]).expect("budi stats surfaces parses");
+        match cli.command {
+            Commands::Stats(args) => {
+                assert!(matches!(args.view, Some(StatsView::Surfaces)));
+            }
+            _ => panic!("expected stats command"),
+        }
+    }
+
+    /// #702: `budi stats --surface vscode` is global and applies before or
+    /// after a subcommand name (parity with `--provider`).
+    #[test]
+    fn cli_parses_stats_surface_global_flag() {
+        let cli = Cli::try_parse_from(["budi", "stats", "--surface", "vscode", "models"])
+            .expect("budi stats --surface vscode models parses");
+        match cli.command {
+            Commands::Stats(args) => {
+                assert_eq!(args.opts.surface, vec!["vscode".to_string()]);
+                assert!(matches!(args.view, Some(StatsView::Models)));
+            }
+            _ => panic!("expected stats command"),
         }
     }
 
