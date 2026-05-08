@@ -138,6 +138,19 @@ pub fn cmd_doctor(
             }
             report.record(&rows);
             checks.push(rows);
+
+            // #693: discoverability hint when `seed_offsets` ran against
+            // pre-existing transcripts on first boot but no `messages` rows
+            // have ever landed for this provider. Distinct from R1.3 above
+            // (window-scoped, AMBER) — this is a lifetime check that fires
+            // INFO and stays put until the user runs `budi db import` or
+            // live ingestion produces rows.
+            let history = summarize_pre_boot_history(conn, provider.as_ref());
+            if !json_output {
+                history.print_respecting(quiet);
+            }
+            report.record(&history);
+            checks.push(history);
         }
     }
 
@@ -240,6 +253,7 @@ impl From<&CheckResult> for CheckResultJson {
             name: value.label.clone(),
             status: match value.state {
                 CheckState::Pass => "pass",
+                CheckState::Info => "info",
                 CheckState::Warn => "warn",
                 CheckState::Fail => "fail",
             },
@@ -259,7 +273,7 @@ struct DoctorReport {
 impl DoctorReport {
     fn record(&mut self, result: &CheckResult) {
         match result.state {
-            CheckState::Pass => {}
+            CheckState::Pass | CheckState::Info => {}
             CheckState::Warn => self.warns += 1,
             CheckState::Fail => self.fails += 1,
         }
@@ -277,6 +291,12 @@ impl DoctorReport {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CheckState {
     Pass,
+    /// Informational hint — surfaces an actionable but non-erroneous
+    /// observation (e.g. pre-boot transcript history available to backfill
+    /// via `budi db import`). Does not count toward `--format json`'s
+    /// `all_pass = false` and does not flip the exit code; a green doctor
+    /// run with `Info` rows still ends with "All checks passed." See #693.
+    Info,
     Warn,
     Fail,
 }
@@ -285,6 +305,7 @@ impl CheckState {
     fn label(self) -> &'static str {
         match self {
             Self::Pass => "PASS",
+            Self::Info => "INFO",
             Self::Warn => "WARN",
             Self::Fail => "FAIL",
         }
@@ -293,6 +314,7 @@ impl CheckState {
     fn color(self) -> &'static str {
         match self {
             Self::Pass => "\x1b[32m",
+            Self::Info => "\x1b[36m",
             Self::Warn => "\x1b[33m",
             Self::Fail => "\x1b[31m",
         }
@@ -329,6 +351,19 @@ impl CheckResult {
     fn fail(label: impl Into<String>, detail: impl Into<String>, fix: Option<String>) -> Self {
         Self {
             state: CheckState::Fail,
+            label: label.into(),
+            detail: detail.into(),
+            fix,
+        }
+    }
+
+    /// Informational hint — visible inline in text mode and serialised as
+    /// `status: "info"` in `--format json`. Does not count as a warning or
+    /// failure for exit-code purposes. Used for the `pre-boot history
+    /// detected / <provider>` discoverability signal (#693).
+    fn info(label: impl Into<String>, detail: impl Into<String>, fix: Option<String>) -> Self {
+        Self {
+            state: CheckState::Info,
             label: label.into(),
             detail: detail.into(),
             fix,
@@ -1388,6 +1423,124 @@ fn classify_tailer_rows(
     )
 }
 
+// ---------------------------------------------------------------------------
+// #693: pre-boot history INFO signal.
+//
+// Distinct from R1.3 (`tailer rows / X` AMBER) — that check fires when bytes
+// flow but no rows land in a 30-min window, the broken-parser pattern from
+// 8.4.0. The signal here is the dual: `tail_offsets` rows exist with
+// positive byte_offsets (i.e. `seed_offsets` ran on first boot against
+// pre-existing transcripts) but the `messages` table is empty for that
+// provider lifetime. The escape hatch is `budi db import`; this check
+// surfaces it.
+//
+// INFO (Hint), not WARN: per ADR-0089 §1, `seed_offsets` keeping pre-boot
+// files at EOF is the right default. The user opting in to backfill is the
+// remediation; warning would imply the daemon is broken when it is in fact
+// behaving as designed. Idempotent: once any messages row lands for the
+// provider (live or backfilled), the check returns PASS and stays silent.
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone)]
+struct PreBootHistoryActivity {
+    seeded_files: usize,
+    advanced_bytes: u64,
+    lifetime_messages: usize,
+    db_error: Option<String>,
+}
+
+fn summarize_pre_boot_history(conn: Option<&Connection>, provider: &dyn Provider) -> CheckResult {
+    let label = format!("pre-boot history detected / {}", provider.display_name());
+    let activity = match conn {
+        Some(conn) => load_pre_boot_history_activity(conn, provider.name()),
+        None => PreBootHistoryActivity {
+            seeded_files: 0,
+            advanced_bytes: 0,
+            lifetime_messages: 0,
+            db_error: Some("database connection unavailable".to_string()),
+        },
+    };
+    classify_pre_boot_history(label, &activity)
+}
+
+fn load_pre_boot_history_activity(conn: &Connection, provider: &str) -> PreBootHistoryActivity {
+    let mut activity = PreBootHistoryActivity {
+        seeded_files: 0,
+        advanced_bytes: 0,
+        lifetime_messages: 0,
+        db_error: None,
+    };
+
+    match conn.query_row(
+        "SELECT COUNT(*), COALESCE(SUM(byte_offset), 0)
+         FROM tail_offsets
+         WHERE provider = ?1 AND byte_offset > 0",
+        params![provider],
+        |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+    ) {
+        Ok((count, bytes)) => {
+            activity.seeded_files = count.max(0) as usize;
+            activity.advanced_bytes = bytes.max(0) as u64;
+        }
+        Err(e) => {
+            activity.db_error = Some(format!("could not read tail_offsets ({e})"));
+            return activity;
+        }
+    }
+
+    match conn.query_row(
+        "SELECT COUNT(*) FROM messages WHERE provider = ?1",
+        params![provider],
+        |row| row.get::<_, i64>(0),
+    ) {
+        Ok(count) => activity.lifetime_messages = count.max(0) as usize,
+        Err(e) => {
+            activity.db_error = Some(format!("could not count messages ({e})"));
+        }
+    }
+
+    activity
+}
+
+fn classify_pre_boot_history(label: String, activity: &PreBootHistoryActivity) -> CheckResult {
+    if let Some(ref error) = activity.db_error {
+        return CheckResult::pass(label, format!("pre-boot history check skipped — {error}"));
+    }
+
+    // No seeded transcripts → the daemon never observed pre-existing
+    // history for this provider; nothing to backfill.
+    if activity.seeded_files == 0 {
+        return CheckResult::pass(label, "no pre-boot transcripts seeded for this provider");
+    }
+
+    // Live or already-imported rows present → backfill already happened (or
+    // is unnecessary). Idempotent silence per the ticket.
+    if activity.lifetime_messages > 0 {
+        return CheckResult::pass(
+            label,
+            format!(
+                "{} pre-boot transcript(s) tracked; {} message row(s) already in the database — nothing to backfill",
+                activity.seeded_files, activity.lifetime_messages,
+            ),
+        );
+    }
+
+    // tail_offsets rows present, messages empty → discoverability gap.
+    let detail = format!(
+        "{} transcript(s) seeded as history ({} pre-dating budi installation). Run `budi db import` to backfill.",
+        activity.seeded_files,
+        format_bytes(activity.advanced_bytes),
+    );
+    CheckResult::info(
+        label,
+        detail,
+        Some(
+            "Run `budi db import` to backfill pre-existing transcripts the daemon seeded as history. Pass `--force` to re-ingest after upgrading budi."
+                .to_string(),
+        ),
+    )
+}
+
 fn format_bytes(bytes: u64) -> String {
     const KB: u64 = 1024;
     const MB: u64 = 1024 * KB;
@@ -1679,13 +1832,19 @@ mod tests {
 
     /// #588: `budi doctor --format json` lock-in. The JSON contract is
     /// `{checks: [{name, status, detail}], all_pass}` with `status`
-    /// drawn from a fixed vocabulary of `pass | warn | fail`. Scripted
+    /// drawn from a fixed vocabulary of `pass | info | warn | fail`
+    /// (`info` added in #693 for the pre-boot history hint). Scripted
     /// callers branch on this shape — a future rename would silently
     /// break them.
     #[test]
     fn doctor_json_locks_schema_and_status_vocabulary() {
         let checks = [
             CheckResult::pass("daemon health", "responding on http://127.0.0.1:7878"),
+            CheckResult::info(
+                "pre-boot history detected / Claude Code",
+                "3 transcript(s) seeded as history",
+                Some("budi db import".into()),
+            ),
             CheckResult::warn("tailer providers", "no enabled providers", None),
             CheckResult::fail(
                 "schema",
@@ -1705,7 +1864,7 @@ mod tests {
         assert_eq!(v["all_pass"], serde_json::json!(false));
 
         let arr = v["checks"].as_array().expect("checks array");
-        assert_eq!(arr.len(), 3);
+        assert_eq!(arr.len(), 4);
         for entry in arr {
             let mut keys: Vec<&str> = entry
                 .as_object()
@@ -1717,11 +1876,12 @@ mod tests {
             assert_eq!(keys, vec!["detail", "name", "status"]);
         }
         assert_eq!(arr[0]["status"], serde_json::json!("pass"));
-        assert_eq!(arr[1]["status"], serde_json::json!("warn"));
-        assert_eq!(arr[2]["status"], serde_json::json!("fail"));
+        assert_eq!(arr[1]["status"], serde_json::json!("info"));
+        assert_eq!(arr[2]["status"], serde_json::json!("warn"));
+        assert_eq!(arr[3]["status"], serde_json::json!("fail"));
         // `fix` is intentionally not part of the JSON shape — it's a
         // text-mode-only operator hint, not part of the wire contract.
-        assert!(arr[2].as_object().unwrap().get("fix").is_none());
+        assert!(arr[3].as_object().unwrap().get("fix").is_none());
     }
 
     #[test]
@@ -2217,6 +2377,160 @@ mod tests {
         assert_eq!(activity.advanced_bytes, 0);
         assert_eq!(activity.rows_in_window, 0);
         assert!(activity.last_seen.is_none());
+    }
+
+    // #693: pre-boot history INFO signal.
+    //
+    // Acceptance from the ticket:
+    //   - tail_offsets seeded + lifetime messages = 0  → INFO with backfill hint.
+    //   - tail_offsets seeded + lifetime messages > 0  → PASS (idempotent silence).
+    //   - no tail_offsets seeded                       → PASS (nothing to backfill).
+
+    #[test]
+    fn pre_boot_history_info_when_seeded_offsets_have_no_messages() {
+        let activity = PreBootHistoryActivity {
+            seeded_files: 3,
+            advanced_bytes: 100 * 1024,
+            lifetime_messages: 0,
+            db_error: None,
+        };
+
+        let result = classify_pre_boot_history(
+            "pre-boot history detected / Claude Code".to_string(),
+            &activity,
+        );
+
+        assert_eq!(result.state, CheckState::Info);
+        assert!(result.detail.contains("3 transcript(s) seeded as history"));
+        assert!(result.detail.contains("budi db import"));
+        assert!(
+            result
+                .fix
+                .as_deref()
+                .unwrap_or_default()
+                .contains("budi db import")
+        );
+    }
+
+    #[test]
+    fn pre_boot_history_passes_idempotently_once_messages_exist() {
+        let activity = PreBootHistoryActivity {
+            seeded_files: 3,
+            advanced_bytes: 100 * 1024,
+            lifetime_messages: 42,
+            db_error: None,
+        };
+
+        let result = classify_pre_boot_history(
+            "pre-boot history detected / Claude Code".to_string(),
+            &activity,
+        );
+
+        assert_eq!(result.state, CheckState::Pass);
+        assert!(result.fix.is_none());
+        // Detail mentions both counts so the operator can see backfill /
+        // live-ingest already produced rows for this provider.
+        assert!(result.detail.contains("3 pre-boot transcript(s)"));
+        assert!(result.detail.contains("42 message row(s)"));
+    }
+
+    #[test]
+    fn pre_boot_history_passes_silently_when_nothing_was_seeded() {
+        let activity = PreBootHistoryActivity {
+            seeded_files: 0,
+            advanced_bytes: 0,
+            lifetime_messages: 0,
+            db_error: None,
+        };
+
+        let result =
+            classify_pre_boot_history("pre-boot history detected / Cursor".to_string(), &activity);
+
+        assert_eq!(result.state, CheckState::Pass);
+        assert!(result.detail.contains("no pre-boot transcripts"));
+        assert!(result.fix.is_none());
+    }
+
+    #[test]
+    fn pre_boot_history_loader_separates_seeded_from_zero_offset_rows() {
+        let conn = Connection::open_in_memory().unwrap();
+        budi_core::migration::migrate(&conn).unwrap();
+
+        let now = Utc::now().to_rfc3339();
+        // Two seeded transcripts (byte_offset > 0) — these are the
+        // pre-existing files seed_offsets jumped past on first boot.
+        conn.execute(
+            "INSERT INTO tail_offsets (provider, path, byte_offset, last_seen) VALUES (?1, ?2, ?3, ?4)",
+            params!["claude_code", "/tmp/sess-1.jsonl", 32_i64 * 1024, now],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO tail_offsets (provider, path, byte_offset, last_seen) VALUES (?1, ?2, ?3, ?4)",
+            params!["claude_code", "/tmp/sess-2.jsonl", 16_i64 * 1024, now],
+        )
+        .unwrap();
+        // A zero-offset row (e.g. a freshly tracked empty file) must not be
+        // counted as "history" — the discoverability gap only fires when
+        // there's actual byte content the user could backfill.
+        conn.execute(
+            "INSERT INTO tail_offsets (provider, path, byte_offset, last_seen) VALUES (?1, ?2, 0, ?3)",
+            params!["claude_code", "/tmp/empty.jsonl", now],
+        )
+        .unwrap();
+        // Different provider — must not bleed into the count.
+        conn.execute(
+            "INSERT INTO tail_offsets (provider, path, byte_offset, last_seen) VALUES (?1, ?2, ?3, ?4)",
+            params!["copilot_chat", "/tmp/other.jsonl", 8_i64 * 1024, now],
+        )
+        .unwrap();
+
+        let activity = load_pre_boot_history_activity(&conn, "claude_code");
+
+        assert!(activity.db_error.is_none());
+        assert_eq!(activity.seeded_files, 2);
+        assert_eq!(activity.advanced_bytes, 48 * 1024);
+        assert_eq!(activity.lifetime_messages, 0);
+    }
+
+    #[test]
+    fn pre_boot_history_loader_counts_lifetime_messages_per_provider() {
+        let conn = Connection::open_in_memory().unwrap();
+        budi_core::migration::migrate(&conn).unwrap();
+
+        let now = Utc::now().to_rfc3339();
+        conn.execute(
+            "INSERT INTO tail_offsets (provider, path, byte_offset, last_seen) VALUES (?1, ?2, ?3, ?4)",
+            params!["claude_code", "/tmp/sess.jsonl", 1024_i64, now],
+        )
+        .unwrap();
+        // Two messages for claude_code (must count) and one for copilot_chat
+        // (must not bleed in).
+        let recent = (Utc::now() - chrono::Duration::minutes(1)).to_rfc3339();
+        let stale = (Utc::now() - chrono::Duration::days(30)).to_rfc3339();
+        conn.execute(
+            "INSERT INTO messages (id, role, timestamp, model, provider, input_tokens, output_tokens) VALUES ('m1', 'assistant', ?1, 'claude-sonnet-4-5', 'claude_code', 1, 2)",
+            params![recent],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO messages (id, role, timestamp, model, provider, input_tokens, output_tokens) VALUES ('m2', 'assistant', ?1, 'claude-sonnet-4-5', 'claude_code', 1, 2)",
+            params![stale],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO messages (id, role, timestamp, model, provider, input_tokens, output_tokens) VALUES ('m3', 'assistant', ?1, 'gpt-4o', 'copilot_chat', 1, 2)",
+            params![recent],
+        )
+        .unwrap();
+
+        let activity = load_pre_boot_history_activity(&conn, "claude_code");
+
+        assert!(activity.db_error.is_none());
+        assert_eq!(activity.seeded_files, 1);
+        assert_eq!(activity.advanced_bytes, 1024);
+        // Both stale and recent rows count — this is a *lifetime* check,
+        // not a windowed one.
+        assert_eq!(activity.lifetime_messages, 2);
     }
 
     #[test]

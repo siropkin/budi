@@ -50,6 +50,10 @@
 #       with the parser-regression hint. The state we simulate is the
 #       exact one a v3 parser would have produced on a v4 mutation log,
 #       so this is the gate that would have caught 8.4.0 before tag.
+#       Also asserts the new `pre-boot history detected / Copilot Chat`
+#       INFO check (8.4.2 #693) — silent while messages exist, fires
+#       `info` with the `budi db import` backfill hint when tail_offsets
+#       advance is present but messages are empty for the provider.
 #
 # Steps 1-12 (host extension UI) and 16-17 (Billing API reconciliation
 # fixtures) are manual and tracked in the per-platform PASS table in
@@ -604,6 +608,19 @@ if [[ "$PASS_STATUS" != "pass" ]]; then
 fi
 echo "[e2e] OK: doctor reports 'tailer rows / Copilot Chat' = pass after rows landed"
 
+# #693: with messages already landed for copilot_chat (steps 13/20/21), the
+# pre-boot history INFO check is idempotently silent — passes with
+# "nothing to backfill". Pins the discoverability contract: the INFO state
+# is reserved for the truly-pre-boot scenario.
+PREBOOT_PASS_STATUS=$(doctor_status_for "$DOCTOR_PASS_JSON" "pre-boot history detected / Copilot Chat")
+if [[ "$PREBOOT_PASS_STATUS" != "pass" ]]; then
+  echo "[e2e] FAIL: post-step-20 'pre-boot history detected / Copilot Chat' status = '$PREBOOT_PASS_STATUS', expected 'pass' (idempotent silence once messages exist)" >&2
+  echo "[e2e] doctor json:" >&2
+  cat "$DOCTOR_PASS_JSON" >&2 || true
+  exit 1
+fi
+echo "[e2e] OK: doctor reports 'pre-boot history detected / Copilot Chat' = pass while messages exist"
+
 # Simulate the 8.4.0 broken-parser state: tail_offsets show recent
 # byte advance, but `messages` carries zero copilot_chat rows. The
 # DELETE clears the step-13 seed plus the parser-emitted rows; we keep
@@ -637,6 +654,27 @@ if ! grep -Fq "ADR-0092 §2.6 / MIN_API_VERSION" <<<"$AMBER_DETAIL"; then
   exit 1
 fi
 echo "[e2e] OK: AMBER detail carries the parser-regression hint"
+
+# #693: same observable state (`tail_offsets` advanced + `messages` empty
+# for the provider) is also the pre-boot-history trigger. The INFO check
+# fires with the `budi db import` backfill hint — distinct severity and
+# remediation from the AMBER tailer-rows check above.
+PREBOOT_INFO_STATUS=$(doctor_status_for "$DOCTOR_AMBER_JSON" "pre-boot history detected / Copilot Chat")
+if [[ "$PREBOOT_INFO_STATUS" != "info" ]]; then
+  echo "[e2e] FAIL: under empty-messages state, 'pre-boot history detected / Copilot Chat' status = '$PREBOOT_INFO_STATUS', expected 'info'" >&2
+  echo "[e2e] doctor json:" >&2
+  cat "$DOCTOR_AMBER_JSON" >&2 || true
+  exit 1
+fi
+echo "[e2e] OK: doctor flipped 'pre-boot history detected / Copilot Chat' to info under empty-messages state"
+
+PREBOOT_INFO_DETAIL=$(doctor_detail_for "$DOCTOR_AMBER_JSON" "pre-boot history detected / Copilot Chat")
+if ! grep -Fq "budi db import" <<<"$PREBOOT_INFO_DETAIL"; then
+  echo "[e2e] FAIL: INFO detail missing the backfill hint (\`budi db import\`)" >&2
+  echo "[e2e] detail: $PREBOOT_INFO_DETAIL" >&2
+  exit 1
+fi
+echo "[e2e] OK: INFO detail carries the \`budi db import\` backfill hint"
 
 step "PASS: automated portion of v8.4.{0,1} smoke test plan green"
 echo "Manual UI steps 1–12 + Billing API steps 16–17 are tracked in"
