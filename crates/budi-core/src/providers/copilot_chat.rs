@@ -2385,21 +2385,31 @@ mod tests {
     ///    at a `.code-workspace` file → first folder's path is the cwd.
     #[test]
     fn parse_workspace_storage_session_enriches_cwd() {
+        // Use forward-slashed string-form paths for any value that round-
+        // trips through a `file://` URI — Windows uses backslashes in
+        // PathBuf string forms, but VS Code (and RFC 3986) writes URIs
+        // with forward slashes, and an unescaped backslash inside a JSON
+        // string is an invalid escape that aborts parsing.
+        fn fwd(p: &Path) -> String {
+            p.to_string_lossy().replace('\\', "/")
+        }
+
         let tmp = std::env::temp_dir().join("budi-copilot-chat-cwd-enrich");
         let _ = std::fs::remove_dir_all(&tmp);
+
+        let line = r#"{"kind":2,"v":[{"requestId":"r-1","modelId":"copilot/gpt-4.1","completionTokens":42,"result":{"metadata":{"resolvedModel":"x"}}}]}"#;
 
         // ---- Case 1: workspaceStorage single-root ----------------------
         let hash_dir = tmp.join("Library/Application Support/Code/User/workspaceStorage/abc123");
         let chat_dir = hash_dir.join("chatSessions");
         std::fs::create_dir_all(&chat_dir).unwrap();
-        let target_cwd = tmp.join("repos/single-root").to_string_lossy().into_owned();
-        std::fs::write(
-            hash_dir.join("workspace.json"),
-            format!("{{\"folder\":\"file://{}\"}}", target_cwd),
-        )
-        .unwrap();
+        let target_cwd = format!("{}/repos/single-root", fwd(&tmp));
+        let workspace_json = serde_json::json!({
+            "folder": format!("file://{}", target_cwd),
+        })
+        .to_string();
+        std::fs::write(hash_dir.join("workspace.json"), workspace_json).unwrap();
         let session_path = chat_dir.join("sess-single.jsonl");
-        let line = r#"{"kind":2,"v":[{"requestId":"r-1","modelId":"copilot/gpt-4.1","completionTokens":42,"result":{"metadata":{"resolvedModel":"x"}}}]}"#;
         std::fs::write(&session_path, format!("{line}\n")).unwrap();
         let (msgs, _) = parse_copilot_chat(&session_path, &format!("{line}\n"), 0);
         assert_eq!(msgs.len(), 1, "single-root session emits one row");
@@ -2430,11 +2440,11 @@ mod tests {
         let remote_hash = tmp.join(".vscode-server/data/User/workspaceStorage/remotehash456");
         let remote_chat = remote_hash.join("chatSessions");
         std::fs::create_dir_all(&remote_chat).unwrap();
-        std::fs::write(
-            remote_hash.join("workspace.json"),
-            r#"{"folder":"vscode-remote://ssh-remote+myhost/srv/repos/remote-proj"}"#,
-        )
-        .unwrap();
+        let remote_workspace_json = serde_json::json!({
+            "folder": "vscode-remote://ssh-remote+myhost/srv/repos/remote-proj",
+        })
+        .to_string();
+        std::fs::write(remote_hash.join("workspace.json"), remote_workspace_json).unwrap();
         let remote_session = remote_chat.join("sess-remote.jsonl");
         std::fs::write(&remote_session, format!("{line}\n")).unwrap();
         let (remote_msgs, _) = parse_copilot_chat(&remote_session, &format!("{line}\n"), 0);
@@ -2457,30 +2467,28 @@ mod tests {
         std::fs::create_dir_all(&folder_a).unwrap();
         std::fs::create_dir_all(&folder_b).unwrap();
         let code_workspace = workspace_dir.join("multi.code-workspace");
-        std::fs::write(
-            &code_workspace,
-            format!(
-                "{{\"folders\":[{{\"path\":\"{}\"}},{{\"path\":\"{}\"}}]}}",
-                folder_a.display(),
-                folder_b.display(),
-            ),
-        )
-        .unwrap();
-        std::fs::write(
-            multi_hash.join("workspace.json"),
-            format!(
-                "{{\"configuration\":\"file://{}\"}}",
-                code_workspace.display()
-            ),
-        )
-        .unwrap();
+        let folder_a_str = fwd(&folder_a);
+        let folder_b_str = fwd(&folder_b);
+        let code_workspace_json = serde_json::json!({
+            "folders": [
+                {"path": folder_a_str},
+                {"path": folder_b_str},
+            ],
+        })
+        .to_string();
+        std::fs::write(&code_workspace, code_workspace_json).unwrap();
+        let multi_workspace_json = serde_json::json!({
+            "configuration": format!("file://{}", fwd(&code_workspace)),
+        })
+        .to_string();
+        std::fs::write(multi_hash.join("workspace.json"), multi_workspace_json).unwrap();
         let multi_session = multi_chat.join("sess-multi.jsonl");
         std::fs::write(&multi_session, format!("{line}\n")).unwrap();
         let (multi_msgs, _) = parse_copilot_chat(&multi_session, &format!("{line}\n"), 0);
         assert_eq!(multi_msgs.len(), 1);
         assert_eq!(
             multi_msgs[0].cwd.as_deref(),
-            Some(folder_a.to_string_lossy().as_ref()),
+            Some(folder_a_str.as_str()),
             "multi-root cwd is the first folder in .code-workspace"
         );
 
