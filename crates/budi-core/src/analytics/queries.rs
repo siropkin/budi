@@ -218,6 +218,7 @@ fn normalized_surface_expr(expr: &str) -> String {
     format!("COALESCE(NULLIF(LOWER({expr}), ''), 'unknown')")
 }
 
+#[allow(clippy::too_many_arguments)]
 fn apply_dimension_filters(
     conditions: &mut Vec<String>,
     param_values: &mut Vec<String>,

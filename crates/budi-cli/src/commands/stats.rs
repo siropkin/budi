@@ -861,6 +861,7 @@ fn cmd_stats_summary(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn cmd_stats_projects(
     client: &DaemonClient,
     period: StatsPeriod,
@@ -1810,6 +1811,7 @@ fn cmd_stats_file_detail(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn cmd_stats_models(
     client: &DaemonClient,
     period: StatsPeriod,
@@ -2403,11 +2405,12 @@ fn cmd_stats_surfaces(
         .map(|r| r.total_cost_cents)
         .fold(0.0_f64, f64::max);
     print_breakdown_header("SURFACE", label_width, "MSGS");
-    let mut shown = 0usize;
-    for r in &rows {
-        if limit > 0 && shown >= limit {
-            break;
-        }
+    let visible = if limit > 0 {
+        rows.len().min(limit)
+    } else {
+        rows.len()
+    };
+    for r in rows.iter().take(visible) {
         let label = truncate_label(&r.surface, label_width);
         let bar = render_bar(r.total_cost_cents, max_cost);
         let cost_cell = format_cost_cents_fixed(r.total_cost_cents);
@@ -2420,7 +2423,6 @@ fn cmd_stats_surfaces(
             lw = label_width,
             cw = BREAKDOWN_COST_WIDTH,
         );
-        shown += 1;
     }
     println!();
     Ok(())
