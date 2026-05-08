@@ -990,6 +990,7 @@ fn build_messages_for_request(
 ) -> Vec<ParsedMessage> {
     let model = extract_model_id(request).or_else(|| session_default_model.map(|s| s.to_string()));
     let timestamp = extract_timestamp(request);
+    let tool_data = extract_tool_data(request);
 
     let path_key = path.display().to_string();
     let sid = session_id.unwrap_or(path_key.as_str());
@@ -1078,9 +1079,9 @@ fn build_messages_for_request(
         prompt_category: None,
         prompt_category_source: None,
         prompt_category_confidence: None,
-        tool_names: Vec::new(),
-        tool_use_ids: Vec::new(),
-        tool_files: Vec::new(),
+        tool_names: tool_data.names,
+        tool_use_ids: tool_data.ids,
+        tool_files: tool_data.files,
         tool_outcomes: Vec::new(),
     });
 
@@ -1205,6 +1206,7 @@ fn build_message(
     let model = extract_model_id(record).or_else(|| session_default_model.map(|s| s.to_string()));
 
     let timestamp = extract_timestamp(record);
+    let tool_data = extract_tool_data(record);
 
     let path_key = path.display().to_string();
     let sid = session_id.unwrap_or(path_key.as_str());
@@ -1294,9 +1296,9 @@ fn build_message(
         prompt_category: None,
         prompt_category_source: None,
         prompt_category_confidence: None,
-        tool_names: Vec::new(),
-        tool_use_ids: Vec::new(),
-        tool_files: Vec::new(),
+        tool_names: tool_data.names,
+        tool_use_ids: tool_data.ids,
+        tool_files: tool_data.files,
         tool_outcomes: Vec::new(),
     });
 
@@ -1645,6 +1647,145 @@ fn extract_user_message_text(request: &serde_json::Value) -> Option<String> {
     None
 }
 
+/// Bundle of tool-attribution data extracted from a single
+/// materialized request. Returned by [`extract_tool_data`] and piped
+/// straight into the assistant row's `tool_*` slots.
+///
+/// `names` and `ids` align positionally — `names[i]` and `ids[i]`
+/// describe the same `toolCallRounds[r].toolCalls[c]` entry, in
+/// flattened-walk order. `files` is the union of file paths
+/// projected from per-tool argument shapes (no positional tie-back to
+/// names/ids — downstream consumers want the "files this turn touched"
+/// set, not the per-call tuple).
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+struct ToolData {
+    names: Vec<String>,
+    ids: Vec<String>,
+    files: Vec<String>,
+}
+
+/// Walk `result.metadata.toolCallRounds[].toolCalls[]` and surface tool
+/// names, tool-use ids, and file-path arguments for the file-attribution
+/// pipeline (#687).
+///
+/// Per ADR-0092 §2.3 v4, each `toolCallRounds[r]` carries a `toolCalls[]`
+/// array whose entries look like
+/// `{ "name": "replace_string_in_file", "arguments": { "filePath": "…" }, "id": "<call-id>" }`.
+/// We flatten across all rounds, preserve order, and project file paths
+/// per a small per-tool table:
+///
+/// * `replace_string_in_file` / `multi_replace_string_in_file` /
+///   `create_file` / `read_file` → `arguments.filePath`
+/// * `apply_patch` → walk `arguments.patches[].filePath` first, then
+///   fall back to `arguments.filePath` for single-file patches.
+/// * Unknown tools → no file extracted (don't fail the parse).
+///
+/// Adding a new tool name is a one-line edit + ADR-0092 §2.3 amendment in
+/// the same PR (per the §2.6-style "contract and code never disagree"
+/// rule).
+///
+/// Names/ids are emitted positionally per call (one entry per toolCall,
+/// even if duplicated across rounds) so a future "tool fan-out per turn"
+/// metric stays correct. Empty `name`/`id` fields are skipped — pre-stub
+/// records (kind:2 inflight) reach this fn before the model has named
+/// the call, and emitting an empty-string entry would corrupt the
+/// downstream `tag_value` check that filters out blanks.
+fn extract_tool_data(request: &serde_json::Value) -> ToolData {
+    let Some(rounds) = request
+        .pointer("/result/metadata/toolCallRounds")
+        .and_then(|v| v.as_array())
+    else {
+        return ToolData::default();
+    };
+
+    let mut names = Vec::new();
+    let mut ids = Vec::new();
+    let mut files = Vec::new();
+
+    for round in rounds {
+        let Some(calls) = round.get("toolCalls").and_then(|v| v.as_array()) else {
+            continue;
+        };
+        for call in calls {
+            let name = call
+                .get("name")
+                .and_then(|v| v.as_str())
+                .map(|s| s.trim())
+                .filter(|s| !s.is_empty());
+            let id = call
+                .get("id")
+                .and_then(|v| v.as_str())
+                .map(|s| s.trim())
+                .filter(|s| !s.is_empty());
+            if let Some(n) = name {
+                names.push(n.to_string());
+            }
+            if let Some(i) = id {
+                ids.push(i.to_string());
+            }
+            if let Some(n) = name {
+                let args = call.get("arguments").unwrap_or(&serde_json::Value::Null);
+                project_tool_files(n, args, &mut files);
+            }
+        }
+    }
+
+    ToolData { names, ids, files }
+}
+
+/// Per-tool projection of `arguments` to candidate file paths. URI-shaped
+/// values (`file://`, `vscode-vfs://`) are converted to local-path form
+/// using the same [`uri_to_local_path`] helper #681 wired in for
+/// workspace.json — keeps the on-wire format consistent with cwd
+/// enrichment so the downstream `FileEnricher` privacy filter sees a
+/// single canonical shape.
+fn project_tool_files(tool_name: &str, args: &serde_json::Value, out: &mut Vec<String>) {
+    match tool_name {
+        "replace_string_in_file" | "multi_replace_string_in_file" | "create_file" | "read_file" => {
+            push_file_path(args.get("filePath"), out);
+        }
+        "apply_patch" => {
+            // Multi-file patches expose a `patches[]` array; single-file
+            // patches use the same top-level `filePath` shape as the
+            // edit tools. Try both — apply_patch shapes have shifted at
+            // least once across github.copilot-chat releases.
+            if let Some(patches) = args.get("patches").and_then(|v| v.as_array()) {
+                for patch in patches {
+                    push_file_path(patch.get("filePath"), out);
+                }
+            } else {
+                push_file_path(args.get("filePath"), out);
+            }
+        }
+        _ => {
+            // Unknown tool — don't fail the parse, just emit no path.
+            // ADR-0092 §2.3 amendments add new arms here in lockstep
+            // with parser shape bumps.
+        }
+    }
+}
+
+fn push_file_path(v: Option<&serde_json::Value>, out: &mut Vec<String>) {
+    let Some(s) = v.and_then(|v| v.as_str()) else {
+        return;
+    };
+    let trimmed = s.trim();
+    if trimmed.is_empty() {
+        return;
+    }
+    // Strip URI schemes the same way #681 normalises workspace.json `folder`.
+    // Plain absolute or relative paths pass through unchanged so the
+    // downstream `file_attribution` normaliser sees its existing shapes.
+    let normalized = if trimmed.contains("://") {
+        uri_to_local_path(trimmed)
+    } else {
+        trimmed.to_string()
+    };
+    if !normalized.is_empty() {
+        out.push(normalized);
+    }
+}
+
 /// Best-effort timestamp for a user row — prefer the message-side timestamp
 /// (when the prompt was submitted) over the request-level one (when the
 /// assistant response started). Falls back to the request timestamp.
@@ -1760,6 +1901,195 @@ mod tests {
 
     fn make_message(json: &str) -> serde_json::Value {
         serde_json::from_str(json).unwrap()
+    }
+
+    #[test]
+    fn extract_tool_data_empty_when_metadata_missing() {
+        let v = make_message(r#"{"requestId": "r1", "result": {"metadata": {}}}"#);
+        assert_eq!(extract_tool_data(&v), ToolData::default());
+    }
+
+    #[test]
+    fn extract_tool_data_empty_when_no_rounds() {
+        let v = make_message(r#"{"result": {"metadata": {"toolCallRounds": []}}}"#);
+        assert_eq!(extract_tool_data(&v), ToolData::default());
+    }
+
+    #[test]
+    fn extract_tool_data_skips_speak_only_rounds() {
+        // Real-shape: a round with empty toolCalls just carries the
+        // model's prose (`response`/`thinking`). It must not surface in
+        // the names/ids/files vectors.
+        let v = make_message(
+            r#"{"result": {"metadata": {"toolCallRounds": [
+                {"response": "I see you have a file open…", "toolCalls": [], "id": "round-1"}
+            ]}}}"#,
+        );
+        assert_eq!(extract_tool_data(&v), ToolData::default());
+    }
+
+    #[test]
+    fn extract_tool_data_replace_string_in_file() {
+        let v = make_message(
+            r#"{"result": {"metadata": {"toolCallRounds": [
+                {"toolCalls": [
+                    {"name": "replace_string_in_file",
+                     "id": "call-abc",
+                     "arguments": {"filePath": "src/auth.rs", "oldString": "x", "newString": "y"}}
+                ]}
+            ]}}}"#,
+        );
+        let td = extract_tool_data(&v);
+        assert_eq!(td.names, vec!["replace_string_in_file".to_string()]);
+        assert_eq!(td.ids, vec!["call-abc".to_string()]);
+        assert_eq!(td.files, vec!["src/auth.rs".to_string()]);
+    }
+
+    #[test]
+    fn extract_tool_data_multi_replace_and_create_and_read() {
+        let v = make_message(
+            r#"{"result": {"metadata": {"toolCallRounds": [
+                {"toolCalls": [
+                    {"name": "multi_replace_string_in_file", "id": "1", "arguments": {"filePath": "a.rs"}},
+                    {"name": "create_file", "id": "2", "arguments": {"filePath": "b.rs"}},
+                    {"name": "read_file", "id": "3", "arguments": {"filePath": "c.rs"}}
+                ]}
+            ]}}}"#,
+        );
+        let td = extract_tool_data(&v);
+        assert_eq!(td.names.len(), 3);
+        assert_eq!(td.ids, vec!["1", "2", "3"]);
+        assert_eq!(td.files, vec!["a.rs", "b.rs", "c.rs"]);
+    }
+
+    #[test]
+    fn extract_tool_data_unknown_tool_yields_no_file_but_name_and_id_emit() {
+        let v = make_message(
+            r#"{"result": {"metadata": {"toolCallRounds": [
+                {"toolCalls": [
+                    {"name": "search_codebase", "id": "x", "arguments": {"query": "foo"}}
+                ]}
+            ]}}}"#,
+        );
+        let td = extract_tool_data(&v);
+        assert_eq!(td.names, vec!["search_codebase".to_string()]);
+        assert_eq!(td.ids, vec!["x".to_string()]);
+        assert!(td.files.is_empty());
+    }
+
+    #[test]
+    fn extract_tool_data_strips_file_uri_scheme() {
+        let v = make_message(
+            r#"{"result": {"metadata": {"toolCallRounds": [
+                {"toolCalls": [
+                    {"name": "read_file", "id": "1",
+                     "arguments": {"filePath": "file:///home/dev/repo/src/x.rs"}}
+                ]}
+            ]}}}"#,
+        );
+        let td = extract_tool_data(&v);
+        assert_eq!(td.files, vec!["/home/dev/repo/src/x.rs".to_string()]);
+    }
+
+    #[test]
+    fn extract_tool_data_strips_vscode_vfs_scheme() {
+        let v = make_message(
+            r#"{"result": {"metadata": {"toolCallRounds": [
+                {"toolCalls": [
+                    {"name": "read_file", "id": "1",
+                     "arguments": {"filePath": "vscode-vfs://github/owner/repo/path/to/file.rs"}}
+                ]}
+            ]}}}"#,
+        );
+        let td = extract_tool_data(&v);
+        assert_eq!(td.files, vec!["/owner/repo/path/to/file.rs".to_string()]);
+    }
+
+    #[test]
+    fn extract_tool_data_apply_patch_walks_patches_array() {
+        let v = make_message(
+            r#"{"result": {"metadata": {"toolCallRounds": [
+                {"toolCalls": [
+                    {"name": "apply_patch", "id": "p1",
+                     "arguments": {"patches": [
+                         {"filePath": "src/lib.rs"},
+                         {"filePath": "src/main.rs"}
+                     ]}}
+                ]}
+            ]}}}"#,
+        );
+        let td = extract_tool_data(&v);
+        assert_eq!(td.files, vec!["src/lib.rs", "src/main.rs"]);
+    }
+
+    #[test]
+    fn extract_tool_data_apply_patch_falls_back_to_top_level_filepath() {
+        let v = make_message(
+            r#"{"result": {"metadata": {"toolCallRounds": [
+                {"toolCalls": [
+                    {"name": "apply_patch", "id": "p1",
+                     "arguments": {"filePath": "src/single.rs"}}
+                ]}
+            ]}}}"#,
+        );
+        let td = extract_tool_data(&v);
+        assert_eq!(td.files, vec!["src/single.rs".to_string()]);
+    }
+
+    #[test]
+    fn extract_tool_data_flattens_across_rounds_and_preserves_duplicates() {
+        // Mirrors claude_code: the same tool name invoked twice across
+        // two rounds shows up twice in `names`, paired with distinct ids.
+        let v = make_message(
+            r#"{"result": {"metadata": {"toolCallRounds": [
+                {"toolCalls": [
+                    {"name": "read_file", "id": "1", "arguments": {"filePath": "a.rs"}}
+                ]},
+                {"toolCalls": [
+                    {"name": "read_file", "id": "2", "arguments": {"filePath": "b.rs"}}
+                ]}
+            ]}}}"#,
+        );
+        let td = extract_tool_data(&v);
+        assert_eq!(td.names, vec!["read_file", "read_file"]);
+        assert_eq!(td.ids, vec!["1", "2"]);
+        assert_eq!(td.files, vec!["a.rs", "b.rs"]);
+    }
+
+    #[test]
+    fn extract_tool_data_skips_blank_name_and_blank_id() {
+        // Defensive: an in-flight stub on a kind:2 splice could land
+        // before the model has named the call. We must not insert
+        // empty strings into the tag vectors — downstream consumers
+        // would emit an empty tag value that violates the
+        // not-null-empty contract.
+        let v = make_message(
+            r#"{"result": {"metadata": {"toolCallRounds": [
+                {"toolCalls": [
+                    {"name": "", "id": "", "arguments": {"filePath": "ignored.rs"}}
+                ]}
+            ]}}}"#,
+        );
+        let td = extract_tool_data(&v);
+        assert!(td.names.is_empty());
+        assert!(td.ids.is_empty());
+        assert!(td.files.is_empty());
+    }
+
+    #[test]
+    fn extract_tool_data_missing_tool_calls_array_skips_round() {
+        let v = make_message(
+            r#"{"result": {"metadata": {"toolCallRounds": [
+                {"id": "round-1"},
+                {"toolCalls": [
+                    {"name": "read_file", "id": "ok", "arguments": {"filePath": "x.rs"}}
+                ]}
+            ]}}}"#,
+        );
+        let td = extract_tool_data(&v);
+        assert_eq!(td.names, vec!["read_file".to_string()]);
+        assert_eq!(td.ids, vec!["ok".to_string()]);
+        assert_eq!(td.files, vec!["x.rs".to_string()]);
     }
 
     #[test]
@@ -2805,6 +3135,74 @@ mod tests {
                     p
                 );
             }
+        }
+        // #687 acceptance: assistant rows whose request carried a
+        // toolCallRounds entry materialize tool_names / tool_use_ids /
+        // tool_files. The dc9f930d request in the fixture is the only
+        // one with synthetic tool data; all other assistant rows must
+        // surface empty tool slots.
+        for entry in &expected {
+            if entry["role"].as_str() != Some("assistant") {
+                continue;
+            }
+            let want_output = entry["output_tokens"].as_u64().unwrap();
+            let row = msgs
+                .iter()
+                .find(|m| m.role == "assistant" && m.output_tokens == want_output)
+                .expect("assistant row must exist");
+            let want_names: Vec<String> = entry
+                .get("tool_names")
+                .and_then(|v| v.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|s| s.as_str().map(String::from))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let want_ids: Vec<String> = entry
+                .get("tool_use_ids")
+                .and_then(|v| v.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|s| s.as_str().map(String::from))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let want_files: Vec<String> = entry
+                .get("tool_files")
+                .and_then(|v| v.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|s| s.as_str().map(String::from))
+                        .collect()
+                })
+                .unwrap_or_default();
+            assert_eq!(
+                row.tool_names,
+                want_names,
+                "tool_names mismatch on requestId={}",
+                entry["requestId"].as_str().unwrap()
+            );
+            assert_eq!(
+                row.tool_use_ids,
+                want_ids,
+                "tool_use_ids mismatch on requestId={}",
+                entry["requestId"].as_str().unwrap()
+            );
+            assert_eq!(
+                row.tool_files,
+                want_files,
+                "tool_files mismatch on requestId={}",
+                entry["requestId"].as_str().unwrap()
+            );
+        }
+        // User rows must always have empty tool slots — the tool data
+        // belongs to the assistant turn, not the prompt that initiated
+        // it.
+        for m in msgs.iter().filter(|m| m.role == "user") {
+            assert!(m.tool_names.is_empty());
+            assert!(m.tool_use_ids.is_empty());
+            assert!(m.tool_files.is_empty());
         }
     }
 

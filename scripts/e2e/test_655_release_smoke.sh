@@ -425,6 +425,39 @@ if [[ "$USER_ROWS" != "$EXPECTED_USER_ROWS" || "$ASSISTANT_ROWS" != "$EXPECTED_A
 fi
 echo "[e2e] OK: both row roles materialize ($USER_ROWS user, $ASSISTANT_ROWS assistant) (#686)"
 
+# #687 acceptance: tool data extracted from result.metadata.toolCallRounds
+# lands in the tags table. The canonical fixture now carries a synthetic
+# toolCallRounds entry on request dc9f930d (`replace_string_in_file` +
+# `read_file`, file paths `src/auth.rs` + `src/main.rs`); pre-#687 the
+# parser hard-coded `tool_names: Vec::new()` / `tool_use_ids: Vec::new()`
+# / `tool_files: Vec::new()` so `budi stats files --provider copilot_chat`
+# was permanently empty. Assert the per-tag rows materialize via the
+# pipeline enrichers (ToolEnricher + FileEnricher).
+EXPECTED_TOOL_ROWS=$(python3 -c "import json; d=json.load(open('$FIXTURE_EXPECTED')); print(sum(len(r.get('tool_names', [])) for r in d if r.get('role') == 'assistant'))")
+EXPECTED_TOOL_USE_ID_ROWS=$(python3 -c "import json; d=json.load(open('$FIXTURE_EXPECTED')); print(sum(len(r.get('tool_use_ids', [])) for r in d if r.get('role') == 'assistant'))")
+EXPECTED_FILE_PATH_ROWS=$(python3 -c "import json; d=json.load(open('$FIXTURE_EXPECTED')); print(sum(len(r.get('tool_files', [])) for r in d if r.get('role') == 'assistant'))")
+TOOL_ROWS=$(sqlite3 "$DB" \
+  "SELECT COUNT(*) FROM tags t JOIN messages m ON m.id = t.message_id \
+   WHERE m.provider='copilot_chat' AND m.session_id='$FIXTURE_SESSION_ID' AND t.key='tool';")
+TOOL_USE_ID_ROWS=$(sqlite3 "$DB" \
+  "SELECT COUNT(*) FROM tags t JOIN messages m ON m.id = t.message_id \
+   WHERE m.provider='copilot_chat' AND m.session_id='$FIXTURE_SESSION_ID' AND t.key='tool_use_id';")
+FILE_PATH_ROWS=$(sqlite3 "$DB" \
+  "SELECT COUNT(*) FROM tags t JOIN messages m ON m.id = t.message_id \
+   WHERE m.provider='copilot_chat' AND m.session_id='$FIXTURE_SESSION_ID' AND t.key='file_path';")
+if [[ "$TOOL_ROWS" != "$EXPECTED_TOOL_ROWS" || "$TOOL_USE_ID_ROWS" != "$EXPECTED_TOOL_USE_ID_ROWS" || "$FILE_PATH_ROWS" != "$EXPECTED_FILE_PATH_ROWS" ]]; then
+  echo "[e2e] FAIL: copilot_chat tool-attribution tags mismatch (#687)" >&2
+  echo "  tool tags:         $TOOL_ROWS (expected $EXPECTED_TOOL_ROWS)" >&2
+  echo "  tool_use_id tags:  $TOOL_USE_ID_ROWS (expected $EXPECTED_TOOL_USE_ID_ROWS)" >&2
+  echo "  file_path tags:    $FILE_PATH_ROWS (expected $EXPECTED_FILE_PATH_ROWS)" >&2
+  sqlite3 "$DB" \
+    "SELECT t.key, t.value FROM tags t JOIN messages m ON m.id = t.message_id \
+     WHERE m.provider='copilot_chat' AND m.session_id='$FIXTURE_SESSION_ID' \
+     AND t.key IN ('tool','tool_use_id','file_path') ORDER BY t.key, t.value;" >&2 || true
+  exit 1
+fi
+echo "[e2e] OK: tool/tool_use_id/file_path tags materialized ($TOOL_ROWS/$TOOL_USE_ID_ROWS/$FILE_PATH_ROWS) (#687)"
+
 # ---------------------------------------------------------------------------
 # Step 21 — streaming-truncation resilience (8.4.1 R1.5, #672).
 #
