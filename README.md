@@ -67,7 +67,7 @@ Everything stays on your machine by default. Optional cloud sync pushes aggregat
 | **Cursor** | Supported | Live tailing + Usage API reconciliation |
 | **Copilot CLI** | Supported | Live transcript tailing |
 | **Copilot Chat (VS Code / Cursor)** | Supported | Live JSON/JSONL tailing + GitHub Billing API reconciliation ([ADR-0092](docs/adr/0092-copilot-chat-data-contract.md)) |
-| **Copilot Chat (JetBrains)** | Partial (statusline only) | Surface classified as `jetbrains`; storage shape pinned ([ADR-0093](docs/adr/0093-copilot-chat-jetbrains-storage-shape.md)) — local-tail parser pending follow-up to [#716](https://github.com/siropkin/budi/issues/716) |
+| **Copilot Chat (JetBrains)** | Supported (metadata + billing API) | Session-level discovery under `~/.config/github-copilot/<ide-slug>/` ([ADR-0093](docs/adr/0093-copilot-chat-jetbrains-storage-shape.md)) + GitHub Billing API reconciliation for per-turn costs |
 | **Gemini CLI** | Deferred | Tracked in [#294](https://github.com/siropkin/budi/issues/294) |
 
 All agents also support one-time historical import via `budi db import`.

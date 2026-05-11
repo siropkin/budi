@@ -22,6 +22,15 @@ use sha2::{Digest, Sha256};
 use crate::jsonl::ParsedMessage;
 use crate::provider::{DiscoveredFile, Provider};
 
+mod jetbrains;
+
+/// Canonical provider id. ADR-0093 §1: JetBrains is a host of the same
+/// Copilot Chat provider as VS Code — the `surface` dimension carries the
+/// host distinction, not the provider id. Threaded into the JetBrains-side
+/// `ParsedMessage::provider` so both halves of the ingest path land under
+/// the same provider key.
+pub const PROVIDER_ID: &str = "copilot_chat";
+
 /// Monotonically-incrementing version that surfaces in `budi doctor` (R1.6,
 /// #653) when the parser shape changes. Mirrors the budi-cursor
 /// `MIN_API_VERSION` pattern (ADR-0092 §2.6). Bump in lockstep with §2.3
@@ -87,7 +96,7 @@ pub struct CopilotChatProvider;
 
 impl Provider for CopilotChatProvider {
     fn name(&self) -> &'static str {
-        "copilot_chat"
+        PROVIDER_ID
     }
 
     fn display_name(&self) -> &'static str {
@@ -95,7 +104,7 @@ impl Provider for CopilotChatProvider {
     }
 
     fn is_available(&self) -> bool {
-        any_user_root_has_copilot_marker(&user_root_candidates())
+        any_user_root_has_copilot_marker(&user_root_candidates()) || jetbrains::is_available()
     }
 
     fn discover_files(&self) -> Result<Vec<DiscoveredFile>> {
@@ -141,6 +150,7 @@ impl Provider for CopilotChatProvider {
                 roots.push(gs);
             }
         }
+        roots.extend(jetbrains::watch_roots());
         roots.sort();
         roots.dedup();
         roots
@@ -149,9 +159,17 @@ impl Provider for CopilotChatProvider {
     fn sync_direct(
         &self,
         conn: &mut Connection,
-        _pipeline: &mut crate::pipeline::Pipeline,
+        pipeline: &mut crate::pipeline::Pipeline,
         _max_age_days: Option<u64>,
     ) -> Option<Result<(usize, usize, Vec<String>)>> {
+        // JetBrains-side ingest (ADR-0093): the binary Xodus+Nitrite stores
+        // are not streamable through the `parse_file` text path, so the
+        // JetBrains rows land via a direct discover-and-ingest sweep here.
+        // Run before the billing-API reconciliation so the metadata-only
+        // rows exist before the reconciliation tries to attach costs to
+        // them on a (date, model) bucket basis.
+        let _jb_ingested = jetbrains::sync_jetbrains_sessions(conn, pipeline);
+
         // R1.5 / ADR-0092 §3: best-effort GitHub Billing API
         // reconciliation. Local-tail is the primary signal; this just
         // truths-up `cost_cents` on existing rows on a (date, model)
@@ -160,8 +178,9 @@ impl Provider for CopilotChatProvider {
         // billing pull is a side effect that complements ingest, never
         // a replacement for it.
         let config = crate::config::load_copilot_chat_config();
-        config.effective_billing_pat()?;
-        if let Err(e) = crate::sync::copilot_chat_billing::run_reconciliation(conn, &config) {
+        if config.effective_billing_pat().is_some()
+            && let Err(e) = crate::sync::copilot_chat_billing::run_reconciliation(conn, &config)
+        {
             tracing::warn!("copilot_chat billing reconciliation failed: {e:#}");
         }
         None
@@ -2086,22 +2105,9 @@ fn log_unknown_shape_once(path: &Path, record: &serde_json::Value) {
 }
 
 // ---------------------------------------------------------------------------
-// JetBrains host (ADR-0093) — parser stub.
-//
-// Not yet wired into the dispatcher or `watch_roots()`. The fixture under
-// `fixtures/jetbrains_copilot_1_5_53_243_empty_session/` is the ground truth
-// the next ticket will implement against; see `shape.md` alongside it and
-// ADR-0093 for the storage contract.
+// JetBrains host (ADR-0093) — implementation lives in `jetbrains` submodule.
+// See `crates/budi-core/src/providers/copilot_chat/jetbrains.rs`.
 // ---------------------------------------------------------------------------
-
-#[cfg(test)]
-#[allow(dead_code)]
-fn parse_jetbrains_copilot_chat_session_dir(_session_dir: &Path) -> Vec<ParsedMessage> {
-    unimplemented!(
-        "JetBrains-side parser pending — see ADR-0093 and the fixture under \
-         crates/budi-core/src/providers/copilot_chat/fixtures/jetbrains_copilot_1_5_53_243_empty_session/"
-    )
-}
 
 #[cfg(test)]
 mod tests {
@@ -2817,16 +2823,19 @@ mod tests {
         );
     }
 
-    /// Stub: pending the JetBrains parser ticket. The fixture is the empty
-    /// session described in ADR-0093 §4 — once the parser lands, this
-    /// assertion lifts to `assert_eq!(parsed.len(), 0)` against the
-    /// `.expected.json`-derived empty `messages` array.
+    /// ADR-0093 §4 / #722: the empty fixture session carries only
+    /// `XdMigration` bootstrap entries — no `XdChatSession`/`XdAgentSession`
+    /// markers. The parser must emit zero rows for it without panicking on
+    /// the empty schema. This is the ground-truth anchor; populated
+    /// sessions are exercised inside `jetbrains` submodule tests.
     #[test]
-    #[ignore = "JetBrains parser pending — anchors against ADR-0093 fixture"]
     fn jetbrains_empty_session_parses_to_no_messages() {
         let dir = jetbrains_empty_session_fixture_dir();
-        let parsed = parse_jetbrains_copilot_chat_session_dir(&dir);
-        assert!(parsed.is_empty());
+        let parsed = jetbrains::parse_session_dir_for_tests(&dir).unwrap();
+        assert!(
+            parsed.is_empty(),
+            "empty fixture must emit zero rows; got {parsed:?}"
+        );
     }
 
     #[test]
