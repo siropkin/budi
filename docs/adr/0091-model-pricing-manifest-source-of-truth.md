@@ -1,11 +1,14 @@
 # ADR-0091: Model Pricing via Embedded Baseline + LiteLLM Runtime Refresh
 
-- **Date**: 2026-04-21 (§2 amendment 2026-04-22 — 8.3.1 / [#483](https://github.com/siropkin/budi/issues/483))
-- **Status**: Accepted (promoted 2026-04-21 after [#376](https://github.com/siropkin/budi/issues/376) and [#377](https://github.com/siropkin/budi/issues/377) merged with all Promotion Criteria test gates green; §2 amendment landed 2026-04-22 alongside v8.3.1 post-tag hardening)
-- **Issue**: [#375](https://github.com/siropkin/budi/issues/375) (§2 amendment: [#483](https://github.com/siropkin/budi/issues/483))
-- **Milestone**: 8.3.0 (epic: [#436](https://github.com/siropkin/budi/issues/436); §2 amendment: 8.3.1 / [#481](https://github.com/siropkin/budi/issues/481))
+- **Date**: 2026-04-21 (§2 amendment 2026-04-22 — 8.3.1 / [#483](https://github.com/siropkin/budi/issues/483); §5 amendment 2026-05-11 — 8.4.3 / [#725](https://github.com/siropkin/budi/issues/725))
+- **Status**: Accepted (promoted 2026-04-21 after [#376](https://github.com/siropkin/budi/issues/376) and [#377](https://github.com/siropkin/budi/issues/377) merged with all Promotion Criteria test gates green; §2 amendment landed 2026-04-22 alongside v8.3.1 post-tag hardening; §5 amendment proposed 2026-05-11 alongside [ADR-0094](./0094-custom-team-pricing-and-effective-cost-recalculation.md))
+- **Issue**: [#375](https://github.com/siropkin/budi/issues/375) (§2 amendment: [#483](https://github.com/siropkin/budi/issues/483); §5 amendment: [#725](https://github.com/siropkin/budi/issues/725))
+- **Milestone**: 8.3.0 (epic: [#436](https://github.com/siropkin/budi/issues/436); §2 amendment: 8.3.1 / [#481](https://github.com/siropkin/budi/issues/481); §5 amendment: 8.4.3 / [#724](https://github.com/siropkin/budi/issues/724))
 - **Amends**: [ADR-0083](./0083-cloud-ingest-identity-and-privacy-contract.md) §Neutral (outbound-network surface; see §6 below)
+- **Amended by**: [ADR-0094](./0094-custom-team-pricing-and-effective-cost-recalculation.md) §9 — §5 immutability rules are rescoped to a new `cost_cents_ingested` column; a new Rule D defines explicit team-rate recompute on a sibling `cost_cents_effective` column.
 - **Closes**: [#373](https://github.com/siropkin/budi/issues/373) — superseded by this ADR
+
+> **Amended by [ADR-0094](./0094-custom-team-pricing-and-effective-cost-recalculation.md) (2026-05-11), §5.** History immutability for the column previously named `cost_cents` is preserved, rescoped to a new `cost_cents_ingested` column. Rules A, B, and C continue to govern `_ingested` without modification. A sibling `cost_cents_effective` column is added; it defaults to `_ingested` at insert time and is rewritten only when an org admin has uploaded a team price list via budi-cloud. The rejection of `budi pricing recompute` from §Alternatives E stands for the `_ingested` column; ADR-0094 introduces a scoped recompute on `_effective` only. See [ADR-0094](./0094-custom-team-pricing-and-effective-cost-recalculation.md) §9 for the full amendment text.
 
 ## Context
 
