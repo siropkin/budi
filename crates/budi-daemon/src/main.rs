@@ -347,6 +347,24 @@ async fn main() -> Result<()> {
         ));
     }
 
+    // --- Start team-pricing worker (ADR-0094 §6, #731) ---
+    //
+    // Polls `GET /v1/pricing/active` once per hour while the daemon runs
+    // and hot-swaps `messages.cost_cents_effective` when the org's list
+    // version bumps. Shares the `BUDI_PRICING_REFRESH=0` env switch with
+    // the LiteLLM refresher above (one toggle, both behaviours).
+    let team_pricing_shutdown = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    if let Ok(db_path) = analytics::db_path() {
+        tracing::info!(
+            target: "budi_daemon::team_pricing",
+            "starting team-pricing worker (ADR-0094 §6)"
+        );
+        tokio::spawn(workers::team_pricing::run(
+            db_path,
+            team_pricing_shutdown.clone(),
+        ));
+    }
+
     // --- Start cloud sync worker if configured ---
     //
     // #540: always emit exactly one INFO line from this block at boot
