@@ -6855,6 +6855,82 @@ fn surface_stats_returns_one_row_per_surface() {
     assert!((vsc.estimated_cost - 0.21).abs() < 0.005);
 }
 
+// ─── #736: blended JetBrains surface (Copilot for JetBrains + AI Assistant) ─
+
+#[test]
+fn jetbrains_surface_blends_copilot_chat_and_ai_assistant_rows() {
+    // Acceptance #736: when both the GitHub Copilot for JetBrains parser
+    // (provider=copilot_chat, surface=jetbrains) and the JetBrains AI
+    // Assistant parser (provider=jetbrains_ai_assistant, surface=jetbrains)
+    // contribute rows in the same window, they roll up under the single
+    // `jetbrains` surface bucket without surprising drift. The provider
+    // axis stays distinct so the dashboard can break them apart, but the
+    // surface filter and `surface_stats` collapse them by host.
+    let mut conn = test_db();
+    let msgs = vec![
+        surface_msg("j-cc-1", "s-jet-1", "copilot_chat", "jetbrains", 42.0),
+        surface_msg("j-cc-2", "s-jet-1", "copilot_chat", "jetbrains", 21.0),
+        surface_msg(
+            "j-aa-1",
+            "s-jet-2",
+            "jetbrains_ai_assistant",
+            "jetbrains",
+            17.0,
+        ),
+        surface_msg(
+            "j-aa-2",
+            "s-jet-2",
+            "jetbrains_ai_assistant",
+            "jetbrains",
+            20.0,
+        ),
+        // A non-JetBrains row that must NOT bleed into the jetbrains bucket.
+        surface_msg("j-vsc-1", "s-vsc", "copilot_chat", "vscode", 99.0),
+    ];
+    ingest_messages(&mut conn, &msgs, None).unwrap();
+
+    let filters = DimensionFilters {
+        surfaces: vec!["jetbrains".to_string()],
+        ..Default::default()
+    };
+    let summary = usage_summary_with_filters(&conn, None, None, None, &filters).unwrap();
+    assert_eq!(
+        summary.total_messages, 4,
+        "blended jetbrains bucket should include both Copilot for JetBrains and AI Assistant rows"
+    );
+    // 42 + 21 + 17 + 20 = 100 cents = $1.00.
+    assert!(
+        (summary.total_cost_cents - 100.0).abs() < 1e-6,
+        "blended jetbrains cost should sum across providers, got {}",
+        summary.total_cost_cents
+    );
+
+    // surface_stats rolls up both providers under one row.
+    let rows = surface_stats(&conn, None, None).unwrap();
+    let jet = rows
+        .iter()
+        .find(|r| r.surface == "jetbrains")
+        .expect("jetbrains bucket present");
+    assert_eq!(jet.assistant_messages, 4);
+
+    // Provider axis stays distinct so the dashboard can break them apart.
+    let cc_filter = DimensionFilters {
+        surfaces: vec!["jetbrains".to_string()],
+        agents: vec!["copilot_chat".to_string()],
+        ..Default::default()
+    };
+    let cc = usage_summary_with_filters(&conn, None, None, None, &cc_filter).unwrap();
+    assert_eq!(cc.total_messages, 2);
+
+    let aa_filter = DimensionFilters {
+        surfaces: vec!["jetbrains".to_string()],
+        agents: vec!["jetbrains_ai_assistant".to_string()],
+        ..Default::default()
+    };
+    let aa = usage_summary_with_filters(&conn, None, None, None, &aa_filter).unwrap();
+    assert_eq!(aa.total_messages, 2);
+}
+
 // ─── #496 D-3: short-UUID prefix resolver contract ──────────────────────────
 
 #[test]

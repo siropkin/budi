@@ -32,6 +32,12 @@ pub const UNKNOWN: &str = "unknown";
 /// is its own surface. Copilot Chat must always populate `surface` itself
 /// (path-based per ADR-0092 §2.1); falling through to UNKNOWN here is the
 /// "we do not know" signal rather than guessing.
+///
+/// `jetbrains_ai_assistant` is the JetBrains-published, Anthropic-backed
+/// product (see [`crate::providers::jetbrains_ai_assistant`]). Every row
+/// it emits is bound to the JetBrains IDE that wrote it, so the default
+/// here collapses to `jetbrains` even if a future writer forgets to set
+/// `surface` explicitly.
 pub fn default_for_provider(provider: &str) -> &'static str {
     match provider {
         "claude_code" => TERMINAL,
@@ -40,6 +46,7 @@ pub fn default_for_provider(provider: &str) -> &'static str {
         // it tails `~/.copilot/session-state/` and runs in any shell.
         "copilot_cli" => TERMINAL,
         "codex" => TERMINAL,
+        "jetbrains_ai_assistant" => JETBRAINS,
         _ => UNKNOWN,
     }
 }
@@ -180,6 +187,7 @@ mod tests {
         assert_eq!(default_for_provider("copilot_cli"), TERMINAL);
         assert_eq!(default_for_provider("codex"), TERMINAL);
         assert_eq!(default_for_provider("copilot_chat"), UNKNOWN);
+        assert_eq!(default_for_provider("jetbrains_ai_assistant"), JETBRAINS);
         assert_eq!(default_for_provider("anything_else"), UNKNOWN);
     }
 }

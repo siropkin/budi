@@ -1,0 +1,43 @@
+{
+  "messages": [
+    {
+      "id": "msg_01ABCdef01",
+      "session_id": "8c2e5d63-6f4a-4e21-8d11-2b9a3a4e5b6c",
+      "timestamp": "2026-05-11T18:00:14Z",
+      "role": "assistant",
+      "model": "claude-sonnet-4-20250514",
+      "provider": "jetbrains_ai_assistant",
+      "surface": "jetbrains",
+      "input_tokens": 1240,
+      "output_tokens": 612,
+      "cache_creation_tokens": 0,
+      "cache_read_tokens": 0
+    },
+    {
+      "id": "msg_01ABCdef02",
+      "session_id": "8c2e5d63-6f4a-4e21-8d11-2b9a3a4e5b6c",
+      "timestamp": "2026-05-11T18:01:48Z",
+      "role": "assistant",
+      "model": "claude-sonnet-4-20250514",
+      "provider": "jetbrains_ai_assistant",
+      "surface": "jetbrains",
+      "input_tokens": 2150,
+      "output_tokens": 845,
+      "cache_creation_tokens": 1100,
+      "cache_read_tokens": 900
+    },
+    {
+      "id": "msg_01ABCdef03",
+      "session_id": "8c2e5d63-6f4a-4e21-8d11-2b9a3a4e5b6c",
+      "timestamp": "2026-05-11T18:03:09Z",
+      "role": "assistant",
+      "model": "claude-haiku-4-5-20251001",
+      "provider": "jetbrains_ai_assistant",
+      "surface": "jetbrains",
+      "input_tokens": 540,
+      "output_tokens": 210,
+      "cache_creation_tokens": 0,
+      "cache_read_tokens": 1800
+    }
+  ]
+}

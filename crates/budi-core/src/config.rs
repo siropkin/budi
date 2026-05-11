@@ -55,6 +55,7 @@ pub const KNOWN_AGENTS: &[&str] = &[
     "cursor",
     "copilot-cli",
     "copilot-chat",
+    "jetbrains-ai-assistant",
 ];
 
 /// Per-agent enablement entry.
@@ -80,6 +81,8 @@ pub struct AgentsConfig {
     pub copilot_cli: AgentEntry,
     #[serde(rename = "copilot-chat")]
     pub copilot_chat: AgentEntry,
+    #[serde(rename = "jetbrains-ai-assistant")]
+    pub jetbrains_ai_assistant: AgentEntry,
 }
 
 impl AgentsConfig {
@@ -90,6 +93,7 @@ impl AgentsConfig {
             "cursor" => self.cursor.enabled,
             "copilot_cli" => self.copilot_cli.enabled,
             "copilot_chat" => self.copilot_chat.enabled,
+            "jetbrains_ai_assistant" => self.jetbrains_ai_assistant.enabled,
             _ => false,
         }
     }
@@ -102,6 +106,7 @@ impl AgentsConfig {
             cursor: AgentEntry { enabled: true },
             copilot_cli: AgentEntry { enabled: true },
             copilot_chat: AgentEntry { enabled: true },
+            jetbrains_ai_assistant: AgentEntry { enabled: true },
         }
     }
 
@@ -113,6 +118,7 @@ impl AgentsConfig {
             "cursor" => "Cursor",
             "copilot-cli" => "Copilot CLI",
             "copilot-chat" => "Copilot Chat",
+            "jetbrains-ai-assistant" => "JetBrains AI Assistant",
             _ => "Unknown",
         }
     }
@@ -1227,12 +1233,14 @@ format = "{1d} | {7d} | {branch}"
         assert!(!config.cursor.enabled);
         assert!(!config.copilot_cli.enabled);
         assert!(!config.copilot_chat.enabled);
+        assert!(!config.jetbrains_ai_assistant.enabled);
         assert!(!config.is_agent_enabled("claude_code"));
         assert!(!config.is_agent_enabled("codex"));
         assert!(!config.is_agent_enabled("codex_cli"));
         assert!(!config.is_agent_enabled("cursor"));
         assert!(!config.is_agent_enabled("copilot_cli"));
         assert!(!config.is_agent_enabled("copilot_chat"));
+        assert!(!config.is_agent_enabled("jetbrains_ai_assistant"));
     }
 
     #[test]
@@ -1244,6 +1252,7 @@ format = "{1d} | {7d} | {branch}"
         assert!(config.is_agent_enabled("cursor"));
         assert!(config.is_agent_enabled("copilot_cli"));
         assert!(config.is_agent_enabled("copilot_chat"));
+        assert!(config.is_agent_enabled("jetbrains_ai_assistant"));
     }
 
     #[test]
@@ -1260,6 +1269,7 @@ format = "{1d} | {7d} | {branch}"
             cursor: AgentEntry { enabled: false },
             copilot_cli: AgentEntry { enabled: false },
             copilot_chat: AgentEntry { enabled: false },
+            jetbrains_ai_assistant: AgentEntry { enabled: false },
         };
         let raw = toml::to_string_pretty(&config).unwrap();
         assert!(raw.contains("[claude-code]"));
