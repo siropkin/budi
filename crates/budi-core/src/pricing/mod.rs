@@ -30,6 +30,7 @@
 //! [ADR-0091]: https://github.com/siropkin/budi/blob/main/docs/adr/0091-model-pricing-manifest-source-of-truth.md
 
 pub mod display;
+pub mod team;
 
 use std::collections::HashMap;
 use std::io::Write;

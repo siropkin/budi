@@ -137,6 +137,9 @@ fn detect_drift(conn: &Connection) -> Result<(Vec<String>, Vec<String>, Vec<Stri
     if !table_exists(conn, "pricing_manifests")? {
         added_columns.push("pricing_manifests".to_string());
     }
+    if !table_exists(conn, "recalculation_runs_local")? {
+        added_columns.push("recalculation_runs_local".to_string());
+    }
     // #730 / ADR-0094 §1: dual-column cost shape on messages and both rollup
     // tables. Missing either column on any of these tables is drift.
     for table in [
@@ -255,7 +258,31 @@ fn create_current_schema(conn: &Connection) -> Result<()> {
     ensure_tail_offsets(conn)?;
     ensure_pricing_manifests(conn)?;
     seed_pricing_manifests_baseline(conn)?;
+    ensure_recalculation_runs_local(conn)?;
     create_indexes(conn)?;
+    Ok(())
+}
+
+/// #731 / ADR-0094 §7: lightweight local audit log of team-pricing
+/// recompute passes. One row per [`pricing::team::recompute_messages`]
+/// invocation. Mirrors the cloud's `recalculation_runs` shape minus the
+/// columns that only make sense org-side (`org_id`, `price_list_ids[]`,
+/// `triggered_by`). Surfaced by `budi pricing status` (#732).
+fn ensure_recalculation_runs_local(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        "
+        CREATE TABLE IF NOT EXISTS recalculation_runs_local (
+            id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+            started_at          TEXT NOT NULL,
+            finished_at         TEXT NOT NULL,
+            list_version        INTEGER NOT NULL DEFAULT 0,
+            rows_processed      INTEGER NOT NULL DEFAULT 0,
+            rows_changed        INTEGER NOT NULL DEFAULT 0,
+            before_total_cents  REAL NOT NULL DEFAULT 0,
+            after_total_cents   REAL NOT NULL DEFAULT 0
+        );
+        ",
+    )?;
     Ok(())
 }
 
@@ -1606,6 +1633,14 @@ fn reconcile_schema(conn: &Connection) -> Result<SchemaReconcileReport> {
         added_columns.push("pricing_manifests".to_string());
     }
     seed_pricing_manifests_baseline(conn)?;
+
+    // #731 / ADR-0094 §7: local audit log for team-pricing recompute runs.
+    // Additive — fresh installs get it from `create_current_schema`; this
+    // backfills the table on DBs that predate 8.4.3.
+    if !table_exists(conn, "recalculation_runs_local")? {
+        ensure_recalculation_runs_local(conn)?;
+        added_columns.push("recalculation_runs_local".to_string());
+    }
 
     // #701: backfill the surface dimension on messages/sessions for
     // rows that pre-date the column add at the top of this function.
