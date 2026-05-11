@@ -495,6 +495,26 @@ impl DaemonClient {
         }
     }
 
+    /// `POST /pricing/recompute` — re-poll the cloud price list and
+    /// recompute `messages.cost_cents_effective`. Used by
+    /// `budi pricing recompute`. `force=true` runs the recompute even
+    /// when `list_version` is unchanged (the worker would otherwise
+    /// short-circuit). #732.
+    pub fn pricing_recompute(&self, force: bool) -> Result<Value> {
+        let resp = self
+            .client
+            .post(format!(
+                "{}/pricing/recompute?force={}",
+                self.base_url,
+                if force { "1" } else { "0" }
+            ))
+            .timeout(std::time::Duration::from_secs(120))
+            .send()
+            .map_err(describe_send_error)?;
+        let resp = check_response(resp)?;
+        Ok(resp.json()?)
+    }
+
     // ─── Analytics ───────────────────────────────────────────────────
 
     pub fn summary(

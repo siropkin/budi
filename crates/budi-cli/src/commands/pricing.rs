@@ -45,7 +45,33 @@ pub fn cmd_pricing_status(format: StatsFormat) -> Result<()> {
     }
 
     render_status_text(&status);
+    render_team_pricing_text(&status);
     render_alias_map_text();
+    Ok(())
+}
+
+/// `budi pricing recompute` — manually re-poll the cloud price list and
+/// recompute `messages.cost_cents_effective`. Useful for support cases
+/// where a cost number looks off and the operator doesn't want to wait
+/// for the hourly worker tick. `--force` skips the `list_version`
+/// short-circuit so the recompute runs even when the list is unchanged.
+/// #732.
+pub fn cmd_pricing_recompute(format: StatsFormat, force: bool) -> Result<()> {
+    let client = DaemonClient::connect()?;
+    let body = client.pricing_recompute(force)?;
+    let status = client.pricing_status()?;
+
+    if matches!(format, StatsFormat::Json) {
+        let combined = serde_json::json!({
+            "recompute": body,
+            "status": status,
+        });
+        super::print_json(&combined)?;
+        return Ok(());
+    }
+
+    render_recompute_text(&body);
+    render_team_pricing_text(&status);
     Ok(())
 }
 
@@ -85,6 +111,7 @@ pub fn cmd_pricing_sync(format: StatsFormat) -> Result<()> {
         std::process::exit(2);
     }
     render_status_text(&status);
+    render_team_pricing_text(&status);
     render_alias_map_text();
     Ok(())
 }
@@ -146,6 +173,146 @@ fn render_alias_map_text() {
         println!("  {:<w$}  {shown}", raw, w = label_width);
     }
     println!();
+}
+
+/// `budi pricing status` team-pricing section (#732). Renders the
+/// `team_pricing` object the daemon attaches to `/pricing/status`.
+/// When `team_pricing.active == false` and there's no historical audit
+/// row, prints a one-line "not active" so the operator still sees the
+/// section header.
+fn render_team_pricing_text(body: &Value) {
+    let bold = ansi("\x1b[1m");
+    let bold_cyan = ansi("\x1b[1;36m");
+    let dim = ansi("\x1b[90m");
+    let green = ansi("\x1b[32m");
+    let reset = ansi("\x1b[0m");
+
+    let Some(team) = body.get("team_pricing") else {
+        return;
+    };
+
+    let active = team.get("active").and_then(Value::as_bool).unwrap_or(false);
+
+    println!();
+    println!("  {bold_cyan} Team pricing (cloud){reset}");
+    println!("  {dim}{}{reset}", "─".repeat(40));
+
+    if !active {
+        println!("  {dim}not active{reset}");
+        println!();
+        return;
+    }
+
+    if let Some(org) = team.get("org_id").and_then(Value::as_str) {
+        println!("  {bold}Org{reset}              {green}{org}{reset}");
+    }
+    if let Some(v) = team.get("list_version").and_then(Value::as_u64) {
+        println!("  {bold}List version{reset}     v{v}");
+    }
+    if let Some(eff_from) = team.get("effective_from").and_then(Value::as_str) {
+        println!("  {bold}Effective from{reset}   {eff_from}");
+    }
+    if let Some(eff_to) = team.get("effective_to").and_then(Value::as_str) {
+        println!("  {bold}Effective to{reset}     {eff_to}");
+    }
+    if let Some(defaults) = team.get("defaults") {
+        let platform = defaults
+            .get("platform")
+            .and_then(Value::as_str)
+            .unwrap_or("?");
+        let region = defaults
+            .get("region")
+            .and_then(Value::as_str)
+            .unwrap_or("?");
+        println!("  {bold}Default platform{reset} {platform}");
+        println!("  {bold}Default region{reset}   {region}");
+    }
+    if let Some(last) = team.get("last_recompute") {
+        let ts = last
+            .get("finished_at")
+            .or_else(|| last.get("started_at"))
+            .and_then(Value::as_str)
+            .unwrap_or("?");
+        let rows_changed = last
+            .get("rows_changed")
+            .and_then(Value::as_i64)
+            .unwrap_or(0);
+        println!(
+            "  {bold}Last recompute{reset}   {ts} {dim}(rows_changed = {rows_changed}){reset}"
+        );
+    }
+    if let Some(savings_cents) = team.get("savings_last_30d_cents").and_then(Value::as_f64)
+        && savings_cents.abs() >= 0.5
+    {
+        let dollars = savings_cents / 100.0;
+        let formatted = format_cost(dollars);
+        println!("  {bold}Savings vs list{reset}  {formatted} {dim}over the last 30 days{reset}");
+    }
+    println!();
+}
+
+/// `budi pricing recompute` success/short-circuit banner. The body's
+/// `status` field is one of: `updated` / `cleared` / `forced` /
+/// `unchanged` / `not_configured`.
+fn render_recompute_text(body: &Value) {
+    let green = ansi("\x1b[32m");
+    let yellow = ansi("\x1b[33m");
+    let dim = ansi("\x1b[90m");
+    let reset = ansi("\x1b[0m");
+    let status = body.get("status").and_then(Value::as_str).unwrap_or("?");
+
+    println!();
+    match status {
+        "updated" | "forced" | "cleared" => {
+            let summary = body.get("summary");
+            let rows_processed = summary
+                .and_then(|s| s.get("rows_processed"))
+                .and_then(Value::as_i64)
+                .unwrap_or(0);
+            let rows_changed = summary
+                .and_then(|s| s.get("rows_changed"))
+                .and_then(Value::as_i64)
+                .unwrap_or(0);
+            let before = summary
+                .and_then(|s| s.get("before_total_cents"))
+                .and_then(Value::as_f64)
+                .unwrap_or(0.0);
+            let after = summary
+                .and_then(|s| s.get("after_total_cents"))
+                .and_then(Value::as_f64)
+                .unwrap_or(0.0);
+            let headline = match status {
+                "updated" => "Recompute complete — new list installed",
+                "forced" => "Recompute complete — forced re-run",
+                "cleared" => "Recompute complete — no active list (effective := ingested)",
+                _ => "Recompute complete",
+            };
+            println!("  {green}✓{reset} {headline}");
+            println!(
+                "  {dim}rows_processed = {rows_processed}, rows_changed = {rows_changed}{reset}"
+            );
+            println!(
+                "  {dim}before = {} → after = {}{reset}",
+                format_cost(before / 100.0),
+                format_cost(after / 100.0),
+            );
+        }
+        "unchanged" => {
+            println!(
+                "  {green}✓{reset} Cloud price list unchanged — skipped recompute. \
+                 Re-run with {dim}--force{reset} to recompute anyway."
+            );
+        }
+        "not_configured" => {
+            println!(
+                "  {yellow}!{reset} Cloud not configured for this org. \
+                 Run {dim}budi cloud link{reset} first."
+            );
+        }
+        other => {
+            println!("  {yellow}!{reset} Recompute returned unknown status: {other}");
+        }
+    }
 }
 
 fn render_refresh_text(body: &Value) {
@@ -481,6 +648,91 @@ mod tests {
         let (headline, detail) = classify_refresh_error("some unexpected daemon error");
         assert_eq!(headline, "Refresh failed: some unexpected daemon error");
         assert!(detail.is_none());
+    }
+
+    /// #732 acceptance: the `team_pricing` JSON shape is stable. New
+    /// fields can be added (skip-if-none) but the existing keys must
+    /// not be renamed without bumping the contract. The CLI text
+    /// renderer reads from this shape; if it changes silently, scripted
+    /// `--format json` consumers break.
+    #[test]
+    fn team_pricing_json_shape_is_stable() {
+        let body = serde_json::json!({
+            "source_label": "disk cache",
+            "team_pricing": {
+                "active": true,
+                "org_id": "acme-corp",
+                "list_version": 3,
+                "effective_from": "2026-04-01",
+                "effective_to": null,
+                "defaults": { "platform": "bedrock", "region": "us" },
+                "last_recompute": {
+                    "started_at": "2026-05-11T11:14:02Z",
+                    "finished_at": "2026-05-11T11:14:02Z",
+                    "list_version": 3,
+                    "rows_processed": 12000,
+                    "rows_changed": 2103,
+                    "before_total_cents": 481520.0,
+                    "after_total_cents": 352777.0,
+                },
+                "savings_last_30d_cents": 12847.0,
+            },
+        });
+        let team = body.get("team_pricing").unwrap();
+        assert_eq!(team.get("active").and_then(Value::as_bool), Some(true));
+        assert_eq!(
+            team.get("org_id").and_then(Value::as_str),
+            Some("acme-corp")
+        );
+        assert_eq!(team.get("list_version").and_then(Value::as_u64), Some(3));
+        assert!(team.get("defaults").is_some());
+        assert!(team.get("last_recompute").is_some());
+        assert_eq!(
+            team.get("savings_last_30d_cents").and_then(Value::as_f64),
+            Some(12847.0)
+        );
+        // Rendering this fixture must not panic — exercises every
+        // branch of `render_team_pricing_text` against the golden shape.
+        render_team_pricing_text(&body);
+    }
+
+    /// `team_pricing.active == false` is the no-cloud-config and
+    /// no-active-list path. The renderer must not crash, and JSON
+    /// consumers must still see the key (the daemon attaches it
+    /// unconditionally).
+    #[test]
+    fn team_pricing_inactive_shape_renders_cleanly() {
+        let body = serde_json::json!({
+            "source_label": "disk cache",
+            "team_pricing": { "active": false },
+        });
+        render_team_pricing_text(&body);
+    }
+
+    /// `render_recompute_text` covers all five status variants the
+    /// daemon can produce.
+    #[test]
+    fn render_recompute_text_covers_all_statuses() {
+        for status in [
+            "updated",
+            "forced",
+            "cleared",
+            "unchanged",
+            "not_configured",
+        ] {
+            let body = serde_json::json!({
+                "ok": true,
+                "skipped": status == "unchanged" || status == "not_configured",
+                "status": status,
+                "summary": {
+                    "rows_processed": 10,
+                    "rows_changed": 2,
+                    "before_total_cents": 1000.0,
+                    "after_total_cents": 800.0,
+                },
+            });
+            render_recompute_text(&body);
+        }
     }
 
     #[test]

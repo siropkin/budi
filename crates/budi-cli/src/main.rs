@@ -256,11 +256,13 @@ Examples:
     /// with `--format json` for scripted use.
     #[command(after_help = "\
 Examples:
-  budi pricing                     Show current manifest layer, version, and unknown models (read-only)
-  budi pricing status              Same as bare `budi pricing` (long form)
-  budi pricing sync                Fetch the latest LiteLLM manifest into the local cache
-  budi pricing --format json       JSON output for scripting
-  budi pricing sync --format json  JSON output (exit code 2 on refresh failure)")]
+  budi pricing                       Show current manifest layer, version, and unknown models (read-only)
+  budi pricing status                Same as bare `budi pricing` (long form)
+  budi pricing sync                  Fetch the latest LiteLLM manifest into the local cache
+  budi pricing recompute             Re-poll the org price list and recompute effective costs
+  budi pricing recompute --force     Run the recompute pass even if list_version is unchanged
+  budi pricing --format json         JSON output for scripting
+  budi pricing sync --format json    JSON output (exit code 2 on refresh failure)")]
     Pricing(PricingArgs),
 }
 
@@ -387,6 +389,12 @@ pub enum PricingView {
     Status,
     /// Network: fetch the latest LiteLLM manifest into the local cache, then show state
     Sync,
+    /// Network: re-poll the cloud price list and recompute effective costs
+    Recompute {
+        /// Re-run the recompute pass even when `list_version` is unchanged
+        #[arg(long)]
+        force: bool,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -833,6 +841,9 @@ fn main() -> Result<()> {
             match view {
                 None | Some(PricingView::Status) => commands::pricing::cmd_pricing_status(format),
                 Some(PricingView::Sync) => commands::pricing::cmd_pricing_sync(format),
+                Some(PricingView::Recompute { force }) => {
+                    commands::pricing::cmd_pricing_recompute(format, force)
+                }
             }
         }
     }
@@ -1646,6 +1657,31 @@ mod tests {
                 assert!(matches!(args.format, StatsFormat::Json));
             }
             _ => panic!("expected pricing sync command"),
+        }
+    }
+
+    #[test]
+    fn cli_parses_pricing_recompute_subcommand() {
+        // #732: `budi pricing recompute [--force]` is the new manual
+        // trigger for the team-pricing recompute pass.
+        let cli = Cli::try_parse_from(["budi", "pricing", "recompute"])
+            .expect("budi pricing recompute parses");
+        match cli.command {
+            Commands::Pricing(args) => match args.view {
+                Some(PricingView::Recompute { force }) => assert!(!force),
+                other => panic!("expected pricing recompute, got {other:?}"),
+            },
+            _ => panic!("expected pricing recompute command"),
+        }
+
+        let cli = Cli::try_parse_from(["budi", "pricing", "recompute", "--force"])
+            .expect("budi pricing recompute --force parses");
+        match cli.command {
+            Commands::Pricing(args) => match args.view {
+                Some(PricingView::Recompute { force }) => assert!(force),
+                other => panic!("expected pricing recompute --force, got {other:?}"),
+            },
+            _ => panic!("expected pricing recompute command"),
         }
     }
 

@@ -205,6 +205,44 @@ enum TickOutcome {
     NotConfigured,
 }
 
+/// CLI-facing outcome from a manual `budi pricing recompute` call. Adds
+/// the `ForcedRecompute` variant on top of [`TickOutcome`] so the CLI
+/// can distinguish "the list version was unchanged but we ran anyway"
+/// from "we installed a new list".
+#[derive(Debug)]
+pub enum CliTickOutcome {
+    Updated(RecomputeSummary),
+    Cleared(RecomputeSummary),
+    ForcedRecompute(RecomputeSummary),
+    Unchanged,
+    NotConfigured,
+}
+
+/// Entry point for `POST /pricing/recompute` (#732). When `force` is
+/// true and the in-memory list version is unchanged, skip the network
+/// fetch and re-run `recompute_messages` against the currently-
+/// installed list anyway — useful for support cases where the operator
+/// suspects a cost number drifted.
+pub fn run_tick_for_cli(force: bool) -> anyhow::Result<CliTickOutcome> {
+    let db_path = budi_core::analytics::db_path()?;
+    let outcome = run_tick(&db_path)?;
+    match outcome {
+        TickOutcome::Updated(s) => Ok(CliTickOutcome::Updated(s)),
+        TickOutcome::Cleared(s) => Ok(CliTickOutcome::Cleared(s)),
+        TickOutcome::NotConfigured => Ok(CliTickOutcome::NotConfigured),
+        TickOutcome::Unchanged => {
+            if !force {
+                return Ok(CliTickOutcome::Unchanged);
+            }
+            let conn = budi_core::analytics::open_db(&db_path)?;
+            let snap = team::snapshot();
+            let summary = team::recompute_messages(&conn, snap.as_ref())?;
+            insert_audit_row(&conn, &summary)?;
+            Ok(CliTickOutcome::ForcedRecompute(summary))
+        }
+    }
+}
+
 fn run_tick(db_path: &std::path::Path) -> anyhow::Result<TickOutcome> {
     let config = budi_core::config::load_cloud_config();
     let Some(api_key) = config.effective_api_key() else {
