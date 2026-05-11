@@ -137,6 +137,23 @@ fn detect_drift(conn: &Connection) -> Result<(Vec<String>, Vec<String>, Vec<Stri
     if !table_exists(conn, "pricing_manifests")? {
         added_columns.push("pricing_manifests".to_string());
     }
+    // #730 / ADR-0094 §1: dual-column cost shape on messages and both rollup
+    // tables. Missing either column on any of these tables is drift.
+    for table in [
+        "messages",
+        "message_rollups_hourly",
+        "message_rollups_daily",
+    ] {
+        if !table_exists(conn, table)? {
+            continue;
+        }
+        if !has_column(conn, table, "cost_cents_ingested")? {
+            added_columns.push(format!("{table}.cost_cents_ingested"));
+        }
+        if !has_column(conn, table, "cost_cents_effective")? {
+            added_columns.push(format!("{table}.cost_cents_effective"));
+        }
+    }
     if table_exists(conn, "messages")? && !has_column(conn, "messages", "surface")? {
         added_columns.push("messages.surface".to_string());
     }
@@ -207,7 +224,8 @@ fn create_current_schema(conn: &Connection) -> Result<()> {
             cwd                    TEXT,
             repo_id                TEXT,
             provider               TEXT DEFAULT 'claude_code',
-            cost_cents             REAL,
+            cost_cents_ingested    REAL NOT NULL DEFAULT 0,
+            cost_cents_effective   REAL,
             parent_uuid            TEXT,
             git_branch             TEXT,
             cost_confidence        TEXT DEFAULT 'estimated',
@@ -376,7 +394,8 @@ fn create_rollup_tables(conn: &Connection) -> Result<()> {
             output_tokens          INTEGER NOT NULL DEFAULT 0,
             cache_creation_tokens  INTEGER NOT NULL DEFAULT 0,
             cache_read_tokens      INTEGER NOT NULL DEFAULT 0,
-            cost_cents             REAL NOT NULL DEFAULT 0,
+            cost_cents_ingested    REAL NOT NULL DEFAULT 0,
+            cost_cents_effective   REAL NOT NULL DEFAULT 0,
             PRIMARY KEY(bucket_start, role, provider, model, repo_id, git_branch, surface)
         );
 
@@ -393,7 +412,8 @@ fn create_rollup_tables(conn: &Connection) -> Result<()> {
             output_tokens          INTEGER NOT NULL DEFAULT 0,
             cache_creation_tokens  INTEGER NOT NULL DEFAULT 0,
             cache_read_tokens      INTEGER NOT NULL DEFAULT 0,
-            cost_cents             REAL NOT NULL DEFAULT 0,
+            cost_cents_ingested    REAL NOT NULL DEFAULT 0,
+            cost_cents_effective   REAL NOT NULL DEFAULT 0,
             PRIMARY KEY(bucket_day, role, provider, model, repo_id, git_branch, surface)
         );
         ",
@@ -414,7 +434,8 @@ fn create_rollup_triggers(conn: &Connection) -> Result<()> {
             INSERT INTO message_rollups_hourly (
                 bucket_start, role, provider, model, repo_id, git_branch, surface,
                 message_count, input_tokens, output_tokens,
-                cache_creation_tokens, cache_read_tokens, cost_cents
+                cache_creation_tokens, cache_read_tokens,
+                cost_cents_ingested, cost_cents_effective
             )
             VALUES (
                 strftime('%Y-%m-%dT%H:00:00Z', NEW.timestamp),
@@ -443,7 +464,8 @@ fn create_rollup_triggers(conn: &Connection) -> Result<()> {
                 COALESCE(NEW.output_tokens, 0),
                 COALESCE(NEW.cache_creation_tokens, 0),
                 COALESCE(NEW.cache_read_tokens, 0),
-                COALESCE(NEW.cost_cents, 0.0)
+                COALESCE(NEW.cost_cents_ingested, 0.0),
+                COALESCE(NEW.cost_cents_effective, 0.0)
             )
             ON CONFLICT(bucket_start, role, provider, model, repo_id, git_branch, surface) DO UPDATE SET
                 message_count = message_count + excluded.message_count,
@@ -451,12 +473,14 @@ fn create_rollup_triggers(conn: &Connection) -> Result<()> {
                 output_tokens = output_tokens + excluded.output_tokens,
                 cache_creation_tokens = cache_creation_tokens + excluded.cache_creation_tokens,
                 cache_read_tokens = cache_read_tokens + excluded.cache_read_tokens,
-                cost_cents = cost_cents + excluded.cost_cents;
+                cost_cents_ingested = cost_cents_ingested + excluded.cost_cents_ingested,
+                cost_cents_effective = cost_cents_effective + excluded.cost_cents_effective;
 
             INSERT INTO message_rollups_daily (
                 bucket_day, role, provider, model, repo_id, git_branch, surface,
                 message_count, input_tokens, output_tokens,
-                cache_creation_tokens, cache_read_tokens, cost_cents
+                cache_creation_tokens, cache_read_tokens,
+                cost_cents_ingested, cost_cents_effective
             )
             VALUES (
                 strftime('%Y-%m-%d', NEW.timestamp),
@@ -485,7 +509,8 @@ fn create_rollup_triggers(conn: &Connection) -> Result<()> {
                 COALESCE(NEW.output_tokens, 0),
                 COALESCE(NEW.cache_creation_tokens, 0),
                 COALESCE(NEW.cache_read_tokens, 0),
-                COALESCE(NEW.cost_cents, 0.0)
+                COALESCE(NEW.cost_cents_ingested, 0.0),
+                COALESCE(NEW.cost_cents_effective, 0.0)
             )
             ON CONFLICT(bucket_day, role, provider, model, repo_id, git_branch, surface) DO UPDATE SET
                 message_count = message_count + excluded.message_count,
@@ -493,7 +518,8 @@ fn create_rollup_triggers(conn: &Connection) -> Result<()> {
                 output_tokens = output_tokens + excluded.output_tokens,
                 cache_creation_tokens = cache_creation_tokens + excluded.cache_creation_tokens,
                 cache_read_tokens = cache_read_tokens + excluded.cache_read_tokens,
-                cost_cents = cost_cents + excluded.cost_cents;
+                cost_cents_ingested = cost_cents_ingested + excluded.cost_cents_ingested,
+                cost_cents_effective = cost_cents_effective + excluded.cost_cents_effective;
         END;
 
         CREATE TRIGGER IF NOT EXISTS trg_messages_rollup_delete
@@ -502,7 +528,8 @@ fn create_rollup_triggers(conn: &Connection) -> Result<()> {
             INSERT INTO message_rollups_hourly (
                 bucket_start, role, provider, model, repo_id, git_branch, surface,
                 message_count, input_tokens, output_tokens,
-                cache_creation_tokens, cache_read_tokens, cost_cents
+                cache_creation_tokens, cache_read_tokens,
+                cost_cents_ingested, cost_cents_effective
             )
             VALUES (
                 strftime('%Y-%m-%dT%H:00:00Z', OLD.timestamp),
@@ -531,7 +558,8 @@ fn create_rollup_triggers(conn: &Connection) -> Result<()> {
                 -COALESCE(OLD.output_tokens, 0),
                 -COALESCE(OLD.cache_creation_tokens, 0),
                 -COALESCE(OLD.cache_read_tokens, 0),
-                -COALESCE(OLD.cost_cents, 0.0)
+                -COALESCE(OLD.cost_cents_ingested, 0.0),
+                -COALESCE(OLD.cost_cents_effective, 0.0)
             )
             ON CONFLICT(bucket_start, role, provider, model, repo_id, git_branch, surface) DO UPDATE SET
                 message_count = message_count + excluded.message_count,
@@ -539,7 +567,8 @@ fn create_rollup_triggers(conn: &Connection) -> Result<()> {
                 output_tokens = output_tokens + excluded.output_tokens,
                 cache_creation_tokens = cache_creation_tokens + excluded.cache_creation_tokens,
                 cache_read_tokens = cache_read_tokens + excluded.cache_read_tokens,
-                cost_cents = cost_cents + excluded.cost_cents;
+                cost_cents_ingested = cost_cents_ingested + excluded.cost_cents_ingested,
+                cost_cents_effective = cost_cents_effective + excluded.cost_cents_effective;
 
             DELETE FROM message_rollups_hourly
              WHERE bucket_start = strftime('%Y-%m-%dT%H:00:00Z', OLD.timestamp)
@@ -568,7 +597,8 @@ fn create_rollup_triggers(conn: &Connection) -> Result<()> {
             INSERT INTO message_rollups_daily (
                 bucket_day, role, provider, model, repo_id, git_branch, surface,
                 message_count, input_tokens, output_tokens,
-                cache_creation_tokens, cache_read_tokens, cost_cents
+                cache_creation_tokens, cache_read_tokens,
+                cost_cents_ingested, cost_cents_effective
             )
             VALUES (
                 strftime('%Y-%m-%d', OLD.timestamp),
@@ -597,7 +627,8 @@ fn create_rollup_triggers(conn: &Connection) -> Result<()> {
                 -COALESCE(OLD.output_tokens, 0),
                 -COALESCE(OLD.cache_creation_tokens, 0),
                 -COALESCE(OLD.cache_read_tokens, 0),
-                -COALESCE(OLD.cost_cents, 0.0)
+                -COALESCE(OLD.cost_cents_ingested, 0.0),
+                -COALESCE(OLD.cost_cents_effective, 0.0)
             )
             ON CONFLICT(bucket_day, role, provider, model, repo_id, git_branch, surface) DO UPDATE SET
                 message_count = message_count + excluded.message_count,
@@ -605,7 +636,8 @@ fn create_rollup_triggers(conn: &Connection) -> Result<()> {
                 output_tokens = output_tokens + excluded.output_tokens,
                 cache_creation_tokens = cache_creation_tokens + excluded.cache_creation_tokens,
                 cache_read_tokens = cache_read_tokens + excluded.cache_read_tokens,
-                cost_cents = cost_cents + excluded.cost_cents;
+                cost_cents_ingested = cost_cents_ingested + excluded.cost_cents_ingested,
+                cost_cents_effective = cost_cents_effective + excluded.cost_cents_effective;
 
             DELETE FROM message_rollups_daily
              WHERE bucket_day = strftime('%Y-%m-%d', OLD.timestamp)
@@ -638,7 +670,8 @@ fn create_rollup_triggers(conn: &Connection) -> Result<()> {
             INSERT INTO message_rollups_hourly (
                 bucket_start, role, provider, model, repo_id, git_branch, surface,
                 message_count, input_tokens, output_tokens,
-                cache_creation_tokens, cache_read_tokens, cost_cents
+                cache_creation_tokens, cache_read_tokens,
+                cost_cents_ingested, cost_cents_effective
             )
             VALUES (
                 strftime('%Y-%m-%dT%H:00:00Z', OLD.timestamp),
@@ -667,7 +700,8 @@ fn create_rollup_triggers(conn: &Connection) -> Result<()> {
                 -COALESCE(OLD.output_tokens, 0),
                 -COALESCE(OLD.cache_creation_tokens, 0),
                 -COALESCE(OLD.cache_read_tokens, 0),
-                -COALESCE(OLD.cost_cents, 0.0)
+                -COALESCE(OLD.cost_cents_ingested, 0.0),
+                -COALESCE(OLD.cost_cents_effective, 0.0)
             )
             ON CONFLICT(bucket_start, role, provider, model, repo_id, git_branch, surface) DO UPDATE SET
                 message_count = message_count + excluded.message_count,
@@ -675,7 +709,8 @@ fn create_rollup_triggers(conn: &Connection) -> Result<()> {
                 output_tokens = output_tokens + excluded.output_tokens,
                 cache_creation_tokens = cache_creation_tokens + excluded.cache_creation_tokens,
                 cache_read_tokens = cache_read_tokens + excluded.cache_read_tokens,
-                cost_cents = cost_cents + excluded.cost_cents;
+                cost_cents_ingested = cost_cents_ingested + excluded.cost_cents_ingested,
+                cost_cents_effective = cost_cents_effective + excluded.cost_cents_effective;
 
             DELETE FROM message_rollups_hourly
              WHERE bucket_start = strftime('%Y-%m-%dT%H:00:00Z', OLD.timestamp)
@@ -704,7 +739,8 @@ fn create_rollup_triggers(conn: &Connection) -> Result<()> {
             INSERT INTO message_rollups_daily (
                 bucket_day, role, provider, model, repo_id, git_branch, surface,
                 message_count, input_tokens, output_tokens,
-                cache_creation_tokens, cache_read_tokens, cost_cents
+                cache_creation_tokens, cache_read_tokens,
+                cost_cents_ingested, cost_cents_effective
             )
             VALUES (
                 strftime('%Y-%m-%d', OLD.timestamp),
@@ -733,7 +769,8 @@ fn create_rollup_triggers(conn: &Connection) -> Result<()> {
                 -COALESCE(OLD.output_tokens, 0),
                 -COALESCE(OLD.cache_creation_tokens, 0),
                 -COALESCE(OLD.cache_read_tokens, 0),
-                -COALESCE(OLD.cost_cents, 0.0)
+                -COALESCE(OLD.cost_cents_ingested, 0.0),
+                -COALESCE(OLD.cost_cents_effective, 0.0)
             )
             ON CONFLICT(bucket_day, role, provider, model, repo_id, git_branch, surface) DO UPDATE SET
                 message_count = message_count + excluded.message_count,
@@ -741,7 +778,8 @@ fn create_rollup_triggers(conn: &Connection) -> Result<()> {
                 output_tokens = output_tokens + excluded.output_tokens,
                 cache_creation_tokens = cache_creation_tokens + excluded.cache_creation_tokens,
                 cache_read_tokens = cache_read_tokens + excluded.cache_read_tokens,
-                cost_cents = cost_cents + excluded.cost_cents;
+                cost_cents_ingested = cost_cents_ingested + excluded.cost_cents_ingested,
+                cost_cents_effective = cost_cents_effective + excluded.cost_cents_effective;
 
             DELETE FROM message_rollups_daily
              WHERE bucket_day = strftime('%Y-%m-%d', OLD.timestamp)
@@ -770,7 +808,8 @@ fn create_rollup_triggers(conn: &Connection) -> Result<()> {
             INSERT INTO message_rollups_hourly (
                 bucket_start, role, provider, model, repo_id, git_branch, surface,
                 message_count, input_tokens, output_tokens,
-                cache_creation_tokens, cache_read_tokens, cost_cents
+                cache_creation_tokens, cache_read_tokens,
+                cost_cents_ingested, cost_cents_effective
             )
             VALUES (
                 strftime('%Y-%m-%dT%H:00:00Z', NEW.timestamp),
@@ -799,7 +838,8 @@ fn create_rollup_triggers(conn: &Connection) -> Result<()> {
                 COALESCE(NEW.output_tokens, 0),
                 COALESCE(NEW.cache_creation_tokens, 0),
                 COALESCE(NEW.cache_read_tokens, 0),
-                COALESCE(NEW.cost_cents, 0.0)
+                COALESCE(NEW.cost_cents_ingested, 0.0),
+                COALESCE(NEW.cost_cents_effective, 0.0)
             )
             ON CONFLICT(bucket_start, role, provider, model, repo_id, git_branch, surface) DO UPDATE SET
                 message_count = message_count + excluded.message_count,
@@ -807,12 +847,14 @@ fn create_rollup_triggers(conn: &Connection) -> Result<()> {
                 output_tokens = output_tokens + excluded.output_tokens,
                 cache_creation_tokens = cache_creation_tokens + excluded.cache_creation_tokens,
                 cache_read_tokens = cache_read_tokens + excluded.cache_read_tokens,
-                cost_cents = cost_cents + excluded.cost_cents;
+                cost_cents_ingested = cost_cents_ingested + excluded.cost_cents_ingested,
+                cost_cents_effective = cost_cents_effective + excluded.cost_cents_effective;
 
             INSERT INTO message_rollups_daily (
                 bucket_day, role, provider, model, repo_id, git_branch, surface,
                 message_count, input_tokens, output_tokens,
-                cache_creation_tokens, cache_read_tokens, cost_cents
+                cache_creation_tokens, cache_read_tokens,
+                cost_cents_ingested, cost_cents_effective
             )
             VALUES (
                 strftime('%Y-%m-%d', NEW.timestamp),
@@ -841,7 +883,8 @@ fn create_rollup_triggers(conn: &Connection) -> Result<()> {
                 COALESCE(NEW.output_tokens, 0),
                 COALESCE(NEW.cache_creation_tokens, 0),
                 COALESCE(NEW.cache_read_tokens, 0),
-                COALESCE(NEW.cost_cents, 0.0)
+                COALESCE(NEW.cost_cents_ingested, 0.0),
+                COALESCE(NEW.cost_cents_effective, 0.0)
             )
             ON CONFLICT(bucket_day, role, provider, model, repo_id, git_branch, surface) DO UPDATE SET
                 message_count = message_count + excluded.message_count,
@@ -849,7 +892,8 @@ fn create_rollup_triggers(conn: &Connection) -> Result<()> {
                 output_tokens = output_tokens + excluded.output_tokens,
                 cache_creation_tokens = cache_creation_tokens + excluded.cache_creation_tokens,
                 cache_read_tokens = cache_read_tokens + excluded.cache_read_tokens,
-                cost_cents = cost_cents + excluded.cost_cents;
+                cost_cents_ingested = cost_cents_ingested + excluded.cost_cents_ingested,
+                cost_cents_effective = cost_cents_effective + excluded.cost_cents_effective;
         END;
         ",
     )?;
@@ -889,13 +933,15 @@ fn backfill_rollup_tables(conn: &Connection) -> Result<()> {
                 COALESCE(output_tokens, 0) AS output_tokens,
                 COALESCE(cache_creation_tokens, 0) AS cache_creation_tokens,
                 COALESCE(cache_read_tokens, 0) AS cache_read_tokens,
-                COALESCE(cost_cents, 0.0) AS cost_cents
+                COALESCE(cost_cents_ingested, 0.0) AS cost_cents_ingested,
+                COALESCE(cost_cents_effective, 0.0) AS cost_cents_effective
             FROM messages
         )
         INSERT INTO message_rollups_hourly (
             bucket_start, role, provider, model, repo_id, git_branch, surface,
             message_count, input_tokens, output_tokens,
-            cache_creation_tokens, cache_read_tokens, cost_cents
+            cache_creation_tokens, cache_read_tokens,
+            cost_cents_ingested, cost_cents_effective
         )
         SELECT
             bucket_hour, role, provider, model, repo_id, git_branch, surface,
@@ -904,7 +950,8 @@ fn backfill_rollup_tables(conn: &Connection) -> Result<()> {
             COALESCE(SUM(output_tokens), 0),
             COALESCE(SUM(cache_creation_tokens), 0),
             COALESCE(SUM(cache_read_tokens), 0),
-            COALESCE(SUM(cost_cents), 0.0)
+            COALESCE(SUM(cost_cents_ingested), 0.0),
+            COALESCE(SUM(cost_cents_effective), 0.0)
         FROM normalized
         GROUP BY bucket_hour, role, provider, model, repo_id, git_branch, surface;
 
@@ -934,13 +981,15 @@ fn backfill_rollup_tables(conn: &Connection) -> Result<()> {
                 COALESCE(output_tokens, 0) AS output_tokens,
                 COALESCE(cache_creation_tokens, 0) AS cache_creation_tokens,
                 COALESCE(cache_read_tokens, 0) AS cache_read_tokens,
-                COALESCE(cost_cents, 0.0) AS cost_cents
+                COALESCE(cost_cents_ingested, 0.0) AS cost_cents_ingested,
+                COALESCE(cost_cents_effective, 0.0) AS cost_cents_effective
             FROM messages
         )
         INSERT INTO message_rollups_daily (
             bucket_day, role, provider, model, repo_id, git_branch, surface,
             message_count, input_tokens, output_tokens,
-            cache_creation_tokens, cache_read_tokens, cost_cents
+            cache_creation_tokens, cache_read_tokens,
+            cost_cents_ingested, cost_cents_effective
         )
         SELECT
             bucket_day, role, provider, model, repo_id, git_branch, surface,
@@ -949,7 +998,8 @@ fn backfill_rollup_tables(conn: &Connection) -> Result<()> {
             COALESCE(SUM(output_tokens), 0),
             COALESCE(SUM(cache_creation_tokens), 0),
             COALESCE(SUM(cache_read_tokens), 0),
-            COALESCE(SUM(cost_cents), 0.0)
+            COALESCE(SUM(cost_cents_ingested), 0.0),
+            COALESCE(SUM(cost_cents_effective), 0.0)
         FROM normalized
         GROUP BY bucket_day, role, provider, model, repo_id, git_branch, surface;
         ",
@@ -1102,14 +1152,14 @@ fn create_indexes(conn: &Connection) -> Result<()> {
         CREATE INDEX IF NOT EXISTS idx_tags_message ON tags(message_id);
         CREATE INDEX IF NOT EXISTS idx_tags_msg_key_val ON tags(message_id, key, value);
 
-        CREATE INDEX IF NOT EXISTS idx_messages_ts_cost ON messages(timestamp, cost_cents);
-        CREATE INDEX IF NOT EXISTS idx_messages_role_ts_cost ON messages(role, timestamp, cost_cents);
-        CREATE INDEX IF NOT EXISTS idx_messages_role_branch_cost ON messages(role, git_branch, cost_cents);
+        CREATE INDEX IF NOT EXISTS idx_messages_ts_cost ON messages(timestamp, cost_cents_effective);
+        CREATE INDEX IF NOT EXISTS idx_messages_role_ts_cost ON messages(role, timestamp, cost_cents_effective);
+        CREATE INDEX IF NOT EXISTS idx_messages_role_branch_cost ON messages(role, git_branch, cost_cents_effective);
         CREATE INDEX IF NOT EXISTS idx_messages_role_branch_ts ON messages(role, git_branch, timestamp);
         CREATE INDEX IF NOT EXISTS idx_messages_role_cwd ON messages(role, cwd);
         CREATE INDEX IF NOT EXISTS idx_messages_session_role ON messages(session_id, role);
         CREATE INDEX IF NOT EXISTS idx_messages_cwd_role ON messages(cwd, role);
-        CREATE INDEX IF NOT EXISTS idx_messages_session_role_cost ON messages(session_id, role, cost_cents);
+        CREATE INDEX IF NOT EXISTS idx_messages_session_role_cost ON messages(session_id, role, cost_cents_effective);
         CREATE INDEX IF NOT EXISTS idx_messages_dedup ON messages(session_id, model, role, cost_confidence, timestamp);
         CREATE INDEX IF NOT EXISTS idx_messages_request_id ON messages(request_id) WHERE request_id IS NOT NULL;
 
@@ -1360,6 +1410,97 @@ fn missing_reconcile_indexes(conn: &Connection) -> Result<Vec<String>> {
     Ok(missing)
 }
 
+/// #730 / ADR-0094 §1: migrate an existing v1 DB from the single `cost_cents`
+/// column to the dual `cost_cents_ingested` / `cost_cents_effective` pair.
+///
+/// Steps (per the ticket scope):
+/// 1. `ALTER TABLE … ADD COLUMN cost_cents_ingested REAL NOT NULL DEFAULT 0`
+/// 2. `UPDATE … SET cost_cents_ingested = cost_cents` (one-time copy)
+/// 3. `ALTER TABLE … RENAME COLUMN cost_cents TO cost_cents_effective`
+///
+/// Applied to `messages`, `message_rollups_hourly`, and `message_rollups_daily`.
+/// SQLite ≥ 3.25 automatically rewrites trigger bodies and index definitions
+/// that referenced the renamed column, but the rollup triggers reference the
+/// new `cost_cents_ingested` column (which didn't exist when they were
+/// authored) so the caller must drop + recreate them after this returns.
+///
+/// Returns the list of `table.column` strings the caller should surface in
+/// the [`SchemaReconcileReport`]. Idempotent: a second run reports no
+/// changes because every target column already exists.
+fn ensure_dual_cost_columns(conn: &Connection) -> Result<Vec<String>> {
+    let mut added: Vec<String> = Vec::new();
+
+    for table in [
+        "messages",
+        "message_rollups_hourly",
+        "message_rollups_daily",
+    ] {
+        if !table_exists(conn, table)? {
+            continue;
+        }
+        let has_effective = has_column(conn, table, "cost_cents_effective")?;
+        let has_ingested = has_column(conn, table, "cost_cents_ingested")?;
+        let has_legacy = has_column(conn, table, "cost_cents")?;
+
+        if has_effective && has_ingested {
+            continue;
+        }
+
+        // Drop rollup triggers up-front: they reference `NEW.cost_cents` /
+        // `OLD.cost_cents`, and once we rename or drop the column the
+        // trigger bodies become invalid. The caller recreates them with
+        // the dual-column shape via `create_rollup_triggers`.
+        conn.execute_batch(
+            "DROP TRIGGER IF EXISTS trg_messages_rollup_insert;
+             DROP TRIGGER IF EXISTS trg_messages_rollup_delete;
+             DROP TRIGGER IF EXISTS trg_messages_rollup_update;",
+        )?;
+
+        if !has_ingested {
+            // Rollups: NOT NULL DEFAULT 0 matches the existing rollup
+            // column shape and the spec. messages.cost_cents was
+            // nullable, but the new `_ingested` column is always
+            // NOT NULL DEFAULT 0 per ADR-0094 §1 — incoming NULL legacy
+            // rows get the column DEFAULT before the copy below.
+            conn.execute_batch(&format!(
+                "ALTER TABLE {table} ADD COLUMN cost_cents_ingested REAL NOT NULL DEFAULT 0;"
+            ))?;
+            added.push(format!("{table}.cost_cents_ingested"));
+        }
+
+        if has_legacy && !has_effective {
+            // Copy the legacy column's value (treating NULL as 0) into
+            // the new `_ingested` column so history is preserved
+            // verbatim. ADR-0091 §5 Rule D: `_ingested` is the
+            // ADR-0091-immutable column from this point forward.
+            conn.execute_batch(&format!(
+                "UPDATE {table} SET cost_cents_ingested = COALESCE(cost_cents, 0);"
+            ))?;
+            // Rename the legacy column. SQLite ≥ 3.25 rewrites trigger
+            // bodies and index definitions transparently, so existing
+            // `idx_messages_*_cost` indexes now reference the renamed
+            // column with no further action.
+            conn.execute_batch(&format!(
+                "ALTER TABLE {table} RENAME COLUMN cost_cents TO cost_cents_effective;"
+            ))?;
+            added.push(format!("{table}.cost_cents_effective"));
+        } else if !has_effective {
+            // No legacy column to rename (the table was created without
+            // any cost column — shouldn't happen in practice, but
+            // defensive): add it explicitly with the rollup-table
+            // semantics. Messages-table inserts always bind a value, so
+            // the NOT NULL default never gets exercised on the live
+            // path.
+            conn.execute_batch(&format!(
+                "ALTER TABLE {table} ADD COLUMN cost_cents_effective REAL NOT NULL DEFAULT 0;"
+            ))?;
+            added.push(format!("{table}.cost_cents_effective"));
+        }
+    }
+
+    Ok(added)
+}
+
 fn reconcile_schema(conn: &Connection) -> Result<SchemaReconcileReport> {
     let mut added_columns: Vec<String> = Vec::new();
     let mut removed_tables: Vec<String> = Vec::new();
@@ -1390,6 +1531,20 @@ fn reconcile_schema(conn: &Connection) -> Result<SchemaReconcileReport> {
         surface_column_added = true;
     }
 
+    // #730 / ADR-0094 §1: migrate `cost_cents` to the dual
+    // `cost_cents_ingested` / `cost_cents_effective` shape on
+    // messages and both rollup tables before the rollup-repair
+    // block below — `create_rollup_triggers` writes the new
+    // column names and would fail against a legacy single-column
+    // schema. If `ensure_dual_cost_columns` rewrites columns it
+    // also drops the legacy triggers so the recreate path below
+    // produces them with the dual-column shape.
+    let dual_cost_added = ensure_dual_cost_columns(conn)?;
+    let dual_cost_columns_added = !dual_cost_added.is_empty();
+    for entry in dual_cost_added {
+        added_columns.push(entry);
+    }
+
     let has_hourly_rollups = table_exists(conn, "message_rollups_hourly")?;
     let has_daily_rollups = table_exists(conn, "message_rollups_daily")?;
     let has_rollup_insert_trigger = trigger_exists(conn, "trg_messages_rollup_insert")?;
@@ -1401,7 +1556,8 @@ fn reconcile_schema(conn: &Connection) -> Result<SchemaReconcileReport> {
         || !has_rollup_insert_trigger
         || !has_rollup_delete_trigger
         || !has_rollup_update_trigger
-        || rollup_pk_outdated_pre;
+        || rollup_pk_outdated_pre
+        || dual_cost_columns_added;
     if rollup_pk_outdated_pre {
         // Pre-#701 rollup tables still carry the old PK. Drop them so
         // `ensure_rollup_schema` recreates with the surface-aware shape;
@@ -1908,5 +2064,183 @@ mod tests {
             .filter_map(|r| r.ok())
             .collect();
         assert_eq!(before, after, "backfill must be idempotent");
+    }
+
+    /// #730 / ADR-0094 §1: a pre-dual-cost v1 DB must gain
+    /// `cost_cents_ingested` on `messages` and both rollup tables, rename
+    /// the legacy `cost_cents` column to `cost_cents_effective`, and
+    /// preserve every existing row's stored value verbatim in both new
+    /// columns (since `_effective = _ingested` until the team-pricing
+    /// worker (#731) ships). The rollup triggers must be recreated with
+    /// the dual-column shape so subsequent message inserts populate both.
+    #[test]
+    fn reconcile_adds_dual_cost_columns_on_existing_v1_db() {
+        let conn = Connection::open_in_memory().unwrap();
+        migrate(&conn).unwrap();
+
+        // Simulate a pre-#730 v1 DB by dropping the new columns and
+        // creating a legacy `cost_cents` column on `messages` and the
+        // two rollup tables. The trigger bodies and several indexes
+        // reference the new columns; drop them so the legacy state is
+        // internally consistent.
+        conn.execute_batch(
+            "DROP TRIGGER IF EXISTS trg_messages_rollup_insert;
+             DROP TRIGGER IF EXISTS trg_messages_rollup_delete;
+             DROP TRIGGER IF EXISTS trg_messages_rollup_update;
+             DROP INDEX IF EXISTS idx_messages_ts_cost;
+             DROP INDEX IF EXISTS idx_messages_role_ts_cost;
+             DROP INDEX IF EXISTS idx_messages_role_branch_cost;
+             DROP INDEX IF EXISTS idx_messages_session_role_cost;
+             ALTER TABLE messages DROP COLUMN cost_cents_effective;
+             ALTER TABLE messages DROP COLUMN cost_cents_ingested;
+             ALTER TABLE messages ADD COLUMN cost_cents REAL;
+             ALTER TABLE message_rollups_hourly DROP COLUMN cost_cents_effective;
+             ALTER TABLE message_rollups_hourly DROP COLUMN cost_cents_ingested;
+             ALTER TABLE message_rollups_hourly ADD COLUMN cost_cents REAL NOT NULL DEFAULT 0;
+             ALTER TABLE message_rollups_daily DROP COLUMN cost_cents_effective;
+             ALTER TABLE message_rollups_daily DROP COLUMN cost_cents_ingested;
+             ALTER TABLE message_rollups_daily ADD COLUMN cost_cents REAL NOT NULL DEFAULT 0;
+             CREATE INDEX idx_messages_ts_cost ON messages(timestamp, cost_cents);
+             CREATE INDEX idx_messages_role_ts_cost ON messages(role, timestamp, cost_cents);
+             CREATE INDEX idx_messages_role_branch_cost ON messages(role, git_branch, cost_cents);
+             CREATE INDEX idx_messages_session_role_cost ON messages(session_id, role, cost_cents);",
+        )
+        .unwrap();
+        assert!(has_column(&conn, "messages", "cost_cents").unwrap());
+        assert!(!has_column(&conn, "messages", "cost_cents_effective").unwrap());
+        assert!(!has_column(&conn, "messages", "cost_cents_ingested").unwrap());
+
+        // Seed a row with a known cost so we can prove the value
+        // survives the rename + add-column path.
+        conn.execute(
+            "INSERT INTO messages (id, role, timestamp, model, provider, cost_cents)
+             VALUES ('m1', 'assistant', '2026-04-20T00:00:00Z', 'claude-opus-4-6',
+                     'claude_code', 12.34)",
+            [],
+        )
+        .unwrap();
+
+        let report = repair(&conn).unwrap();
+        assert!(
+            report
+                .added_columns
+                .iter()
+                .any(|c| c == "messages.cost_cents_ingested"),
+            "report should mention messages.cost_cents_ingested; got {:?}",
+            report.added_columns
+        );
+        assert!(
+            report
+                .added_columns
+                .iter()
+                .any(|c| c == "messages.cost_cents_effective"),
+            "report should mention messages.cost_cents_effective; got {:?}",
+            report.added_columns
+        );
+
+        assert!(has_column(&conn, "messages", "cost_cents_effective").unwrap());
+        assert!(has_column(&conn, "messages", "cost_cents_ingested").unwrap());
+        assert!(!has_column(&conn, "messages", "cost_cents").unwrap());
+        assert!(has_column(&conn, "message_rollups_hourly", "cost_cents_effective").unwrap());
+        assert!(has_column(&conn, "message_rollups_hourly", "cost_cents_ingested").unwrap());
+        assert!(has_column(&conn, "message_rollups_daily", "cost_cents_effective").unwrap());
+        assert!(has_column(&conn, "message_rollups_daily", "cost_cents_ingested").unwrap());
+
+        // ADR-0094 §1: `_effective` defaults to `_ingested` until a team
+        // price list rewrites it. The migration must copy the legacy
+        // value into both columns.
+        let (ingested, effective): (f64, f64) = conn
+            .query_row(
+                "SELECT cost_cents_ingested, cost_cents_effective FROM messages WHERE id = 'm1'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert!(
+            (ingested - 12.34).abs() < 1e-9,
+            "cost_cents_ingested preserves the legacy stored value; got {ingested}"
+        );
+        assert!(
+            (effective - 12.34).abs() < 1e-9,
+            "cost_cents_effective defaults to _ingested until team pricing ships (#731); got {effective}"
+        );
+
+        // Rollup triggers must be recreated with the dual-column shape.
+        // A fresh INSERT exercises them — both rollup columns must
+        // increment on the new row.
+        assert!(trigger_exists(&conn, "trg_messages_rollup_insert").unwrap());
+        conn.execute(
+            "INSERT INTO messages
+                (id, role, timestamp, model, provider,
+                 input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
+                 cost_cents_ingested, cost_cents_effective)
+             VALUES ('m2', 'assistant', '2026-04-21T00:00:00Z', 'claude-opus-4-6',
+                     'claude_code', 0, 0, 0, 0, 4.5, 4.5)",
+            [],
+        )
+        .unwrap();
+        let (rh_i, rh_e): (f64, f64) = conn
+            .query_row(
+                "SELECT SUM(cost_cents_ingested), SUM(cost_cents_effective)
+                 FROM message_rollups_daily WHERE bucket_day = '2026-04-21'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert!((rh_i - 4.5).abs() < 1e-9);
+        assert!((rh_e - 4.5).abs() < 1e-9);
+
+        // Idempotency: a second repair must not re-add the columns or
+        // rewrite the rollup contents.
+        let second = repair(&conn).unwrap();
+        assert!(
+            !second
+                .added_columns
+                .iter()
+                .any(|c| c.contains("cost_cents_")),
+            "second repair must not re-add dual cost columns; got {:?}",
+            second.added_columns
+        );
+    }
+
+    /// #730: `db check` must surface a missing `cost_cents_ingested` /
+    /// `cost_cents_effective` column on an otherwise-current v1 DB as
+    /// drift so `budi db check --fix` heals it without bumping the
+    /// schema version.
+    #[test]
+    fn check_detects_missing_dual_cost_columns() {
+        let conn = Connection::open_in_memory().unwrap();
+        migrate(&conn).unwrap();
+
+        // Drop only `cost_cents_ingested` to simulate an incomplete
+        // partial migration. The triggers reference it, so drop them
+        // too to keep the database internally consistent.
+        conn.execute_batch(
+            "DROP TRIGGER IF EXISTS trg_messages_rollup_insert;
+             DROP TRIGGER IF EXISTS trg_messages_rollup_delete;
+             DROP TRIGGER IF EXISTS trg_messages_rollup_update;
+             ALTER TABLE message_rollups_hourly DROP COLUMN cost_cents_ingested;
+             ALTER TABLE message_rollups_daily DROP COLUMN cost_cents_ingested;
+             ALTER TABLE messages DROP COLUMN cost_cents_ingested;",
+        )
+        .unwrap();
+
+        let report = check(&conn).unwrap();
+        assert!(
+            !report.migrated,
+            "additive drift must not request a destructive migration"
+        );
+        assert!(
+            report
+                .added_columns
+                .iter()
+                .any(|c| c == "messages.cost_cents_ingested"),
+            "check should report missing messages.cost_cents_ingested; got {:?}",
+            report.added_columns
+        );
+        assert!(
+            has_column(&conn, "messages", "cost_cents_effective").unwrap(),
+            "check must not modify the database"
+        );
     }
 }

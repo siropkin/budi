@@ -174,7 +174,8 @@ fn rollups_track_message_updates_and_deletes() {
     conn.execute(
         "UPDATE messages
          SET output_tokens = 90,
-             cost_cents = 4.5
+             cost_cents_ingested = 4.5,
+             cost_cents_effective = 4.5
          WHERE id = 'rollup-msg-1'",
         [],
     )
@@ -368,10 +369,10 @@ fn cost_cents_baked_at_ingest() {
     CostEnricher.enrich(&mut msg);
     ingest_messages(&mut conn, &[msg], None).unwrap();
 
-    // Verify cost_cents was baked in: 1M input * $5/M + 100K output * $25/M = $5 + $2.50 = $7.50 = 750 cents
+    // Verify cost was baked in: 1M input * $5/M + 100K output * $25/M = $5 + $2.50 = $7.50 = 750 cents
     let cost_cents: f64 = conn
         .query_row(
-            "SELECT cost_cents FROM messages WHERE id = 'cost-test-1'",
+            "SELECT cost_cents_effective FROM messages WHERE id = 'cost-test-1'",
             [],
             |r| r.get(0),
         )
@@ -2097,18 +2098,18 @@ fn jsonl_dedup_matches_otel_by_fingerprint_within_window() {
     conn.execute(
         "INSERT INTO messages (id, session_id, role, timestamp, model, provider,
             input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
-            cost_cents, cost_confidence)
+            cost_cents_ingested, cost_cents_effective, cost_confidence)
          VALUES ('otel-a', 'sess-otel', 'assistant', '2026-03-25T00:00:01.050Z', 'claude-opus-4-6',
-                 'claude_code', 10, 5, 0, 0, 1.0, 'otel_exact')",
+                 'claude_code', 10, 5, 0, 0, 1.0, 1.0, 'otel_exact')",
         [],
     )
     .unwrap();
     conn.execute(
         "INSERT INTO messages (id, session_id, role, timestamp, model, provider,
             input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
-            cost_cents, cost_confidence)
+            cost_cents_ingested, cost_cents_effective, cost_confidence)
          VALUES ('otel-b', 'sess-otel', 'assistant', '2026-03-25T00:00:01.120Z', 'claude-opus-4-6',
-                 'claude_code', 900, 400, 5000, 50000, 7.3, 'otel_exact')",
+                 'claude_code', 900, 400, 5000, 50000, 7.3, 7.3, 'otel_exact')",
         [],
     )
     .unwrap();
@@ -2186,9 +2187,9 @@ fn jsonl_dedup_preserves_message_when_otel_candidates_are_ambiguous() {
         conn.execute(
             "INSERT INTO messages (id, session_id, role, timestamp, model, provider,
                 input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
-                cost_cents, cost_confidence)
+                cost_cents_ingested, cost_cents_effective, cost_confidence)
              VALUES (?1, 'sess-ambig', 'assistant', '2026-03-25T00:00:01.100Z', 'claude-opus-4-6',
-                     'claude_code', 1000, 500, 5000, 50000, 7.3, 'otel_exact')",
+                     'claude_code', 1000, 500, 5000, 50000, 7.3, 7.3, 'otel_exact')",
             params![id],
         )
         .unwrap();
@@ -2613,9 +2614,9 @@ fn session_visibility_reports_windows_and_flags_hidden_rows() {
     conn.execute(
         "INSERT INTO messages (id, session_id, role, timestamp, model, provider,
             input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
-            cost_cents, cost_confidence)
+            cost_cents_ingested, cost_cents_effective, cost_confidence)
          VALUES ('hidden-1', NULL, 'assistant', ?1, 'claude-opus-4-6',
-                 'claude_code', 1, 1, 0, 0, 0.1, 'proxy_estimated')",
+                 'claude_code', 1, 1, 0, 0, 0.1, 0.1, 'proxy_estimated')",
         params![(today_midnight + chrono::Duration::minutes(2)).to_rfc3339()],
     )
     .unwrap();
@@ -2657,9 +2658,9 @@ fn session_visibility_flags_mismatch_when_all_rows_missing_session_id() {
     conn.execute(
         "INSERT INTO messages (id, session_id, role, timestamp, model, provider,
             input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
-            cost_cents, cost_confidence)
+            cost_cents_ingested, cost_cents_effective, cost_confidence)
          VALUES ('hidden-1', NULL, 'assistant', ?1, 'claude-opus-4-6',
-                 'claude_code', 1, 1, 0, 0, 0.1, 'proxy_estimated')",
+                 'claude_code', 1, 1, 0, 0, 0.1, 0.1, 'proxy_estimated')",
         params![(today_midnight + chrono::Duration::minutes(1)).to_rfc3339()],
     )
     .unwrap();
@@ -2752,9 +2753,9 @@ fn session_list_ignores_empty_string_session_id() {
     conn.execute(
         "INSERT INTO messages (id, session_id, role, timestamp, model, provider,
             input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
-            cost_cents, cost_confidence)
+            cost_cents_ingested, cost_cents_effective, cost_confidence)
          VALUES ('empty-1', '', 'assistant', '2026-03-14T10:00:00+00:00',
-                 'claude-opus-4-6', 'claude_code', 1, 1, 0, 0, 0.1, 'proxy_estimated')",
+                 'claude-opus-4-6', 'claude_code', 1, 1, 0, 0, 0.1, 0.1, 'proxy_estimated')",
         [],
     )
     .unwrap();
@@ -7227,13 +7228,13 @@ fn backfill_preserves_already_populated_repo_and_branch() {
 fn status_snapshot_returns_consistent_data() {
     let conn = test_db();
     conn.execute(
-        "INSERT INTO messages (id, role, timestamp, model, provider, input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens, cost_cents)
-         VALUES ('m1', 'assistant', '2026-05-04T10:00:00Z', 'claude-sonnet-4-6', 'claude_code', 100000, 50000, 0, 0, 195.0)",
+        "INSERT INTO messages (id, role, timestamp, model, provider, input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens, cost_cents_ingested, cost_cents_effective)
+         VALUES ('m1', 'assistant', '2026-05-04T10:00:00Z', 'claude-sonnet-4-6', 'claude_code', 100000, 50000, 0, 0, 195.0, 195.0)",
         [],
     ).unwrap();
     conn.execute(
-        "INSERT INTO messages (id, role, timestamp, model, provider, input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens, cost_cents)
-         VALUES ('m2', 'user', '2026-05-04T10:00:01Z', 'claude-sonnet-4-6', 'claude_code', 0, 0, 0, 0, 0.0)",
+        "INSERT INTO messages (id, role, timestamp, model, provider, input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens, cost_cents_ingested, cost_cents_effective)
+         VALUES ('m2', 'user', '2026-05-04T10:00:01Z', 'claude-sonnet-4-6', 'claude_code', 0, 0, 0, 0, 0.0, 0.0)",
         [],
     ).unwrap();
 

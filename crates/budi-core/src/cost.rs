@@ -156,10 +156,12 @@ pub fn estimate_cost_with_filters(
         .map(|s| s as &dyn rusqlite::types::ToSql)
         .collect();
 
-    // Use pre-computed SUM(cost_cents) for total_cost to match bar charts,
-    // and token-based calculation for the input/output/cache breakdown.
+    // Use pre-computed SUM(cost_cents_effective) for total_cost to match bar
+    // charts, and token-based calculation for the input/output/cache breakdown.
+    // ADR-0094 §1: every read surface reads `_effective`; until the team-pricing
+    // worker (#731) ships, `_effective = _ingested`.
     let sum_sql = format!(
-        "SELECT COALESCE(SUM(cost_cents), 0) FROM messages {}",
+        "SELECT COALESCE(SUM(cost_cents_effective), 0) FROM messages {}",
         where_clause
     );
     let sum_cost_cents: f64 = conn.query_row(&sum_sql, param_refs.as_slice(), |r| r.get(0))?;
@@ -275,8 +277,8 @@ mod tests {
         let conn = setup_db();
         // 1M input * $5/M = $5.00, 100K output * $25/M = $2.50, total = $7.50 = 750 cents
         conn.execute(
-            "INSERT INTO messages (id, role, timestamp, model, input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens, cost_cents)
-             VALUES (?1, 'assistant', '2026-03-21T00:00:00Z', 'claude-opus-4-6', ?2, ?3, ?4, ?5, ?6)",
+            "INSERT INTO messages (id, role, timestamp, model, input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens, cost_cents_ingested, cost_cents_effective)
+             VALUES (?1, 'assistant', '2026-03-21T00:00:00Z', 'claude-opus-4-6', ?2, ?3, ?4, ?5, ?6, ?6)",
             params!["msg1", 1_000_000i64, 100_000i64, 0i64, 0i64, 750.0],
         ).unwrap();
         let cost = estimate_cost_filtered(&conn, None, None, None).unwrap();
@@ -290,8 +292,8 @@ mod tests {
         let conn = setup_db();
         // total = 0.30 + 0.75 + 0.75 + 0.15 = $1.95 = 195 cents
         conn.execute(
-            "INSERT INTO messages (id, role, timestamp, model, input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens, cost_cents)
-             VALUES (?1, 'assistant', '2026-03-21T00:00:00Z', 'claude-sonnet-4-6', ?2, ?3, ?4, ?5, ?6)",
+            "INSERT INTO messages (id, role, timestamp, model, input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens, cost_cents_ingested, cost_cents_effective)
+             VALUES (?1, 'assistant', '2026-03-21T00:00:00Z', 'claude-sonnet-4-6', ?2, ?3, ?4, ?5, ?6, ?6)",
             params!["msg1", 100_000i64, 50_000i64, 200_000i64, 500_000i64, 195.0],
         ).unwrap();
         let cost = estimate_cost_filtered(&conn, None, None, None).unwrap();
@@ -309,14 +311,14 @@ mod tests {
         let conn = setup_db();
         // 1M input * $3/M = $3.00 = 300 cents each
         conn.execute(
-            "INSERT INTO messages (id, role, timestamp, model, input_tokens, output_tokens, cost_cents)
-             VALUES ('old', 'assistant', '2026-03-01T00:00:00Z', 'claude-sonnet-4-6', 1000000, 0, 300.0)",
+            "INSERT INTO messages (id, role, timestamp, model, input_tokens, output_tokens, cost_cents_ingested, cost_cents_effective)
+             VALUES ('old', 'assistant', '2026-03-01T00:00:00Z', 'claude-sonnet-4-6', 1000000, 0, 300.0, 300.0)",
             [],
         )
         .unwrap();
         conn.execute(
-            "INSERT INTO messages (id, role, timestamp, model, input_tokens, output_tokens, cost_cents)
-             VALUES ('new', 'assistant', '2026-03-21T00:00:00Z', 'claude-sonnet-4-6', 1000000, 0, 300.0)",
+            "INSERT INTO messages (id, role, timestamp, model, input_tokens, output_tokens, cost_cents_ingested, cost_cents_effective)
+             VALUES ('new', 'assistant', '2026-03-21T00:00:00Z', 'claude-sonnet-4-6', 1000000, 0, 300.0, 300.0)",
             [],
         )
         .unwrap();
@@ -332,20 +334,20 @@ mod tests {
         let conn = setup_db();
         // Opus 4.6: 100K input * $5/M = $0.50 = 50 cents
         conn.execute(
-            "INSERT INTO messages (id, role, timestamp, model, input_tokens, output_tokens, cost_cents)
-             VALUES ('m1', 'assistant', '2026-03-21T00:00:00Z', 'claude-opus-4-6', 100000, 0, 50.0)",
+            "INSERT INTO messages (id, role, timestamp, model, input_tokens, output_tokens, cost_cents_ingested, cost_cents_effective)
+             VALUES ('m1', 'assistant', '2026-03-21T00:00:00Z', 'claude-opus-4-6', 100000, 0, 50.0, 50.0)",
             [],
         ).unwrap();
         // Haiku 4.5: 100K input * $1/M = $0.10 = 10 cents
         conn.execute(
-            "INSERT INTO messages (id, role, timestamp, model, input_tokens, output_tokens, cost_cents)
-             VALUES ('m2', 'assistant', '2026-03-21T00:00:00Z', 'claude-haiku-4-5-20251001', 100000, 0, 10.0)",
+            "INSERT INTO messages (id, role, timestamp, model, input_tokens, output_tokens, cost_cents_ingested, cost_cents_effective)
+             VALUES ('m2', 'assistant', '2026-03-21T00:00:00Z', 'claude-haiku-4-5-20251001', 100000, 0, 10.0, 10.0)",
             [],
         ).unwrap();
         // Sonnet 4.6: 100K input * $3/M = $0.30 = 30 cents
         conn.execute(
-            "INSERT INTO messages (id, role, timestamp, model, input_tokens, output_tokens, cost_cents)
-             VALUES ('m3', 'assistant', '2026-03-21T00:00:00Z', 'claude-sonnet-4-6', 100000, 0, 30.0)",
+            "INSERT INTO messages (id, role, timestamp, model, input_tokens, output_tokens, cost_cents_ingested, cost_cents_effective)
+             VALUES ('m3', 'assistant', '2026-03-21T00:00:00Z', 'claude-sonnet-4-6', 100000, 0, 30.0, 30.0)",
             [],
         ).unwrap();
         let cost = estimate_cost_filtered(&conn, None, None, None).unwrap();
@@ -367,8 +369,8 @@ mod tests {
         let total_dollars = input_cost + cache_write_cost;
         let total_cents = total_dollars * 100.0;
         conn.execute(
-            "INSERT INTO messages (id, role, timestamp, model, input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens, cost_cents)
-             VALUES ('m1', 'assistant', '2026-03-21T00:00:00Z', 'claude-opus-4-6', 3, 0, 14873, 0, ?1)",
+            "INSERT INTO messages (id, role, timestamp, model, input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens, cost_cents_ingested, cost_cents_effective)
+             VALUES ('m1', 'assistant', '2026-03-21T00:00:00Z', 'claude-opus-4-6', 3, 0, 14873, 0, ?1, ?1)",
             params![total_cents],
         ).unwrap();
         let cost = estimate_cost_filtered(&conn, None, None, None).unwrap();
@@ -430,8 +432,8 @@ mod tests {
             expected_total_cents += cost_cents;
 
             conn.execute(
-                "INSERT INTO messages (id, role, timestamp, model, input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens, cost_cents)
-                 VALUES (?1, 'assistant', '2026-03-21T00:00:00Z', ?2, ?3, ?4, ?5, ?6, ?7)",
+                "INSERT INTO messages (id, role, timestamp, model, input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens, cost_cents_ingested, cost_cents_effective)
+                 VALUES (?1, 'assistant', '2026-03-21T00:00:00Z', ?2, ?3, ?4, ?5, ?6, ?7, ?7)",
                 params![*prefix, *model, *inp as i64, *out as i64, *cw as i64, *cr as i64, cost_cents],
             ).unwrap();
         }
@@ -489,8 +491,8 @@ mod tests {
         let conn = setup_db();
         let cost_cents = correct * 100.0;
         conn.execute(
-            "INSERT INTO messages (id, role, timestamp, model, input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens, cost_cents)
-             VALUES ('test', 'assistant', '2026-03-21T00:00:00Z', 'claude-opus-4-6', 3, 0, 16267, 9985, ?1)",
+            "INSERT INTO messages (id, role, timestamp, model, input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens, cost_cents_ingested, cost_cents_effective)
+             VALUES ('test', 'assistant', '2026-03-21T00:00:00Z', 'claude-opus-4-6', 3, 0, 16267, 9985, ?1, ?1)",
             params![cost_cents],
         ).unwrap();
         let result = estimate_cost_filtered(&conn, None, None, None).unwrap();
@@ -518,13 +520,13 @@ mod tests {
         // If stored as integer: 0 or 1 cent (up to 100% error)
         // If stored as f64: 0.5 cents exactly
         conn.execute(
-            "INSERT INTO messages (id, role, timestamp, model, input_tokens, output_tokens, cost_cents)
-             VALUES ('half', 'assistant', '2026-03-21T00:00:00Z', 'claude-opus-4-6', 0, 0, 0.5)",
+            "INSERT INTO messages (id, role, timestamp, model, input_tokens, output_tokens, cost_cents_ingested, cost_cents_effective)
+             VALUES ('half', 'assistant', '2026-03-21T00:00:00Z', 'claude-opus-4-6', 0, 0, 0.5, 0.5)",
             [],
         ).unwrap();
         let stored: f64 = conn
             .query_row(
-                "SELECT cost_cents FROM messages WHERE id = 'half'",
+                "SELECT cost_cents_effective FROM messages WHERE id = 'half'",
                 [],
                 |r| r.get(0),
             )
@@ -545,8 +547,8 @@ mod tests {
         // After fix: each stored as 0.0915 cents → total $0.09 (rounded at display)
         for i in 0..100 {
             conn.execute(
-                "INSERT INTO messages (id, role, timestamp, model, input_tokens, output_tokens, cost_cents)
-                 VALUES (?1, 'assistant', '2026-03-21T00:00:00Z', 'claude-opus-4-6', 3, 36, ?2)",
+                "INSERT INTO messages (id, role, timestamp, model, input_tokens, output_tokens, cost_cents_ingested, cost_cents_effective)
+                 VALUES (?1, 'assistant', '2026-03-21T00:00:00Z', 'claude-opus-4-6', 3, 36, ?2, ?2)",
                 params![format!("msg{}", i), 0.0915],
             ).unwrap();
         }
@@ -572,8 +574,8 @@ mod tests {
         // $25/M = $2.50 → components sum $7.50. The extra $2.50 is the
         // "other" bucket — thinking/fast-mode/web-search in real data.
         conn.execute(
-            "INSERT INTO messages (id, role, timestamp, model, input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens, cost_cents)
-             VALUES (?1, 'assistant', '2026-03-21T00:00:00Z', 'claude-opus-4-6', ?2, ?3, 0, 0, ?4)",
+            "INSERT INTO messages (id, role, timestamp, model, input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens, cost_cents_ingested, cost_cents_effective)
+             VALUES (?1, 'assistant', '2026-03-21T00:00:00Z', 'claude-opus-4-6', ?2, ?3, 0, 0, ?4, ?4)",
             params!["msg1", 1_000_000i64, 100_000i64, 1000.0],
         ).unwrap();
         let cost = estimate_cost_filtered(&conn, None, None, None).unwrap();
@@ -606,8 +608,8 @@ mod tests {
         // Stored `cost_cents` matches the recomputation exactly, so
         // `other_cost` should be zero.
         conn.execute(
-            "INSERT INTO messages (id, role, timestamp, model, input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens, cost_cents)
-             VALUES (?1, 'assistant', '2026-03-21T00:00:00Z', 'claude-opus-4-6', ?2, ?3, 0, 0, ?4)",
+            "INSERT INTO messages (id, role, timestamp, model, input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens, cost_cents_ingested, cost_cents_effective)
+             VALUES (?1, 'assistant', '2026-03-21T00:00:00Z', 'claude-opus-4-6', ?2, ?3, 0, 0, ?4, ?4)",
             params!["msg1", 1_000_000i64, 100_000i64, 750.0],
         ).unwrap();
         let cost = estimate_cost_filtered(&conn, None, None, None).unwrap();
@@ -627,8 +629,8 @@ mod tests {
         // only $5.00 at ingest time — `other_cost` should clamp at 0
         // rather than flip negative.
         conn.execute(
-            "INSERT INTO messages (id, role, timestamp, model, input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens, cost_cents)
-             VALUES (?1, 'assistant', '2026-03-21T00:00:00Z', 'claude-opus-4-6', ?2, ?3, 0, 0, ?4)",
+            "INSERT INTO messages (id, role, timestamp, model, input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens, cost_cents_ingested, cost_cents_effective)
+             VALUES (?1, 'assistant', '2026-03-21T00:00:00Z', 'claude-opus-4-6', ?2, ?3, 0, 0, ?4, ?4)",
             params!["msg1", 1_000_000i64, 100_000i64, 500.0],
         ).unwrap();
         let cost = estimate_cost_filtered(&conn, None, None, None).unwrap();

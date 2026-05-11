@@ -899,9 +899,16 @@ pub fn backfill_unknown_rows(conn: &Connection, version: u32) -> Result<usize> {
         }
         if let PricingOutcome::Known { pricing, .. } = lookup(&model, &provider) {
             let cost = pricing.calculate_cost_cents(inp, out, cc, cr, 0, None, 0);
+            // ADR-0094 §1: write the new LiteLLM-priced number into both
+            // `_ingested` (this row's authoritative ingest-time value,
+            // previously stored as 0 with `pricing_source = 'unknown'`)
+            // and `_effective` (read surface). The team-pricing worker
+            // (#731) will subsequently rewrite `_effective` for team
+            // pricing without touching `_ingested`.
             tx.execute(
                 "UPDATE messages
-                    SET cost_cents = ?1,
+                    SET cost_cents_ingested = ?1,
+                        cost_cents_effective = ?1,
                         cost_confidence = 'estimated',
                         pricing_source = ?2
                   WHERE id = ?3
@@ -1067,9 +1074,9 @@ mod pricing_tests {
             "INSERT INTO messages
                 (id, role, timestamp, model, provider,
                  input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
-                 cost_cents, cost_confidence, pricing_source)
+                 cost_cents_ingested, cost_cents_effective, cost_confidence, pricing_source)
              VALUES (?1, 'assistant', '2026-04-20T00:00:00Z', ?2, ?3,
-                     100, 50, 0, 0, ?4, ?5, ?6)",
+                     100, 50, 0, 0, ?4, ?4, ?5, ?6)",
             rusqlite::params![
                 id,
                 model,
@@ -1084,7 +1091,7 @@ mod pricing_tests {
 
     fn cost_of(conn: &Connection, id: &str) -> f64 {
         conn.query_row(
-            "SELECT cost_cents FROM messages WHERE id = ?1",
+            "SELECT cost_cents_effective FROM messages WHERE id = ?1",
             rusqlite::params![id],
             |r| r.get(0),
         )

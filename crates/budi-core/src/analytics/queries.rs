@@ -552,7 +552,7 @@ pub fn usage_summary(
                 COALESCE(SUM(output_tokens), 0),
                 COALESCE(SUM(cache_creation_tokens), 0),
                 COALESCE(SUM(cache_read_tokens), 0),
-                COALESCE(SUM(cost_cents), 0.0)
+                COALESCE(SUM(cost_cents_effective), 0.0)
          FROM messages {}",
         where_clause
     );
@@ -641,7 +641,7 @@ fn usage_summary_from_rollups(
             COALESCE(SUM(output_tokens), 0),
             COALESCE(SUM(cache_creation_tokens), 0),
             COALESCE(SUM(cache_read_tokens), 0),
-            COALESCE(SUM(cost_cents), 0.0)
+            COALESCE(SUM(cost_cents_effective), 0.0)
          FROM {} {where_clause}",
         rollup_table(window.level)
     );
@@ -755,7 +755,7 @@ pub fn usage_summary_with_filters(
                 COALESCE(SUM(output_tokens), 0),
                 COALESCE(SUM(cache_creation_tokens), 0),
                 COALESCE(SUM(cache_read_tokens), 0),
-                COALESCE(SUM(cost_cents), 0.0)
+                COALESCE(SUM(cost_cents_effective), 0.0)
          FROM messages {}",
         where_clause
     );
@@ -885,7 +885,7 @@ pub fn message_list(conn: &Connection, p: &MessageListParams) -> Result<Paginate
             }
         }
         "tokens" => format!("(messages.input_tokens + messages.output_tokens) {dir}"),
-        "cost" => format!("COALESCE(messages.cost_cents, 0.0) {dir}"),
+        "cost" => format!("COALESCE(messages.cost_cents_effective, 0.0) {dir}"),
         "branch" | "git_branch" | "ticket" => {
             let col = "COALESCE(messages.git_branch, s.git_branch)";
             if p.sort_asc {
@@ -911,7 +911,7 @@ pub fn message_list(conn: &Connection, p: &MessageListParams) -> Result<Paginate
                 COALESCE(messages.repo_id, s.repo_id),
                 messages.input_tokens, messages.output_tokens,
                 messages.cache_creation_tokens, messages.cache_read_tokens,
-                COALESCE(messages.cost_cents, 0.0),
+                COALESCE(messages.cost_cents_effective, 0.0),
                 COALESCE(messages.cost_confidence, 'estimated'),
                 COALESCE(messages.git_branch, s.git_branch),
                 COALESCE(NULLIF(messages.surface, ''), 'unknown') AS surface
@@ -1020,7 +1020,7 @@ fn repo_usage_from_rollups(
                     COALESCE(SUM(message_count), 0) as cnt,
                     COALESCE(SUM(input_tokens), 0) as inp,
                     COALESCE(SUM(output_tokens), 0) as outp,
-                    COALESCE(SUM(cost_cents), 0.0) as cost
+                    COALESCE(SUM(cost_cents_effective), 0.0) as cost
              FROM {}
              WHERE {}
              GROUP BY repo
@@ -1116,7 +1116,7 @@ pub fn repo_usage_with_filters(
                 COUNT(*) as cnt,
                 COALESCE(SUM(input_tokens), 0) as inp,
                 COALESCE(SUM(output_tokens), 0) as outp,
-                COALESCE(SUM(cost_cents), 0.0) as cost
+                COALESCE(SUM(cost_cents_effective), 0.0) as cost
          FROM messages
          WHERE {}
          GROUP BY repo
@@ -1190,7 +1190,7 @@ pub fn non_repo_usage(
                 COUNT(*) AS cnt,
                 COALESCE(SUM(input_tokens), 0) AS inp,
                 COALESCE(SUM(output_tokens), 0) AS outp,
-                COALESCE(SUM(cost_cents), 0.0) AS cost
+                COALESCE(SUM(cost_cents_effective), 0.0) AS cost
          FROM messages
          WHERE {}
          GROUP BY cwd",
@@ -1363,7 +1363,7 @@ fn activity_chart_from_rollups(
                 COALESCE(SUM(message_count), 0) as cnt,
                 COALESCE(SUM(input_tokens), 0) as inp,
                 COALESCE(SUM(output_tokens), 0) as outp,
-                COALESCE(SUM(cost_cents), 0.0) as cost
+                COALESCE(SUM(cost_cents_effective), 0.0) as cost
          FROM {} {where_clause}
          GROUP BY bucket
          ORDER BY bucket",
@@ -1466,7 +1466,7 @@ pub fn activity_chart_with_filters(
         "SELECT {group_expr} as bucket, COUNT(*) as cnt,
                 COALESCE(SUM(input_tokens), 0) as inp,
                 COALESCE(SUM(output_tokens), 0) as outp,
-                COALESCE(SUM(cost_cents), 0.0) as cost
+                COALESCE(SUM(cost_cents_effective), 0.0) as cost
          FROM messages {where_clause}
          GROUP BY bucket
          ORDER BY bucket",
@@ -1576,7 +1576,7 @@ pub fn branch_cost_with_filters(
                 COALESCE(SUM(output_tokens), 0) as outp,
                 COALESCE(SUM(cache_read_tokens), 0) as cache_r,
                 COALESCE(SUM(cache_creation_tokens), 0) as cache_c,
-                COALESCE(SUM(cost_cents), 0.0) as cost
+                COALESCE(SUM(cost_cents_effective), 0.0) as cost
          FROM messages
          {where_clause}
          GROUP BY branch, repo
@@ -1655,7 +1655,7 @@ pub fn branch_cost_single(
                     COALESCE(SUM(output_tokens), 0) as outp,
                     COALESCE(SUM(cache_read_tokens), 0) as cache_r,
                     COALESCE(SUM(cache_creation_tokens), 0) as cache_c,
-                    COALESCE(SUM(cost_cents), 0.0) as cost
+                    COALESCE(SUM(cost_cents_effective), 0.0) as cost
              FROM messages
              {where_clause}
              GROUP BY COALESCE(repo_id, '')
@@ -1673,7 +1673,7 @@ pub fn branch_cost_single(
                     COALESCE(SUM(output_tokens), 0) as outp,
                     COALESCE(SUM(cache_read_tokens), 0) as cache_r,
                     COALESCE(SUM(cache_creation_tokens), 0) as cache_c,
-                    COALESCE(SUM(cost_cents), 0.0) as cost
+                    COALESCE(SUM(cost_cents_effective), 0.0) as cost
              FROM messages
              {where_clause}
              GROUP BY ?1
@@ -1830,7 +1830,7 @@ pub fn tag_stats_with_filters(
         format!(
             "UNION ALL
              SELECT '{k}' as key, '(untagged)' as value, 0 as session_count,
-                    COALESCE(SUM(m.cost_cents), 0.0) as total_cost_cents
+                    COALESCE(SUM(m.cost_cents_effective), 0.0) as total_cost_cents
              FROM messages m
              WHERE m.role = 'assistant' {date_filter}
                AND NOT EXISTS (
@@ -1859,7 +1859,7 @@ pub fn tag_stats_with_filters(
              )
              SELECT t.key, t.value,
                     COUNT(DISTINCT m.session_id) as session_count,
-                    COALESCE(SUM(m.cost_cents / mvc.n_values), 0.0) as total_cost_cents
+                    COALESCE(SUM(m.cost_cents_effective / mvc.n_values), 0.0) as total_cost_cents
              FROM tags t
              JOIN msg_val_counts mvc ON mvc.message_id = t.message_id
              JOIN messages m ON t.message_id = m.id
@@ -1873,7 +1873,7 @@ pub fn tag_stats_with_filters(
         format!(
             "SELECT t.key, t.value,
                     COUNT(DISTINCT m.session_id) as session_count,
-                    COALESCE(SUM(m.cost_cents), 0.0) as total_cost_cents
+                    COALESCE(SUM(m.cost_cents_effective), 0.0) as total_cost_cents
              FROM tags t
              JOIN messages m ON t.message_id = m.id
              {where_clause}
@@ -1948,7 +1948,7 @@ fn tag_stats_repo_from_messages(
         "SELECT '{key_label}' as key,
                 COALESCE(NULLIF(NULLIF(repo_id, ''), 'unknown'), '(untagged)') as value,
                 COUNT(DISTINCT session_id) as session_count,
-                COALESCE(SUM(cost_cents), 0.0) as total_cost_cents
+                COALESCE(SUM(cost_cents_effective), 0.0) as total_cost_cents
          FROM messages
          {where_clause}
          GROUP BY value
@@ -2028,7 +2028,7 @@ fn tag_stats_branch_from_messages(
                     '(untagged)'
                 ) as value,
                 COUNT(DISTINCT session_id) as session_count,
-                COALESCE(SUM(cost_cents), 0.0) as total_cost_cents
+                COALESCE(SUM(cost_cents_effective), 0.0) as total_cost_cents
          FROM messages
          {where_clause}
          GROUP BY value
@@ -2227,7 +2227,7 @@ pub fn ticket_cost_with_filters(
                     m.output_tokens,
                     m.cache_read_tokens,
                     m.cache_creation_tokens,
-                    m.cost_cents,
+                    m.cost_cents_effective AS cost_cents,
                     mvc.n_values,
                     COALESCE(ms.source_value, '') AS ticket_source
              FROM tags t
@@ -2333,7 +2333,7 @@ pub fn ticket_cost_with_filters(
                 COALESCE(SUM(m2.output_tokens), 0) AS outp,
                 COALESCE(SUM(m2.cache_read_tokens), 0) AS cache_r,
                 COALESCE(SUM(m2.cache_creation_tokens), 0) AS cache_c,
-                COALESCE(SUM(m2.cost_cents), 0.0) AS cost,
+                COALESCE(SUM(m2.cost_cents_effective), 0.0) AS cost,
                 '' AS top_branch,
                 '' AS top_repo,
                 '' AS ticket_source
@@ -2444,7 +2444,7 @@ pub fn ticket_cost_single(
                     m.output_tokens,
                     m.cache_read_tokens,
                     m.cache_creation_tokens,
-                    m.cost_cents,
+                    m.cost_cents_effective AS cost_cents,
                     mvc.n_values,
                     COALESCE(ms.source_value, '') AS ticket_source
              FROM tags t
@@ -2522,7 +2522,7 @@ pub fn ticket_cost_single(
                 COALESCE(m.repo_id, '') AS repo_value,
                 COUNT(DISTINCT m.session_id) AS sess,
                 COUNT(*) AS cnt,
-                COALESCE(SUM(m.cost_cents / mvc.n_values), 0.0) AS cost
+                COALESCE(SUM(m.cost_cents_effective / mvc.n_values), 0.0) AS cost
          FROM tags t
          JOIN msg_val_counts mvc ON mvc.message_id = t.message_id
          JOIN messages m ON m.id = t.message_id
@@ -2754,7 +2754,7 @@ pub fn activity_cost_with_filters(
                     m.output_tokens,
                     m.cache_read_tokens,
                     m.cache_creation_tokens,
-                    m.cost_cents,
+                    m.cost_cents_effective AS cost_cents,
                     mvc.n_values
              FROM tags t
              JOIN msg_val_counts mvc ON mvc.message_id = t.message_id
@@ -2836,7 +2836,7 @@ pub fn activity_cost_with_filters(
                 COALESCE(SUM(m2.output_tokens), 0) AS outp,
                 COALESCE(SUM(m2.cache_read_tokens), 0) AS cache_r,
                 COALESCE(SUM(m2.cache_creation_tokens), 0) AS cache_c,
-                COALESCE(SUM(m2.cost_cents), 0.0) AS cost,
+                COALESCE(SUM(m2.cost_cents_effective), 0.0) AS cost,
                 '' AS top_branch,
                 '' AS top_repo
          FROM messages m2
@@ -2930,7 +2930,7 @@ pub fn activity_cost_single(
                 COALESCE(SUM(m.output_tokens / mvc.n_values), 0) AS outp,
                 COALESCE(SUM(m.cache_read_tokens / mvc.n_values), 0) AS cache_r,
                 COALESCE(SUM(m.cache_creation_tokens / mvc.n_values), 0) AS cache_c,
-                COALESCE(SUM(m.cost_cents / mvc.n_values), 0.0) AS cost,
+                COALESCE(SUM(m.cost_cents_effective / mvc.n_values), 0.0) AS cost,
                 CASE WHEN COUNT(DISTINCT COALESCE(m.repo_id, '')) = 1
                      THEN COALESCE(MIN(m.repo_id), '')
                      ELSE '' END AS repo
@@ -2984,7 +2984,7 @@ pub fn activity_cost_single(
                 COALESCE(m.repo_id, '') AS repo_value,
                 COUNT(DISTINCT m.session_id) AS sess,
                 COUNT(*) AS cnt,
-                COALESCE(SUM(m.cost_cents / mvc.n_values), 0.0) AS cost
+                COALESCE(SUM(m.cost_cents_effective / mvc.n_values), 0.0) AS cost
          FROM tags t
          JOIN msg_val_counts mvc ON mvc.message_id = t.message_id
          JOIN messages m ON m.id = t.message_id
@@ -3202,7 +3202,7 @@ fn model_usage_from_rollups(
                 COALESCE(SUM(output_tokens), 0) as total_output,
                 COALESCE(SUM(cache_read_tokens), 0),
                 COALESCE(SUM(cache_creation_tokens), 0),
-                COALESCE(SUM(cost_cents), 0.0)
+                COALESCE(SUM(cost_cents_effective), 0.0)
          FROM {}
          WHERE {}
          GROUP BY m, p
@@ -3294,7 +3294,7 @@ pub fn model_usage_with_filters(
                 COALESCE(SUM(output_tokens), 0) as total_output,
                 COALESCE(SUM(cache_read_tokens), 0),
                 COALESCE(SUM(cache_creation_tokens), 0),
-                COALESCE(SUM(cost_cents), 0.0)
+                COALESCE(SUM(cost_cents_effective), 0.0)
          FROM messages
          {where_clause}
          GROUP BY m, p
@@ -3467,7 +3467,7 @@ fn assistant_cost_since_from_rollups(
         params.extend(providers.iter().cloned());
     }
     let sql = format!(
-        "SELECT COALESCE(SUM(cost_cents), 0.0)
+        "SELECT COALESCE(SUM(cost_cents_effective), 0.0)
          FROM {}
          WHERE {}",
         rollup_table(window.level),
@@ -3510,7 +3510,7 @@ pub fn statusline_stats(
     let cost_since = |since: &str| -> f64 {
         assistant_cost_since_from_rollups(conn, since, provider_filter).unwrap_or_else(|| {
             let mut sql = String::from(
-                "SELECT COALESCE(SUM(cost_cents), 0.0) FROM messages \
+                "SELECT COALESCE(SUM(cost_cents_effective), 0.0) FROM messages \
                      WHERE timestamp >= ? AND role = 'assistant'",
             );
             let mut bindings: Vec<String> = vec![since.to_string()];
@@ -3535,7 +3535,7 @@ pub fn statusline_stats(
     // Session cost: total cost for a specific session (optionally provider-scoped).
     let session_cost = normalized_session_id.as_ref().map(|sid| {
         let mut sql = String::from(
-            "SELECT COALESCE(SUM(cost_cents), 0.0) FROM messages \
+            "SELECT COALESCE(SUM(cost_cents_effective), 0.0) FROM messages \
              WHERE session_id = ? AND role = 'assistant'",
         );
         let mut bindings: Vec<String> = vec![sid.clone()];
@@ -3557,7 +3557,7 @@ pub fn statusline_stats(
     // instead of a silent cross-repo sum. See #347.
     let branch_cost = params.branch.as_ref().map(|branch| {
         let mut sql = String::from(
-            "SELECT COALESCE(SUM(cost_cents), 0.0) FROM messages \
+            "SELECT COALESCE(SUM(cost_cents_effective), 0.0) FROM messages \
              WHERE git_branch = ? AND role = 'assistant'",
         );
         let mut bindings: Vec<String> = vec![branch.clone()];
@@ -3578,7 +3578,7 @@ pub fn statusline_stats(
     // Project cost: total cost for messages in a specific directory.
     let project_cost = params.project_dir.as_ref().map(|dir| {
         let mut sql = String::from(
-            "SELECT COALESCE(SUM(cost_cents), 0.0) FROM messages \
+            "SELECT COALESCE(SUM(cost_cents_effective), 0.0) FROM messages \
              WHERE cwd = ? AND role = 'assistant'",
         );
         let mut bindings: Vec<String> = vec![dir.clone()];
@@ -3759,7 +3759,7 @@ fn provider_stats_from_rollups(
                 COALESCE(SUM(CASE WHEN role = 'assistant' THEN output_tokens ELSE 0 END), 0),
                 COALESCE(SUM(CASE WHEN role = 'assistant' THEN cache_creation_tokens ELSE 0 END), 0),
                 COALESCE(SUM(CASE WHEN role = 'assistant' THEN cache_read_tokens ELSE 0 END), 0),
-                COALESCE(SUM(CASE WHEN role = 'assistant' THEN cost_cents ELSE 0.0 END), 0.0)
+                COALESCE(SUM(CASE WHEN role = 'assistant' THEN cost_cents_effective ELSE 0.0 END), 0.0)
          FROM {}
          {}
          GROUP BY p
@@ -3888,7 +3888,7 @@ pub fn provider_stats_with_filters(
                 COALESCE(SUM(CASE WHEN role = 'assistant' THEN output_tokens ELSE 0 END), 0),
                 COALESCE(SUM(CASE WHEN role = 'assistant' THEN cache_creation_tokens ELSE 0 END), 0),
                 COALESCE(SUM(CASE WHEN role = 'assistant' THEN cache_read_tokens ELSE 0 END), 0),
-                COALESCE(SUM(CASE WHEN role = 'assistant' THEN cost_cents ELSE 0.0 END), 0.0)
+                COALESCE(SUM(CASE WHEN role = 'assistant' THEN cost_cents_effective ELSE 0.0 END), 0.0)
          FROM messages {}
          GROUP BY p ORDER BY asst_msgs DESC",
         where_clause
@@ -4032,7 +4032,7 @@ fn surface_stats_from_rollups(
                 COALESCE(SUM(CASE WHEN role = 'assistant' THEN output_tokens ELSE 0 END), 0),
                 COALESCE(SUM(CASE WHEN role = 'assistant' THEN cache_creation_tokens ELSE 0 END), 0),
                 COALESCE(SUM(CASE WHEN role = 'assistant' THEN cache_read_tokens ELSE 0 END), 0),
-                COALESCE(SUM(CASE WHEN role = 'assistant' THEN cost_cents ELSE 0.0 END), 0.0)
+                COALESCE(SUM(CASE WHEN role = 'assistant' THEN cost_cents_effective ELSE 0.0 END), 0.0)
          FROM {}
          {}
          GROUP BY s
@@ -4127,7 +4127,7 @@ pub fn surface_stats_with_filters(
                 COALESCE(SUM(CASE WHEN role = 'assistant' THEN output_tokens ELSE 0 END), 0),
                 COALESCE(SUM(CASE WHEN role = 'assistant' THEN cache_creation_tokens ELSE 0 END), 0),
                 COALESCE(SUM(CASE WHEN role = 'assistant' THEN cache_read_tokens ELSE 0 END), 0),
-                COALESCE(SUM(CASE WHEN role = 'assistant' THEN cost_cents ELSE 0.0 END), 0.0)
+                COALESCE(SUM(CASE WHEN role = 'assistant' THEN cost_cents_effective ELSE 0.0 END), 0.0)
          FROM messages {}
          GROUP BY s
          ORDER BY asst_msgs DESC, s ASC",
@@ -4387,7 +4387,7 @@ pub fn session_cost_curve_with_filters(
         "WITH session_stats AS (
              SELECT session_id,
                     COUNT(*) as msg_count,
-                    COALESCE(SUM(cost_cents), 0.0) as total_cost
+                    COALESCE(SUM(cost_cents_effective), 0.0) as total_cost
              FROM messages
              {where_clause}
              AND session_id IS NOT NULL
@@ -4492,7 +4492,7 @@ pub fn cost_confidence_stats_with_filters(
     let sql = format!(
         "SELECT COALESCE(cost_confidence, 'estimated') as conf,
                 COUNT(*) as cnt,
-                COALESCE(SUM(cost_cents), 0.0) as cost
+                COALESCE(SUM(cost_cents_effective), 0.0) as cost
          FROM messages {where_clause}
          GROUP BY conf
          ORDER BY cost DESC",
@@ -4580,7 +4580,7 @@ pub fn subagent_cost_stats_with_filters(
     let sql = format!(
         "SELECT CASE WHEN parent_uuid IS NOT NULL THEN 'subagent' ELSE 'main' END as category,
                 COUNT(*) as cnt,
-                COALESCE(SUM(cost_cents), 0.0) as cost,
+                COALESCE(SUM(cost_cents_effective), 0.0) as cost,
                 COALESCE(SUM(input_tokens), 0) as inp,
                 COALESCE(SUM(output_tokens), 0) as outp
          FROM messages {where_clause}
@@ -4940,7 +4940,7 @@ pub fn file_cost_with_filters(
                     m.output_tokens,
                     m.cache_read_tokens,
                     m.cache_creation_tokens,
-                    m.cost_cents,
+                    m.cost_cents_effective AS cost_cents,
                     mvc.n_values,
                     COALESCE(ms.source_value, '') AS file_source,
                     COALESCE(mt.ticket_value, '') AS ticket_value
@@ -5070,7 +5070,7 @@ pub fn file_cost_with_filters(
                 COALESCE(SUM(m2.output_tokens), 0) AS outp,
                 COALESCE(SUM(m2.cache_read_tokens), 0) AS cache_r,
                 COALESCE(SUM(m2.cache_creation_tokens), 0) AS cache_c,
-                COALESCE(SUM(m2.cost_cents), 0.0) AS cost,
+                COALESCE(SUM(m2.cost_cents_effective), 0.0) AS cost,
                 '' AS top_repo,
                 '' AS top_branch,
                 '' AS top_ticket,
@@ -5177,7 +5177,7 @@ pub fn file_cost_single(
                     m.output_tokens,
                     m.cache_read_tokens,
                     m.cache_creation_tokens,
-                    m.cost_cents,
+                    m.cost_cents_effective AS cost_cents,
                     mvc.n_values,
                     COALESCE(ms.source_value, '') AS file_source,
                     COALESCE(mc.confidence_value, '') AS file_confidence
@@ -5268,7 +5268,7 @@ pub fn file_cost_single(
                 COALESCE(m.repo_id, '') AS repo_value,
                 COUNT(DISTINCT m.session_id) AS sess,
                 COUNT(*) AS cnt,
-                COALESCE(SUM(m.cost_cents / mvc.n_values), 0.0) AS cost
+                COALESCE(SUM(m.cost_cents_effective / mvc.n_values), 0.0) AS cost
          FROM tags t
          JOIN msg_val_counts mvc ON mvc.message_id = t.message_id
          JOIN messages m ON m.id = t.message_id
@@ -5308,7 +5308,7 @@ pub fn file_cost_single(
          SELECT COALESCE(NULLIF(mt.ticket_value, ''), '{UNTAGGED_DIMENSION}') AS ticket_value,
                 COUNT(DISTINCT m.session_id) AS sess,
                 COUNT(*) AS cnt,
-                COALESCE(SUM(m.cost_cents / mvc.n_values), 0.0) AS cost
+                COALESCE(SUM(m.cost_cents_effective / mvc.n_values), 0.0) AS cost
          FROM tags t
          JOIN msg_val_counts mvc ON mvc.message_id = t.message_id
          JOIN messages m ON m.id = t.message_id

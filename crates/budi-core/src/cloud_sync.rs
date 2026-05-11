@@ -63,7 +63,16 @@ pub struct DailyRollupRecord {
     pub output_tokens: i64,
     pub cache_creation_tokens: i64,
     pub cache_read_tokens: i64,
-    pub cost_cents: f64,
+    /// Effective cost: what every read surface (CLI, statusline, extensions,
+    /// dashboard) displays. Defaults to the LiteLLM-priced `cost_cents_ingested`
+    /// at ingest; rewritten by the team-pricing worker (#731) once a cloud
+    /// price list is active. ADR-0094 §1.
+    #[serde(alias = "cost_cents")]
+    pub cost_cents_effective: f64,
+    /// LiteLLM-priced cost calculated at ingest time. ADR-0091 §5 immutable
+    /// (never overwritten after insert), as amended by ADR-0094 Rule D.
+    /// Sent so the cloud can populate its own `cost_cents_ingested` column.
+    pub cost_cents_ingested: f64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -311,7 +320,8 @@ pub fn fetch_daily_rollups(
         let mut stmt = conn.prepare(
             "SELECT bucket_day, role, provider, model, repo_id, git_branch,
                     message_count, input_tokens, output_tokens,
-                    cache_creation_tokens, cache_read_tokens, cost_cents
+                    cache_creation_tokens, cache_read_tokens,
+                    cost_cents_effective, cost_cents_ingested
              FROM message_rollups_daily
              WHERE bucket_day > ?1 OR bucket_day = ?2
              ORDER BY bucket_day",
@@ -331,7 +341,8 @@ pub fn fetch_daily_rollups(
                 output_tokens: row.get(8)?,
                 cache_creation_tokens: row.get(9)?,
                 cache_read_tokens: row.get(10)?,
-                cost_cents: row.get(11)?,
+                cost_cents_effective: row.get(11)?,
+                cost_cents_ingested: row.get(12)?,
             })
         })?
         .filter_map(|r| r.ok())
@@ -341,7 +352,8 @@ pub fn fetch_daily_rollups(
         let mut stmt = conn.prepare(
             "SELECT bucket_day, role, provider, model, repo_id, git_branch,
                     message_count, input_tokens, output_tokens,
-                    cache_creation_tokens, cache_read_tokens, cost_cents
+                    cache_creation_tokens, cache_read_tokens,
+                    cost_cents_effective, cost_cents_ingested
              FROM message_rollups_daily
              ORDER BY bucket_day",
         )?;
@@ -360,7 +372,8 @@ pub fn fetch_daily_rollups(
                 output_tokens: row.get(8)?,
                 cache_creation_tokens: row.get(9)?,
                 cache_read_tokens: row.get(10)?,
-                cost_cents: row.get(11)?,
+                cost_cents_effective: row.get(11)?,
+                cost_cents_ingested: row.get(12)?,
             })
         })?
         .filter_map(|r| r.ok())
@@ -452,7 +465,7 @@ pub fn fetch_session_summaries(
                     COUNT(*) as msg_count,
                     SUM(input_tokens) as total_input,
                     SUM(output_tokens) as total_output,
-                    SUM(COALESCE(cost_cents, 0.0)) as total_cost
+                    SUM(COALESCE(cost_cents_effective, 0.0)) as total_cost
              FROM messages
              WHERE role = 'assistant'
              GROUP BY session_id
@@ -491,7 +504,7 @@ pub fn fetch_session_summaries(
                     COUNT(*) as msg_count,
                     SUM(input_tokens) as total_input,
                     SUM(output_tokens) as total_output,
-                    SUM(COALESCE(cost_cents, 0.0)) as total_cost
+                    SUM(COALESCE(cost_cents_effective, 0.0)) as total_cost
              FROM messages
              WHERE role = 'assistant'
              GROUP BY session_id
@@ -1184,9 +1197,10 @@ mod tests {
         // Insert a message to trigger the rollup trigger
         conn.execute(
             "INSERT INTO messages (id, role, timestamp, model, provider, repo_id, git_branch,
-                                   input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens, cost_cents)
+                                   input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
+                                   cost_cents_ingested, cost_cents_effective)
              VALUES ('msg-1', 'assistant', '2026-04-10T14:30:00Z', 'claude-sonnet-4-6', 'anthropic',
-                     'sha256:abc123', 'feature/PROJ-42-auth', 100, 200, 10, 50, 1.5)",
+                     'sha256:abc123', 'feature/PROJ-42-auth', 100, 200, 10, 50, 1.5, 1.5)",
             [],
         ).unwrap();
 
@@ -1245,8 +1259,9 @@ mod tests {
         for (msg_id, model, ts, input, output) in rows {
             conn.execute(
                 "INSERT INTO messages (id, session_id, role, timestamp, model, provider, repo_id, git_branch,
-                                       input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens, cost_cents)
-                 VALUES (?1, ?2, 'assistant', ?3, ?4, 'anthropic', 'sha256:pm', 'main', ?5, ?6, 0, 0, 0.1)",
+                                       input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
+                                       cost_cents_ingested, cost_cents_effective)
+                 VALUES (?1, ?2, 'assistant', ?3, ?4, 'anthropic', 'sha256:pm', 'main', ?5, ?6, 0, 0, 0.1, 0.1)",
                 params![msg_id, session_id, ts, model, input, output],
             )
             .unwrap();
@@ -1460,9 +1475,10 @@ mod tests {
 
         conn.execute(
             "INSERT INTO messages (id, role, timestamp, model, provider, repo_id, git_branch,
-                                   input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens, cost_cents)
+                                   input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
+                                   cost_cents_ingested, cost_cents_effective)
              VALUES ('msg-status-1', 'assistant', '2026-04-10T14:30:00Z', 'claude-sonnet-4-6', 'anthropic',
-                     'sha256:abc', 'main', 100, 200, 10, 50, 1.5)",
+                     'sha256:abc', 'main', 100, 200, 10, 50, 1.5, 1.5)",
             [],
         )
         .unwrap();
@@ -1505,7 +1521,8 @@ mod tests {
                     output_tokens: 500,
                     cache_creation_tokens: 100,
                     cache_read_tokens: 200,
-                    cost_cents: 2.5,
+                    cost_cents_effective: 2.5,
+                    cost_cents_ingested: 2.5,
                 }],
                 session_summaries: vec![],
             },
@@ -1528,6 +1545,18 @@ mod tests {
             json["payload"]["daily_rollups"][0]
                 .get("ticket_source")
                 .is_none()
+        );
+        // ADR-0094 §1: envelope carries both `cost_cents_effective` (read
+        // surface, may be overridden by team pricing) and `cost_cents_ingested`
+        // (LiteLLM-priced ingest cost, immutable per ADR-0091 §5 Rule D).
+        // Cloud uses `_ingested` to populate its own ingested column on insert.
+        assert_eq!(
+            json["payload"]["daily_rollups"][0]["cost_cents_effective"],
+            2.5
+        );
+        assert_eq!(
+            json["payload"]["daily_rollups"][0]["cost_cents_ingested"],
+            2.5
         );
     }
 
@@ -1633,9 +1662,10 @@ mod tests {
         // None here, so cloud ticket buckets disagreed with local CLI.
         conn.execute(
             "INSERT INTO messages (id, role, timestamp, model, provider, repo_id, git_branch,
-                                   input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens, cost_cents)
+                                   input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
+                                   cost_cents_ingested, cost_cents_effective)
              VALUES ('msg-num-1', 'assistant', '2026-04-10T14:30:00Z', 'claude-sonnet-4-6', 'anthropic',
-                     'sha256:num', 'feature/1234', 10, 20, 0, 0, 0.1)",
+                     'sha256:num', 'feature/1234', 10, 20, 0, 0, 0.1, 0.1)",
             [],
         )
         .unwrap();
@@ -1669,9 +1699,10 @@ mod tests {
         // Seed a rollup via the message trigger, plus an explicit session row.
         conn.execute(
             "INSERT INTO messages (id, role, timestamp, model, provider, repo_id, git_branch,
-                                   input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens, cost_cents)
+                                   input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
+                                   cost_cents_ingested, cost_cents_effective)
              VALUES ('msg-count-1', 'assistant', '2026-04-10T14:30:00Z', 'claude-sonnet-4-6', 'anthropic',
-                     'sha256:count', 'feature/PROJ-77-counts', 10, 20, 0, 0, 0.1)",
+                     'sha256:count', 'feature/PROJ-77-counts', 10, 20, 0, 0, 0.1, 0.1)",
             [],
         ).unwrap();
         conn.execute(
@@ -1713,9 +1744,10 @@ mod tests {
         let conn = crate::analytics::open_db_with_migration(&db_path).unwrap();
         conn.execute(
             "INSERT INTO messages (id, role, timestamp, model, provider, repo_id, git_branch,
-                                   input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens, cost_cents)
+                                   input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
+                                   cost_cents_ingested, cost_cents_effective)
              VALUES ('msg-int-1', 'assistant', '2026-04-10T14:30:00Z', 'claude-sonnet-4-6', 'anthropic',
-                     'sha256:int', 'main', 10, 20, 0, 0, 0.1)",
+                     'sha256:int', 'main', 10, 20, 0, 0, 0.1, 0.1)",
             [],
         )
         .unwrap();
@@ -1748,7 +1780,8 @@ mod tests {
             output_tokens: 20,
             cache_creation_tokens: 0,
             cache_read_tokens: 0,
-            cost_cents: 0.1,
+            cost_cents_effective: 0.1,
+            cost_cents_ingested: 0.1,
         }
     }
 

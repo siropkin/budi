@@ -461,7 +461,8 @@ pub fn ingest_messages_with_sync(
                     tx.execute(
                         "UPDATE messages SET
                             output_tokens = ?1,
-                            cost_cents = ?2
+                            cost_cents_ingested = COALESCE(?2, 0),
+                            cost_cents_effective = ?2
                          WHERE id = ?3",
                         params![msg.output_tokens as i64, cost_cents, existing_uuid,],
                     )?;
@@ -496,16 +497,21 @@ pub fn ingest_messages_with_sync(
             .surface
             .clone()
             .unwrap_or_else(|| crate::surface::default_for_provider(&msg.provider).to_string());
+        // ADR-0094 §1: write the same value into both `cost_cents_ingested`
+        // (immutable per ADR-0091 §5 Rule D) and `cost_cents_effective`
+        // (read surface). The team-pricing worker (#731) rewrites only
+        // `_effective`; until it ships `_effective = _ingested`.
+        let cost_cents_ingested = cost_cents.unwrap_or(0.0);
         let inserted = tx.execute(
             "INSERT OR IGNORE INTO messages
              (id, session_id, role, timestamp, model,
               input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
               cwd, repo_id, provider,
-              cost_cents,
+              cost_cents_ingested, cost_cents_effective,
               parent_uuid, git_branch, cost_confidence, request_id, pricing_source, surface)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17,
-                     COALESCE(?18, 'legacy:pre-manifest'),
-                     ?19)",
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18,
+                     COALESCE(?19, 'legacy:pre-manifest'),
+                     ?20)",
             params![
                 msg.uuid,
                 normalized_session_id.as_deref(),
@@ -519,6 +525,7 @@ pub fn ingest_messages_with_sync(
                 msg.cwd,
                 msg.repo_id,
                 msg.provider,
+                cost_cents_ingested,
                 cost_cents,
                 msg.parent_uuid,
                 git_branch,
