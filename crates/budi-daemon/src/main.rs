@@ -177,6 +177,7 @@ fn build_router(app_state: AppState, host_allowlist: routes::HostAllowlist) -> R
         .route("/favicon.ico", get(h::favicon))
         .route("/health", get(h::health))
         .route("/health/integrations", get(h::health_integrations))
+        .route("/health/sources", get(h::health_sources))
         .route("/health/check-update", get(h::health_check_update))
         .route("/sync/status", get(h::sync_status))
         .route("/cloud/status", get(routes::cloud::cloud_status))

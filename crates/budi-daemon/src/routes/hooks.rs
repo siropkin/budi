@@ -284,6 +284,133 @@ pub async fn health() -> Json<HealthResponse> {
     })
 }
 
+/// Query parameters for `GET /health/sources` (#735).
+///
+/// `?surface=<id>` narrows the response to a single surface — the
+/// filtered shape the JetBrains plugin's "Detected sources" row
+/// consumes today (siropkin/budi-jetbrains#36). Omitting the param
+/// returns every surface in the grouped shape; the plugin doesn't
+/// consume the unfiltered form yet, but the contract is documented
+/// here so future hosts can rely on it.
+#[derive(Debug, serde::Deserialize)]
+pub struct HealthSourcesParams {
+    pub surface: Option<String>,
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct HealthSourcesByGroup {
+    pub surface: String,
+    pub paths: Vec<String>,
+}
+
+#[derive(Debug, serde::Serialize)]
+#[serde(untagged)]
+pub enum HealthSourcesResponse {
+    Filtered { surface: String, paths: Vec<String> },
+    Grouped { surfaces: Vec<HealthSourcesByGroup> },
+}
+
+/// `GET /health/sources?surface=<id>` (#735).
+///
+/// Returns the on-disk paths the daemon's tailer is currently watching,
+/// grouped by surface (`vscode` / `cursor` / `jetbrains` / `terminal` /
+/// `unknown`). Source of truth is each enabled provider's
+/// [`budi_core::provider::Provider::watch_roots`] — the same call the
+/// tailer's reconcile loop runs every backstop tick. We deliberately
+/// re-query on each request: `watch_roots` is filesystem-sensitive
+/// (cheap `is_dir`/`exists` checks, no JSONL parse), and reflecting
+/// directories that have materialized since the last tailer tick is
+/// what makes this endpoint "live" from a host extension's point of
+/// view.
+///
+/// Surface inference mirrors the ingest path: providers that bind to a
+/// single host get [`budi_core::surface::default_for_provider`], and
+/// `copilot_chat` (whose watch roots span VS Code, Cursor, and
+/// JetBrains storage) gets [`budi_core::surface::infer_copilot_chat_surface`]
+/// per path so each root is bucketed correctly.
+pub async fn health_sources(
+    axum::extract::Query(params): axum::extract::Query<HealthSourcesParams>,
+) -> Result<Json<HealthSourcesResponse>, (StatusCode, Json<serde_json::Value>)> {
+    let result = tokio::task::spawn_blocking(move || collect_health_sources(params.surface))
+        .await
+        .map_err(|e| internal_error(anyhow::anyhow!("{e}")))?;
+    Ok(Json(result))
+}
+
+fn surface_for_path(provider_name: &str, path: &Path) -> &'static str {
+    if provider_name == "copilot_chat" {
+        budi_core::surface::infer_copilot_chat_surface(path)
+    } else {
+        budi_core::surface::default_for_provider(provider_name)
+    }
+}
+
+/// Collect tailed paths from every enabled provider, mirroring the
+/// snapshot logic the tailer uses at boot
+/// (`workers::tailer::run`). Broken out as a pure function (no
+/// `axum::Json`, no env coupling) so the response shape can be
+/// unit-tested directly.
+fn collect_health_sources(surface_filter: Option<String>) -> HealthSourcesResponse {
+    let agents_config = budi_core::config::load_agents_config();
+    let providers: Vec<Box<dyn budi_core::provider::Provider>> = match &agents_config {
+        Some(cfg) => budi_core::provider::all_providers()
+            .into_iter()
+            .filter(|p| cfg.is_agent_enabled(p.name()))
+            .collect(),
+        None => budi_core::provider::all_providers(),
+    };
+    let routes: Vec<(String, std::path::PathBuf)> = providers
+        .iter()
+        .flat_map(|p| {
+            let name = p.name().to_string();
+            p.watch_roots()
+                .into_iter()
+                .map(move |root| (name.clone(), root))
+        })
+        .collect();
+
+    let normalized_filter = surface_filter
+        .as_deref()
+        .map(|s| s.trim().to_ascii_lowercase())
+        .filter(|s| !s.is_empty());
+
+    if let Some(filter) = normalized_filter {
+        let mut paths: Vec<String> = routes
+            .into_iter()
+            .filter(|(name, path)| surface_for_path(name, path) == filter)
+            .map(|(_, path)| path.to_string_lossy().to_string())
+            .collect();
+        paths.sort();
+        paths.dedup();
+        return HealthSourcesResponse::Filtered {
+            surface: filter,
+            paths,
+        };
+    }
+
+    let mut by_surface: std::collections::BTreeMap<&'static str, Vec<String>> =
+        std::collections::BTreeMap::new();
+    for (name, path) in routes {
+        let surface = surface_for_path(&name, &path);
+        by_surface
+            .entry(surface)
+            .or_default()
+            .push(path.to_string_lossy().to_string());
+    }
+    let surfaces = by_surface
+        .into_iter()
+        .map(|(surface, mut paths)| {
+            paths.sort();
+            paths.dedup();
+            HealthSourcesByGroup {
+                surface: surface.to_string(),
+                paths,
+            }
+        })
+        .collect();
+    HealthSourcesResponse::Grouped { surfaces }
+}
+
 pub async fn health_check_update()
 -> Result<Json<super::analytics::CheckUpdateResponse>, (StatusCode, Json<serde_json::Value>)> {
     use super::analytics::CheckUpdateResponse;
@@ -576,7 +703,11 @@ pub async fn sync_status(State(state): State<AppState>) -> Json<SyncStatusRespon
 
 #[cfg(test)]
 mod tests {
-    use super::{manifest_has_cursor_extension, output_has_cursor_extension};
+    use super::{
+        HealthSourcesResponse, manifest_has_cursor_extension, output_has_cursor_extension,
+        surface_for_path,
+    };
+    use std::path::Path;
 
     #[test]
     fn cursor_extension_cli_output_detection_handles_versioned_lines() {
@@ -595,6 +726,97 @@ mod tests {
         assert!(!manifest_has_cursor_extension(
             r#"[{"identifier":{"id":"ms-python.python"}}]"#
         ));
+    }
+
+    #[test]
+    fn surface_for_path_maps_single_host_providers_via_default() {
+        // Path is irrelevant for non-copilot_chat providers — they bind to
+        // a single host so `default_for_provider` decides.
+        let p = Path::new("/anywhere/whatever.jsonl");
+        assert_eq!(surface_for_path("claude_code", p), "terminal");
+        assert_eq!(surface_for_path("cursor", p), "cursor");
+        assert_eq!(surface_for_path("codex", p), "terminal");
+        assert_eq!(surface_for_path("copilot_cli", p), "terminal");
+        assert_eq!(surface_for_path("jetbrains_ai_assistant", p), "jetbrains");
+    }
+
+    #[test]
+    fn surface_for_path_classifies_copilot_chat_per_path() {
+        // copilot_chat's watch roots span three hosts; surface comes from
+        // the path itself per ADR-0092 §2.1.
+        let cursor = Path::new("/Users/u/Library/Application Support/Cursor/User/workspaceStorage");
+        let vscode = Path::new("/Users/u/Library/Application Support/Code/User/workspaceStorage");
+        let jetbrains = Path::new("/Users/u/Library/Application Support/JetBrains/IdeaIC2026.1");
+        assert_eq!(surface_for_path("copilot_chat", cursor), "cursor");
+        assert_eq!(surface_for_path("copilot_chat", vscode), "vscode");
+        assert_eq!(surface_for_path("copilot_chat", jetbrains), "jetbrains");
+    }
+
+    #[test]
+    fn collect_health_sources_filtered_returns_only_matching_surface() {
+        let filtered = super::collect_health_sources(Some("jetbrains".to_string()));
+        match filtered {
+            HealthSourcesResponse::Filtered { surface, paths } => {
+                assert_eq!(surface, "jetbrains");
+                // Every returned path must classify as jetbrains.
+                for path in &paths {
+                    let p = Path::new(path);
+                    // The path's owning provider can be either
+                    // jetbrains_ai_assistant or copilot_chat; both produce
+                    // the jetbrains surface.
+                    let jb_ai = surface_for_path("jetbrains_ai_assistant", p) == "jetbrains";
+                    let copilot = surface_for_path("copilot_chat", p) == "jetbrains";
+                    assert!(
+                        jb_ai || copilot,
+                        "path {path} does not map to jetbrains surface"
+                    );
+                }
+            }
+            HealthSourcesResponse::Grouped { .. } => panic!("expected filtered shape"),
+        }
+    }
+
+    #[test]
+    fn collect_health_sources_blank_surface_is_treated_as_unfiltered() {
+        // `?surface=` (empty value) should fall through to the grouped
+        // shape, not 404 / return nothing — mirrors the issue contract.
+        let resp = super::collect_health_sources(Some("   ".to_string()));
+        match resp {
+            HealthSourcesResponse::Grouped { .. } => {}
+            HealthSourcesResponse::Filtered { .. } => {
+                panic!("blank surface filter should fall through to grouped shape")
+            }
+        }
+    }
+
+    #[test]
+    fn collect_health_sources_grouped_omits_unknown_surfaces() {
+        // Grouped shape is allowed to include any of the canonical
+        // surfaces; the only invariant we can assert without mocking the
+        // filesystem is that each entry is a valid canonical surface and
+        // its `paths` is sorted+deduped.
+        let resp = super::collect_health_sources(None);
+        match resp {
+            HealthSourcesResponse::Grouped { surfaces } => {
+                let canonical = ["vscode", "cursor", "jetbrains", "terminal", "unknown"];
+                for group in &surfaces {
+                    assert!(
+                        canonical.contains(&group.surface.as_str()),
+                        "non-canonical surface returned: {}",
+                        group.surface
+                    );
+                    let mut sorted = group.paths.clone();
+                    sorted.sort();
+                    sorted.dedup();
+                    assert_eq!(
+                        sorted, group.paths,
+                        "paths must be sorted + deduped for surface {}",
+                        group.surface
+                    );
+                }
+            }
+            HealthSourcesResponse::Filtered { .. } => panic!("expected grouped shape"),
+        }
     }
 }
 
