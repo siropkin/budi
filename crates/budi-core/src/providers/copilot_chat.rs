@@ -2085,6 +2085,24 @@ fn log_unknown_shape_once(path: &Path, record: &serde_json::Value) {
     );
 }
 
+// ---------------------------------------------------------------------------
+// JetBrains host (ADR-0093) — parser stub.
+//
+// Not yet wired into the dispatcher or `watch_roots()`. The fixture under
+// `fixtures/jetbrains_copilot_1_5_53_243_empty_session/` is the ground truth
+// the next ticket will implement against; see `shape.md` alongside it and
+// ADR-0093 for the storage contract.
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+#[allow(dead_code)]
+fn parse_jetbrains_copilot_chat_session_dir(_session_dir: &Path) -> Vec<ParsedMessage> {
+    unimplemented!(
+        "JetBrains-side parser pending — see ADR-0093 and the fixture under \
+         crates/budi-core/src/providers/copilot_chat/fixtures/jetbrains_copilot_1_5_53_243_empty_session/"
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2651,11 +2669,14 @@ mod tests {
     /// (budi-cursor, future budi-jetbrains) can filter to "only my
     /// host's data" without inspecting paths themselves.
     ///
-    /// JetBrains is a placeholder — copilot_chat's discovery roots only
-    /// touch VS Code-family directories today, so a JetBrains-shaped
-    /// path is exercised at the `infer_copilot_chat_surface` unit-test
-    /// layer (see `crate::surface::tests`). The matrix here pins the
-    /// three roots that actually flow through the parser.
+    /// JetBrains is excluded here because `parse_copilot_chat` never sees
+    /// a JetBrains-shaped path today: `watch_roots()` iterates VS
+    /// Code-family directories only. The JetBrains storage shape is
+    /// pinned at ADR-0093 and exercised by the fixture-presence tests
+    /// further down; the classifier-layer mapping
+    /// `infer_copilot_chat_surface` → `surface::JETBRAINS` is asserted in
+    /// `crate::surface::tests`. The matrix here pins the three roots that
+    /// actually flow through the parser.
     #[test]
     fn surface_is_cursor_when_path_under_cursor_user_root() {
         let content = r#"{"promptTokens": 1, "outputTokens": 2}"#;
@@ -2710,12 +2731,12 @@ mod tests {
         }
     }
 
-    /// JetBrains placeholder — until the budi-jetbrains parser lands,
-    /// the surface module's classifier on a JetBrains-shaped path
-    /// returns the `jetbrains` placeholder so the matrix is explicit.
-    /// copilot_chat's discovery never reaches such a path today (it
-    /// iterates VS Code-family roots only), so this assertion lives at
-    /// the classifier layer rather than going through `parse_copilot_chat`.
+    /// JetBrains classifier — the surface module returns `jetbrains` for a
+    /// JetBrains-shaped path. Discovery in `watch_roots()` does not yet
+    /// touch the JetBrains storage root (see ADR-0093 and #716), so this
+    /// assertion lives at the classifier layer rather than going through
+    /// `parse_copilot_chat`. The classifier-layer matrix is exercised in
+    /// full at `crate::surface::tests`.
     #[test]
     fn surface_jetbrains_path_classifier_returns_jetbrains_placeholder() {
         let path = Path::new(
@@ -2725,6 +2746,87 @@ mod tests {
             crate::surface::infer_copilot_chat_surface(path),
             crate::surface::JETBRAINS
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // JetBrains fixture (ADR-0093) — anchors the next parser ticket.
+    // -----------------------------------------------------------------------
+
+    fn jetbrains_empty_session_fixture_dir() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("src/providers/copilot_chat/fixtures/jetbrains_copilot_1_5_53_243_empty_session")
+    }
+
+    /// The captured JetBrains fixture is on disk and has the four files
+    /// ADR-0093 §4 names. Anchors the next parser ticket against ground
+    /// truth instead of a synthetic shape; fails loudly if the fixture
+    /// gets accidentally pruned by a future cleanup pass.
+    #[test]
+    fn jetbrains_empty_session_fixture_layout_is_intact() {
+        let dir = jetbrains_empty_session_fixture_dir();
+        assert!(
+            dir.is_dir(),
+            "fixture dir missing: {} — see ADR-0093",
+            dir.display()
+        );
+        for relpath in [
+            "00000000000.xd",
+            "xd.lck",
+            "copilot-chat-nitrite.db",
+            "blobs/version",
+        ] {
+            let f = dir.join(relpath);
+            assert!(
+                f.is_file(),
+                "fixture file missing: {} (relpath {})",
+                f.display(),
+                relpath
+            );
+        }
+
+        // The `.expected.json` and `.shape.md` companions live one level up
+        // alongside the dir and document the entity inventory.
+        let parent = dir.parent().unwrap();
+        assert!(
+            parent
+                .join("jetbrains_copilot_1_5_53_243.expected.json")
+                .is_file()
+        );
+        assert!(
+            parent
+                .join("jetbrains_copilot_1_5_53_243.shape.md")
+                .is_file()
+        );
+    }
+
+    /// The `xd.lck` header has been byte-exact redacted (see shape.md). If
+    /// a future capture accidentally drops in a non-redacted lockfile this
+    /// test catches it before the PR lands.
+    #[test]
+    fn jetbrains_empty_session_xd_lck_header_is_redacted() {
+        let dir = jetbrains_empty_session_fixture_dir();
+        let lck = std::fs::read_to_string(dir.join("xd.lck")).unwrap();
+        let first = lck.lines().next().unwrap();
+        assert!(
+            first.contains("0000@redacted.invalid"),
+            "xd.lck header looks non-redacted: {first:?}"
+        );
+        assert!(
+            !lck.contains("@Mac.attlocal.net") && !lck.contains("Ivan-Seredkin"),
+            "xd.lck still contains real host/user PII"
+        );
+    }
+
+    /// Stub: pending the JetBrains parser ticket. The fixture is the empty
+    /// session described in ADR-0093 §4 — once the parser lands, this
+    /// assertion lifts to `assert_eq!(parsed.len(), 0)` against the
+    /// `.expected.json`-derived empty `messages` array.
+    #[test]
+    #[ignore = "JetBrains parser pending — anchors against ADR-0093 fixture"]
+    fn jetbrains_empty_session_parses_to_no_messages() {
+        let dir = jetbrains_empty_session_fixture_dir();
+        let parsed = parse_jetbrains_copilot_chat_session_dir(&dir);
+        assert!(parsed.is_empty());
     }
 
     #[test]
