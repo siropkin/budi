@@ -1,0 +1,33 @@
+{
+  "fixture": "jetbrains_copilot_1_5_53_243_empty_session",
+  "plugin_version": "1.9.0-251",
+  "plugin_reported_version": "1.5.53-243",
+  "host": "jetbrains",
+  "captured_from": "iu/chat-sessions/<session-id>/",
+  "messages": [],
+  "notes": [
+    "Empty session: Xodus log holds only XdMigration bootstrap entries (refactor flags), no XdChatSession/XdClient/XdSelectedModel rows.",
+    "Nitrite store holds only $nitrite_store_info metadata, no NtSelectedModel documents.",
+    "A parser must emit zero CopilotChatMessage rows for this fixture without panicking on the empty schema.",
+    "See jetbrains_copilot_1_5_53_243.shape.md for the entity-name inventory captured from non-empty real sessions."
+  ],
+  "expected_entity_types_when_populated": {
+    "xodus": ["XdChatSession", "XdClient", "XdSelectedModel", "XdMigration"],
+    "nitrite": ["NtSelectedModel"]
+  },
+  "expected_xodus_properties_when_populated": {
+    "XdChatSession": [
+      "activeAt",
+      "createdAt",
+      "editorName",
+      "editorPluginVersion",
+      "editorVersion",
+      "modifiedAt",
+      "nameSource",
+      "projectName"
+    ],
+    "XdSelectedModel": ["modelName", "scope"],
+    "XdClient": ["(id-UUID, treat as PII)"]
+  },
+  "expected_xd_lck_header_pattern": "^Private property of Exodus: \\d+@\\S+$"
+}
