@@ -337,7 +337,12 @@ impl Enricher for IdentityEnricher {
 }
 
 // ---------------------------------------------------------------------------
-// CostEnricher — calculates cost_cents from tokens × pricing
+// CostEnricher — calculates cost_cents from tokens × pricing.
+//
+// ADR-0094 §1: the in-memory `msg.cost_cents` is the LiteLLM-priced number
+// (the `_ingested` value). At ingest the writer binds it into both
+// `cost_cents_ingested` and `cost_cents_effective` so `_effective = _ingested`
+// until the team-pricing worker (#731) rewrites `_effective`.
 // ---------------------------------------------------------------------------
 
 pub struct CostEnricher;

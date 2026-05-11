@@ -510,12 +510,12 @@ pub fn session_list_with_filters(
                     MIN(m.timestamp) as started_at,
                     MAX(m.timestamp) as ended_at,
                     COUNT(*) as msg_count,
-                    COALESCE(SUM(m.cost_cents), 0.0) as cost,
+                    COALESCE(SUM(m.cost_cents_effective), 0.0) as cost,
                     (SELECT GROUP_CONCAT(sub.model, ',') FROM (
                          SELECT m2.model FROM messages m2
                          WHERE m2.session_id = m.session_id AND m2.role = 'assistant'
                            AND m2.model IS NOT NULL AND m2.model != '' AND SUBSTR(m2.model, 1, 1) != '<'
-                         GROUP BY m2.model ORDER BY SUM(m2.cost_cents) DESC
+                         GROUP BY m2.model ORDER BY SUM(m2.cost_cents_effective) DESC
                      ) sub) as models_csv,
                     COALESCE(MAX(m.provider), 'claude_code') as provider,
                     COALESCE(
@@ -528,7 +528,7 @@ pub fn session_list_with_filters(
                               AND m2.repo_id != ''
                               AND m2.repo_id != 'unknown'
                             GROUP BY m2.repo_id
-                            ORDER BY SUM(m2.cost_cents) DESC, COUNT(*) DESC, m2.repo_id ASC
+                            ORDER BY SUM(m2.cost_cents_effective) DESC, COUNT(*) DESC, m2.repo_id ASC
                             LIMIT 1
                         ),
                         MAX(s.repo_id)
@@ -542,7 +542,7 @@ pub fn session_list_with_filters(
                            AND m2.repo_id != ''
                            AND m2.repo_id != 'unknown'
                          GROUP BY m2.repo_id
-                         ORDER BY SUM(m2.cost_cents) DESC, COUNT(*) DESC, m2.repo_id ASC
+                         ORDER BY SUM(m2.cost_cents_effective) DESC, COUNT(*) DESC, m2.repo_id ASC
                      ) sub) as repo_ids_csv,
                     COALESCE(
                         (
@@ -553,7 +553,7 @@ pub fn session_list_with_filters(
                                         WHEN m2.git_branch LIKE 'refs/heads/%' THEN SUBSTR(m2.git_branch, 12)
                                         ELSE m2.git_branch
                                     END as branch_value,
-                                    SUM(m2.cost_cents) as branch_cost,
+                                    SUM(m2.cost_cents_effective) as branch_cost,
                                     COUNT(*) as branch_count
                                 FROM messages m2
                                 WHERE m2.session_id = m.session_id
@@ -579,7 +579,7 @@ pub fn session_list_with_filters(
                            AND m2.git_branch IS NOT NULL
                            AND m2.git_branch != ''
                          GROUP BY branch_value
-                         ORDER BY SUM(m2.cost_cents) DESC, COUNT(*) DESC, branch_value ASC
+                         ORDER BY SUM(m2.cost_cents_effective) DESC, COUNT(*) DESC, branch_value ASC
                      ) sub) as git_branches_csv,
                     COALESCE(SUM(m.input_tokens), 0) as inp,
                     COALESCE(SUM(m.output_tokens), 0) as outp,
@@ -703,12 +703,12 @@ pub fn session_detail(conn: &Connection, session_id: &str) -> Result<Option<Sess
                         END
                     ) as duration_ms,
                     COUNT(m.id) as msg_count,
-                    COALESCE(SUM(m.cost_cents), 0.0) as cost,
+                    COALESCE(SUM(m.cost_cents_effective), 0.0) as cost,
                     (SELECT GROUP_CONCAT(sub.model, ',') FROM (
                          SELECT m2.model FROM messages m2
                          WHERE m2.session_id = sid.session_id AND m2.role = 'assistant'
                            AND m2.model IS NOT NULL AND m2.model != '' AND SUBSTR(m2.model, 1, 1) != '<'
-                         GROUP BY m2.model ORDER BY SUM(m2.cost_cents) DESC
+                         GROUP BY m2.model ORDER BY SUM(m2.cost_cents_effective) DESC
                      ) sub) as models_csv,
                     COALESCE(MAX(m.provider), MAX(s.provider), 'claude_code') as provider,
                     COALESCE(
@@ -721,7 +721,7 @@ pub fn session_detail(conn: &Connection, session_id: &str) -> Result<Option<Sess
                               AND m2.repo_id != ''
                               AND m2.repo_id != 'unknown'
                             GROUP BY m2.repo_id
-                            ORDER BY SUM(m2.cost_cents) DESC, COUNT(*) DESC, m2.repo_id ASC
+                            ORDER BY SUM(m2.cost_cents_effective) DESC, COUNT(*) DESC, m2.repo_id ASC
                             LIMIT 1
                         ),
                         MAX(s.repo_id)
@@ -735,7 +735,7 @@ pub fn session_detail(conn: &Connection, session_id: &str) -> Result<Option<Sess
                            AND m2.repo_id != ''
                            AND m2.repo_id != 'unknown'
                          GROUP BY m2.repo_id
-                         ORDER BY SUM(m2.cost_cents) DESC, COUNT(*) DESC, m2.repo_id ASC
+                         ORDER BY SUM(m2.cost_cents_effective) DESC, COUNT(*) DESC, m2.repo_id ASC
                      ) sub) as repo_ids_csv,
                     COALESCE(
                         (
@@ -746,7 +746,7 @@ pub fn session_detail(conn: &Connection, session_id: &str) -> Result<Option<Sess
                                         WHEN m2.git_branch LIKE 'refs/heads/%' THEN SUBSTR(m2.git_branch, 12)
                                         ELSE m2.git_branch
                                     END as branch_value,
-                                    SUM(m2.cost_cents) as branch_cost,
+                                    SUM(m2.cost_cents_effective) as branch_cost,
                                     COUNT(*) as branch_count
                                 FROM messages m2
                                 WHERE m2.session_id = sid.session_id
@@ -772,7 +772,7 @@ pub fn session_detail(conn: &Connection, session_id: &str) -> Result<Option<Sess
                            AND m2.git_branch IS NOT NULL
                            AND m2.git_branch != ''
                          GROUP BY branch_value
-                         ORDER BY SUM(m2.cost_cents) DESC, COUNT(*) DESC, branch_value ASC
+                         ORDER BY SUM(m2.cost_cents_effective) DESC, COUNT(*) DESC, branch_value ASC
                      ) sub) as git_branches_csv,
                     COALESCE(SUM(m.input_tokens), 0) as inp,
                     COALESCE(SUM(m.output_tokens), 0) as outp,
@@ -1055,7 +1055,7 @@ pub fn session_messages_with_roles(
                 repo_id,
                 input_tokens, output_tokens,
                 cache_creation_tokens, cache_read_tokens,
-                COALESCE(cost_cents, 0.0),
+                COALESCE(cost_cents_effective, 0.0),
                 COALESCE(cost_confidence, 'estimated'),
                 git_branch,
                 request_id,
@@ -1132,7 +1132,7 @@ pub fn session_message_list(
             }
         }
         "tokens" => format!("(m.input_tokens + m.output_tokens) {dir}"),
-        "cost" => format!("COALESCE(m.cost_cents, 0.0) {dir}"),
+        "cost" => format!("COALESCE(m.cost_cents_effective, 0.0) {dir}"),
         "repo_id" => {
             if p.sort_asc {
                 format!("(m.repo_id IS NULL OR m.repo_id = '') ASC, m.repo_id {dir}")
@@ -1164,7 +1164,7 @@ pub fn session_message_list(
                 m.repo_id,
                 m.input_tokens, m.output_tokens,
                 m.cache_creation_tokens, m.cache_read_tokens,
-                COALESCE(m.cost_cents, 0.0),
+                COALESCE(m.cost_cents_effective, 0.0),
                 COALESCE(m.cost_confidence, 'estimated'),
                 m.git_branch,
                 m.request_id,
@@ -1233,7 +1233,7 @@ pub fn session_message_curve(
                     COALESCE(input_tokens, 0) as input_tokens,
                     COALESCE(output_tokens, 0) as output_tokens,
                     (COALESCE(cache_creation_tokens, 0) + COALESCE(cache_read_tokens, 0)) as cache_tokens,
-                    COALESCE(cost_cents, 0.0) as cost_cents
+                    COALESCE(cost_cents_effective, 0.0) as cost_cents
              FROM messages
              WHERE session_id = ?1 AND role = 'assistant'
          )
@@ -1274,7 +1274,7 @@ pub fn message_detail(conn: &Connection, message_id: &str) -> Result<Option<Mess
                 repo_id,
                 input_tokens, output_tokens,
                 cache_creation_tokens, cache_read_tokens,
-                COALESCE(cost_cents, 0.0),
+                COALESCE(cost_cents_effective, 0.0),
                 COALESCE(cost_confidence, 'estimated'),
                 git_branch,
                 request_id,

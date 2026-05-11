@@ -937,11 +937,11 @@ mod tests {
         crate::migration::migrate(&conn).expect("migrate schema");
         conn.execute(
             "INSERT INTO messages
-             (id, role, timestamp, model, provider, input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens, cost_cents, cost_confidence)
+             (id, role, timestamp, model, provider, input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens, cost_cents_ingested, cost_cents_effective, cost_confidence)
              VALUES
-             ('m2', 'assistant', '2026-04-10T10:00:00Z', 'gpt-4o', 'openai', 10, 5, 0, 0, 1.0, 'proxy_estimated'),
-             ('m1', 'assistant', '2026-04-10T09:00:00Z', 'gpt-4o', 'openai', 10, 5, 0, 0, 1.0, 'proxy_estimated'),
-             ('m3', 'assistant', '2026-04-10T08:00:00Z', 'claude-sonnet-4-6', 'claude_code', 10, 5, 0, 0, 1.0, 'estimated')",
+             ('m2', 'assistant', '2026-04-10T10:00:00Z', 'gpt-4o', 'openai', 10, 5, 0, 0, 1.0, 1.0, 'proxy_estimated'),
+             ('m1', 'assistant', '2026-04-10T09:00:00Z', 'gpt-4o', 'openai', 10, 5, 0, 0, 1.0, 1.0, 'proxy_estimated'),
+             ('m3', 'assistant', '2026-04-10T08:00:00Z', 'claude-sonnet-4-6', 'claude_code', 10, 5, 0, 0, 1.0, 1.0, 'estimated')",
             [],
         )
         .expect("insert messages");
@@ -966,10 +966,10 @@ mod tests {
             "INSERT INTO messages
              (id, session_id, role, timestamp, model, provider,
               input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
-              cost_cents, cost_confidence)
+              cost_cents_ingested, cost_cents_effective, cost_confidence)
              VALUES
              ('a1', 's1', 'assistant', datetime('now'), 'claude-opus-4-6', 'claude_code',
-              100, 50, 0, 0, 5.0, 'exact')",
+              100, 50, 0, 0, 5.0, 5.0, 'exact')",
             [],
         )
         .expect("insert assistant message");
@@ -1011,10 +1011,10 @@ mod tests {
             "INSERT INTO messages
              (id, session_id, role, timestamp, model, provider,
               input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
-              cost_cents, cost_confidence)
+              cost_cents_ingested, cost_cents_effective, cost_confidence)
              VALUES
              ('a1', 's1', 'assistant', datetime('now'), 'claude-opus-4-6', 'claude_code',
-              100, 50, 0, 0, 5.0, 'exact')",
+              100, 50, 0, 0, 5.0, 5.0, 'exact')",
             [],
         )
         .expect("insert assistant message");
@@ -1053,10 +1053,10 @@ mod tests {
             "INSERT INTO messages
              (id, session_id, role, timestamp, model, provider,
               input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
-              cost_cents, cost_confidence)
+              cost_cents_ingested, cost_cents_effective, cost_confidence)
              VALUES
              ('a1', 's1', 'assistant', datetime('now'), 'claude-opus-4-6', 'claude_code',
-              100, 50, 0, 0, 5.0, 'exact')",
+              100, 50, 0, 0, 5.0, 5.0, 'exact')",
             [],
         )
         .expect("insert assistant message");

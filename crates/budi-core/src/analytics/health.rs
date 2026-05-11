@@ -313,7 +313,7 @@ pub fn session_health_batch(
     let sql = format!(
         "SELECT session_id, input_tokens, output_tokens,
                 cache_creation_tokens, cache_read_tokens,
-                COALESCE(cost_cents, 0.0), model, timestamp
+                COALESCE(cost_cents_effective, 0.0), model, timestamp
          FROM messages
          WHERE session_id IN ({in_clause}) AND role = 'assistant'
          ORDER BY session_id, timestamp ASC"
@@ -1050,7 +1050,7 @@ fn compute_user_prompt_count(conn: &Connection, sid: &str, provider: &str) -> Re
                  WHERE session_id = ?1
                    AND role = 'assistant'
                    AND request_id IS NOT NULL
-                   AND COALESCE(cost_cents, 0.0) > 0.0",
+                   AND COALESCE(cost_cents_effective, 0.0) > 0.0",
                 params![sid],
                 |r| r.get(0),
             )

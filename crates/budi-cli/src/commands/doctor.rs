@@ -1974,10 +1974,11 @@ mod tests {
             );
             INSERT INTO messages (
                 id, role, timestamp, model, provider, input_tokens, output_tokens,
-                cache_creation_tokens, cache_read_tokens, cost_cents, cost_confidence
+                cache_creation_tokens, cache_read_tokens,
+                cost_cents_ingested, cost_cents_effective, cost_confidence
             ) VALUES (
                 'legacy-proxy-row', 'assistant', '2026-04-19T17:00:00Z', 'gpt-4o',
-                'openai', 1, 1, 0, 0, 0.5, 'proxy_estimated'
+                'openai', 1, 1, 0, 0, 0.5, 0.5, 'proxy_estimated'
             );
             ",
         )

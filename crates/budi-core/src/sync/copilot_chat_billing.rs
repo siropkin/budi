@@ -426,7 +426,7 @@ fn apply_buckets(conn: &mut Connection, rows: &[BillingRow]) -> Result<usize> {
         // cleanly without a divide-by-zero.
         let existing_sum_cents: Option<f64> = tx
             .query_row(
-                "SELECT SUM(COALESCE(cost_cents, 0.0))
+                "SELECT SUM(COALESCE(cost_cents_effective, 0.0))
                  FROM messages
                  WHERE provider = ?1
                    AND model = ?2
@@ -444,9 +444,15 @@ fn apply_buckets(conn: &mut Connection, rows: &[BillingRow]) -> Result<usize> {
         }
 
         let scale = row.amount_in_cents / existing_sum_cents;
+        // ADR-0094 §1: GitHub Billing API gives us the authoritative
+        // ingest-time cost — what the user was actually billed. Scale both
+        // `_ingested` (immutable per ADR-0091 §5 Rule D, but the billing
+        // truths-up was already an exception to the substring-dispatch
+        // contract) and `_effective` (read surface).
         let updated = tx.execute(
             "UPDATE messages
-                SET cost_cents = COALESCE(cost_cents, 0.0) * ?1,
+                SET cost_cents_ingested = COALESCE(cost_cents_ingested, 0.0) * ?1,
+                    cost_cents_effective = COALESCE(cost_cents_effective, 0.0) * ?1,
                     cost_confidence = 'exact',
                     pricing_source = ?2
               WHERE provider = ?3
@@ -533,10 +539,10 @@ mod tests {
     ) {
         conn.execute(
             "INSERT INTO messages
-                (id, role, timestamp, model, provider, cost_cents,
+                (id, role, timestamp, model, provider, cost_cents_ingested, cost_cents_effective,
                  cost_confidence, pricing_source,
                  input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens)
-             VALUES (?1, 'assistant', ?2, ?3, 'copilot_chat', ?4,
+             VALUES (?1, 'assistant', ?2, ?3, 'copilot_chat', ?4, ?4,
                      'estimated', 'manifest:v1', 100, 10, 0, 0)",
             params![id, ts, model, cost_cents],
         )
@@ -698,15 +704,14 @@ mod tests {
         };
         apply_response(&mut conn, &response).unwrap();
 
-        let load =
-            |id: &str| -> (f64, String, String) {
-                conn.query_row(
-                "SELECT cost_cents, cost_confidence, pricing_source FROM messages WHERE id = ?1",
+        let load = |id: &str| -> (f64, String, String) {
+            conn.query_row(
+                "SELECT cost_cents_effective, cost_confidence, pricing_source FROM messages WHERE id = ?1",
                 params![id],
                 |r| Ok((r.get::<_, f64>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?)),
             )
             .unwrap()
-            };
+        };
 
         let (c1, conf1, src1) = load("m-1");
         let (c2, conf2, src2) = load("m-2");
