@@ -1,7 +1,7 @@
 # ADR-0086: Extraction Boundaries for budi-cursor and budi-cloud
 
 - **Date**: 2026-04-10
-- **Status**: Implemented
+- **Status**: Accepted
 - **Issue**: [#86](https://github.com/siropkin/budi/issues/86)
 - **Milestone**: 8.0.0
 - **Depends on**: [ADR-0081](./0081-product-contract-and-deprecation-policy.md), [ADR-0082](./0082-proxy-compatibility-matrix-and-gateway-contract.md), [ADR-0083](./0083-cloud-ingest-identity-and-privacy-contract.md)

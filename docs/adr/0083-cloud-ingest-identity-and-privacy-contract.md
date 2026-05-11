@@ -1,7 +1,7 @@
 # ADR-0083: Cloud Ingest, Identity, and Privacy Contract
 
 - **Date**: 2026-04-10
-- **Status**: Implemented (amended — see banner)
+- **Status**: Accepted (amended by [ADR-0091](./0091-model-pricing-manifest-source-of-truth.md) — see banner)
 - **Issue**: [#83](https://github.com/siropkin/budi/issues/83)
 - **Milestone**: 8.0.0
 - **Depends on**: [ADR-0082](./0082-proxy-compatibility-matrix-and-gateway-contract.md)
