@@ -54,7 +54,7 @@ Everything stays on your machine by default. Optional cloud sync pushes aggregat
 | **[budi](https://github.com/siropkin/budi)** ← you are here | Core Rust daemon and CLI |
 | **[budi-cloud](https://github.com/siropkin/budi-cloud)** | Team dashboard and ingest API at [app.getbudi.dev](https://app.getbudi.dev) |
 | **[budi-cursor](https://github.com/siropkin/budi-cursor)** | VS Code / Cursor status bar extension |
-| **[budi-jetbrains](https://github.com/siropkin/budi-jetbrains)** | JetBrains IDE status bar plugin (Kotlin) |
+| **[budi-jetbrains](https://github.com/siropkin/budi-jetbrains)** | JetBrains IDE status bar plugin (Kotlin) — [Marketplace listing](https://plugins.jetbrains.com/plugin/31662-budi) |
 | **[homebrew-budi](https://github.com/siropkin/homebrew-budi)** | Homebrew tap for `brew install siropkin/budi/budi` |
 | **[getbudi.dev](https://getbudi.dev)** | Website and documentation |
 
@@ -66,7 +66,8 @@ Everything stays on your machine by default. Optional cloud sync pushes aggregat
 | **Codex CLI** | Supported | Live transcript tailing |
 | **Cursor** | Supported | Live tailing + Usage API reconciliation |
 | **Copilot CLI** | Supported | Live transcript tailing |
-| **Copilot Chat (VS Code)** | Supported | Live JSON/JSONL tailing + GitHub Billing API reconciliation ([ADR-0092](docs/adr/0092-copilot-chat-data-contract.md)) |
+| **Copilot Chat (VS Code / Cursor)** | Supported | Live JSON/JSONL tailing + GitHub Billing API reconciliation ([ADR-0092](docs/adr/0092-copilot-chat-data-contract.md)) |
+| **Copilot Chat (JetBrains)** | Partial (statusline only) | Surface classified as `jetbrains`; storage tailer pending fixture capture ([#716](https://github.com/siropkin/budi/issues/716)) |
 | **Gemini CLI** | Deferred | Tracked in [#294](https://github.com/siropkin/budi/issues/294) |
 
 All agents also support one-time historical import via `budi db import`.
