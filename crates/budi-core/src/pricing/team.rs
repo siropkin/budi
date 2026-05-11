@@ -196,6 +196,139 @@ pub struct RecomputeSummary {
     pub after_total_cents: f64,
 }
 
+/// One audit row from `recalculation_runs_local`. Same field shape as
+/// `RecomputeSummary` plus the `started_at`/`finished_at` wall-clock
+/// timestamps the daemon stamps at insert time.
+#[derive(Debug, Clone, Serialize)]
+pub struct RecomputeAuditRow {
+    pub started_at: String,
+    pub finished_at: String,
+    pub list_version: u32,
+    pub rows_processed: i64,
+    pub rows_changed: i64,
+    pub before_total_cents: f64,
+    pub after_total_cents: f64,
+}
+
+/// Daemon-side snapshot of the team-pricing layer surfaced by
+/// `GET /pricing/status` (under `team_pricing`) and rendered by
+/// `budi pricing status` (#732).
+///
+/// `active = false` is the no-cloud-config and no-active-list cases —
+/// every other field is `None`. The CLI uses that single bit to decide
+/// whether to print the section at all.
+#[derive(Debug, Clone, Serialize)]
+pub struct TeamPricingStatus {
+    pub active: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub org_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub list_version: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub effective_from: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub effective_to: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub defaults: Option<TeamPricingDefaults>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_recompute: Option<RecomputeAuditRow>,
+    /// Sum of `cost_cents_ingested - cost_cents_effective` over the last
+    /// 30 days (positive numbers mean the org saved money vs list prices).
+    /// `None` when no recompute has ever run.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub savings_last_30d_cents: Option<f64>,
+}
+
+impl TeamPricingStatus {
+    pub fn inactive() -> Self {
+        Self {
+            active: false,
+            org_id: None,
+            list_version: None,
+            effective_from: None,
+            effective_to: None,
+            defaults: None,
+            last_recompute: None,
+            savings_last_30d_cents: None,
+        }
+    }
+}
+
+/// Build the team-pricing status payload from the in-memory snapshot +
+/// the local audit table. `conn` is a read-only handle on the analytics
+/// DB; this function never writes.
+///
+/// Returns `inactive()` when no list is installed, mirroring the spec's
+/// "Team pricing (cloud): not active" rendering.
+pub fn build_status(conn: &Connection) -> Result<TeamPricingStatus> {
+    let snap = snapshot();
+    let last = latest_audit_row(conn)?;
+    let savings = savings_last_30d_cents(conn)?;
+
+    let Some(pricing) = snap else {
+        // No active list — but if a previous run recorded an audit row,
+        // surface its savings figure so the operator still sees the
+        // historical delta.
+        return Ok(TeamPricingStatus {
+            active: false,
+            last_recompute: last,
+            savings_last_30d_cents: savings,
+            ..TeamPricingStatus::inactive()
+        });
+    };
+
+    Ok(TeamPricingStatus {
+        active: true,
+        org_id: Some(pricing.org_id.clone()),
+        list_version: Some(pricing.list_version),
+        effective_from: Some(pricing.effective_from.clone()),
+        effective_to: pricing.effective_to.clone(),
+        defaults: Some(pricing.defaults.clone()),
+        last_recompute: last,
+        savings_last_30d_cents: savings,
+    })
+}
+
+fn latest_audit_row(conn: &Connection) -> Result<Option<RecomputeAuditRow>> {
+    let mut stmt = conn.prepare(
+        "SELECT started_at, finished_at, list_version,
+                rows_processed, rows_changed,
+                before_total_cents, after_total_cents
+           FROM recalculation_runs_local
+          ORDER BY id DESC
+          LIMIT 1",
+    )?;
+    let mut rows = stmt.query([])?;
+    if let Some(r) = rows.next()? {
+        Ok(Some(RecomputeAuditRow {
+            started_at: r.get(0)?,
+            finished_at: r.get(1)?,
+            list_version: {
+                let v: i64 = r.get(2)?;
+                v.max(0) as u32
+            },
+            rows_processed: r.get(3)?,
+            rows_changed: r.get(4)?,
+            before_total_cents: r.get(5)?,
+            after_total_cents: r.get(6)?,
+        }))
+    } else {
+        Ok(None)
+    }
+}
+
+fn savings_last_30d_cents(conn: &Connection) -> Result<Option<f64>> {
+    let cutoff = (chrono::Utc::now() - chrono::Duration::days(30)).to_rfc3339();
+    let savings: f64 = conn.query_row(
+        "SELECT COALESCE(SUM(cost_cents_ingested - cost_cents_effective), 0.0)
+           FROM messages
+          WHERE timestamp >= ?1",
+        rusqlite::params![cutoff],
+        |r| r.get(0),
+    )?;
+    Ok(Some(savings))
+}
+
 /// Recompute `messages.cost_cents_effective` from `pricing`. Passing `None`
 /// resets `_effective := _ingested` everywhere — used when the cloud
 /// returns 404 (no active list) after a previous tick had installed one.
@@ -488,6 +621,62 @@ mod tests {
             .unwrap();
         // 1M input × $2.91/MTok + 1M output × $14.55/MTok = $17.46 = 1746 cents.
         assert!((eff - 1746.0).abs() < 1e-6, "got {eff}");
+    }
+
+    #[test]
+    fn build_status_returns_inactive_when_no_list_installed() {
+        install(None);
+        let conn = crate::analytics::open_db_with_migration(std::path::Path::new(":memory:"))
+            .expect("open db");
+        let status = build_status(&conn).expect("build_status");
+        assert!(!status.active);
+        assert!(status.org_id.is_none());
+        assert!(status.list_version.is_none());
+        assert!(status.last_recompute.is_none());
+        // No messages → savings is 0, not None.
+        assert_eq!(status.savings_last_30d_cents, Some(0.0));
+    }
+
+    #[test]
+    fn build_status_surfaces_active_list_and_latest_audit_row() {
+        let conn = crate::analytics::open_db_with_migration(std::path::Path::new(":memory:"))
+            .expect("open db");
+        // Seed a message + an audit row.
+        let recent_ts = chrono::Utc::now().to_rfc3339();
+        conn.execute(
+            "INSERT INTO messages (id, role, timestamp, model, provider,
+                                   input_tokens, output_tokens,
+                                   cost_cents_ingested, cost_cents_effective)
+             VALUES ('m1','assistant',?1,'claude-sonnet-4-5-x','claude_code',
+                     0, 0, 500.0, 425.0)",
+            rusqlite::params![recent_ts],
+        )
+        .expect("seed message");
+        conn.execute(
+            "INSERT INTO recalculation_runs_local
+                (started_at, finished_at, list_version,
+                 rows_processed, rows_changed,
+                 before_total_cents, after_total_cents)
+             VALUES ('2026-05-11T11:14:02Z','2026-05-11T11:14:02Z',3,
+                     12000, 2103, 481520.0, 352777.0)",
+            [],
+        )
+        .expect("seed audit row");
+
+        install(Some(sample_pricing()));
+        let status = build_status(&conn).expect("build_status");
+        install(None);
+
+        assert!(status.active);
+        assert_eq!(status.org_id.as_deref(), Some("org_test"));
+        assert_eq!(status.list_version, Some(3));
+        assert_eq!(status.effective_from.as_deref(), Some("2026-04-01"));
+        let audit = status.last_recompute.expect("audit row present");
+        assert_eq!(audit.list_version, 3);
+        assert_eq!(audit.rows_changed, 2103);
+        // savings = 500 - 425 = 75 cents.
+        let savings = status.savings_last_30d_cents.expect("savings present");
+        assert!((savings - 75.0).abs() < 1e-6, "got {savings}");
     }
 
     #[test]

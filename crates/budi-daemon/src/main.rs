@@ -71,6 +71,7 @@ fn build_router(app_state: AppState, host_allowlist: routes::HostAllowlist) -> R
         .route("/cloud/sync", post(c::cloud_sync))
         .route("/cloud/reset", post(c::cloud_reset))
         .route("/pricing/refresh", post(p::pricing_refresh))
+        .route("/pricing/recompute", post(p::pricing_recompute))
         .route("/admin/providers", get(a::analytics_registered_providers))
         .route("/admin/schema", get(a::analytics_schema_version))
         .route("/admin/check", get(a::analytics_check))
