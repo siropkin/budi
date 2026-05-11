@@ -80,13 +80,16 @@ macOS and Linux use the Unix daemon startup path (`lsof`, `ps`, `kill`) to repla
 
 ### Product boundaries
 
-Three independent repos (extraction completed per [ADR-0086](docs/adr/0086-extraction-boundaries.md)). 8.x as a whole is organized as one local product with optional cloud visibility, not two peer products — see [ADR-0088](docs/adr/0088-8x-local-developer-first-product-contract.md) for the local-developer-first product contract governing 8.1 scope, classification principles, statusline contract, and 8.2 / 9.0 deferrals.
+Six independent repos in the budi ecosystem (core extraction completed per [ADR-0086](docs/adr/0086-extraction-boundaries.md)). 8.x as a whole is organized as one local product with optional cloud visibility, not two peer products — see [ADR-0088](docs/adr/0088-8x-local-developer-first-product-contract.md) for the local-developer-first product contract governing 8.1 scope, classification principles, statusline contract, and 8.2 / 9.0 deferrals.
 
 | Product | Repo | Role |
 |---------|------|------|
-| **budi-core** | [`siropkin/budi`](https://github.com/siropkin/budi) | Rust workspace: daemon, CLI, core business logic |
-| **budi-cursor** | [`siropkin/budi-cursor`](https://github.com/siropkin/budi-cursor) | VS Code/Cursor extension. Communicates with daemon over HTTP and `budi` CLI |
-| **budi-cloud** | [`siropkin/budi-cloud`](https://github.com/siropkin/budi-cloud) | Cloud dashboard + ingest API (Next.js + Supabase) |
+| **budi-core** | [`siropkin/budi`](https://github.com/siropkin/budi) | Rust workspace: daemon, CLI, transcript tailer, core business logic |
+| **budi-cursor** | [`siropkin/budi-cursor`](https://github.com/siropkin/budi-cursor) | VS Code / Cursor status-bar extension |
+| **budi-jetbrains** | [`siropkin/budi-jetbrains`](https://github.com/siropkin/budi-jetbrains) | JetBrains IDE status-bar plugin (Kotlin) |
+| **budi-cloud** | [`siropkin/budi-cloud`](https://github.com/siropkin/budi-cloud) | Cloud dashboard + ingest API at `app.getbudi.dev` |
+| **homebrew-budi** | [`siropkin/homebrew-budi`](https://github.com/siropkin/homebrew-budi) | Homebrew tap for `brew install siropkin/budi/budi` |
+| **getbudi.dev** | [`siropkin/getbudi.dev`](https://github.com/siropkin/getbudi.dev) | Marketing site (Astro) at `getbudi.dev` |
 
 ### Crates
 
