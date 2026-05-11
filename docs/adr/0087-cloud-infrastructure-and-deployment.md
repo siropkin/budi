@@ -1,7 +1,7 @@
 # ADR-0087: Cloud Infrastructure, Deployment, and Domain Strategy
 
 - **Date**: 2026-04-11
-- **Status**: Implemented
+- **Status**: Accepted
 - **Milestone**: 8.0.0
 - **Depends on**: [ADR-0083](./0083-cloud-ingest-identity-and-privacy-contract.md), [ADR-0086](./0086-extraction-boundaries.md)
 
