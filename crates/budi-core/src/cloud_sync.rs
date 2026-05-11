@@ -50,6 +50,13 @@ pub struct DailyRollupRecord {
     pub model: String,
     pub repo_id: String,
     pub git_branch: String,
+    /// Surface dimension (#701, #723) — `vscode`, `cursor`, `jetbrains`,
+    /// `terminal`, or `unknown`. The local `message_rollups_daily` PK
+    /// already includes `surface`, so this is a projection-only change:
+    /// per-(role, provider, model, repo, branch, surface) rows already
+    /// exist correctly. Always serialized; the local column is
+    /// `NOT NULL DEFAULT 'unknown'`.
+    pub surface: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ticket: Option<String>,
     /// Provenance marker matching the canonical pipeline extractor
@@ -89,6 +96,12 @@ pub struct SessionSummaryRecord {
     pub repo_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub git_branch: Option<String>,
+    /// Surface dimension (#701, #723). Matches the `sessions.surface`
+    /// column which is `NOT NULL DEFAULT 'unknown'`, so the field is
+    /// always present on the wire — the cloud's `normalizeSurface`
+    /// already coalesces missing → `'unknown'`, but the daemon never
+    /// relies on that.
+    pub surface: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ticket: Option<String>,
     /// Provenance marker matching the canonical pipeline extractor
@@ -318,7 +331,7 @@ pub fn fetch_daily_rollups(
     // Build query based on watermark presence
     let rows: Vec<DailyRollupRecord> = if let Some(wm) = watermark {
         let mut stmt = conn.prepare(
-            "SELECT bucket_day, role, provider, model, repo_id, git_branch,
+            "SELECT bucket_day, role, provider, model, repo_id, git_branch, surface,
                     message_count, input_tokens, output_tokens,
                     cache_creation_tokens, cache_read_tokens,
                     cost_cents_effective, cost_cents_ingested
@@ -326,58 +339,22 @@ pub fn fetch_daily_rollups(
              WHERE bucket_day > ?1 OR bucket_day = ?2
              ORDER BY bucket_day",
         )?;
-        stmt.query_map(params![wm, today], |row| {
-            Ok(DailyRollupRecord {
-                bucket_day: row.get(0)?,
-                role: row.get(1)?,
-                provider: row.get(2)?,
-                model: row.get(3)?,
-                repo_id: row.get(4)?,
-                git_branch: row.get(5)?,
-                ticket: None,
-                ticket_source: None,
-                message_count: row.get(6)?,
-                input_tokens: row.get(7)?,
-                output_tokens: row.get(8)?,
-                cache_creation_tokens: row.get(9)?,
-                cache_read_tokens: row.get(10)?,
-                cost_cents_effective: row.get(11)?,
-                cost_cents_ingested: row.get(12)?,
-            })
-        })?
-        .filter_map(|r| r.ok())
-        .collect()
+        stmt.query_map(params![wm, today], map_rollup_row)?
+            .filter_map(|r| r.ok())
+            .collect()
     } else {
         // No watermark: send everything
         let mut stmt = conn.prepare(
-            "SELECT bucket_day, role, provider, model, repo_id, git_branch,
+            "SELECT bucket_day, role, provider, model, repo_id, git_branch, surface,
                     message_count, input_tokens, output_tokens,
                     cache_creation_tokens, cache_read_tokens,
                     cost_cents_effective, cost_cents_ingested
              FROM message_rollups_daily
              ORDER BY bucket_day",
         )?;
-        stmt.query_map([], |row| {
-            Ok(DailyRollupRecord {
-                bucket_day: row.get(0)?,
-                role: row.get(1)?,
-                provider: row.get(2)?,
-                model: row.get(3)?,
-                repo_id: row.get(4)?,
-                git_branch: row.get(5)?,
-                ticket: None,
-                ticket_source: None,
-                message_count: row.get(6)?,
-                input_tokens: row.get(7)?,
-                output_tokens: row.get(8)?,
-                cache_creation_tokens: row.get(9)?,
-                cache_read_tokens: row.get(10)?,
-                cost_cents_effective: row.get(11)?,
-                cost_cents_ingested: row.get(12)?,
-            })
-        })?
-        .filter_map(|r| r.ok())
-        .collect()
+        stmt.query_map([], map_rollup_row)?
+            .filter_map(|r| r.ok())
+            .collect()
     };
 
     for mut record in rows {
@@ -453,7 +430,7 @@ pub fn fetch_session_summaries(
     // fall through to `primary_model = NULL`.
     let query = if since.is_some() {
         "SELECT s.id, s.provider, s.started_at, s.ended_at, s.duration_ms,
-                s.repo_id, s.git_branch,
+                s.repo_id, s.git_branch, s.surface,
                 COALESCE(m.msg_count, 0),
                 COALESCE(m.total_input, 0),
                 COALESCE(m.total_output, 0),
@@ -492,7 +469,7 @@ pub fn fetch_session_summaries(
          ORDER BY s.started_at"
     } else {
         "SELECT s.id, s.provider, s.started_at, s.ended_at, s.duration_ms,
-                s.repo_id, s.git_branch,
+                s.repo_id, s.git_branch, s.surface,
                 COALESCE(m.msg_count, 0),
                 COALESCE(m.total_input, 0),
                 COALESCE(m.total_output, 0),
@@ -549,6 +526,27 @@ pub fn fetch_session_summaries(
     Ok(summaries)
 }
 
+fn map_rollup_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<DailyRollupRecord> {
+    Ok(DailyRollupRecord {
+        bucket_day: row.get(0)?,
+        role: row.get(1)?,
+        provider: row.get(2)?,
+        model: row.get(3)?,
+        repo_id: row.get(4)?,
+        git_branch: row.get(5)?,
+        surface: row.get(6)?,
+        ticket: None,
+        ticket_source: None,
+        message_count: row.get(7)?,
+        input_tokens: row.get(8)?,
+        output_tokens: row.get(9)?,
+        cache_creation_tokens: row.get(10)?,
+        cache_read_tokens: row.get(11)?,
+        cost_cents_effective: row.get(12)?,
+        cost_cents_ingested: row.get(13)?,
+    })
+}
+
 fn map_session_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionSummaryRecord> {
     Ok(SessionSummaryRecord {
         session_id: row.get(0)?,
@@ -558,13 +556,14 @@ fn map_session_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionSummaryRe
         duration_ms: row.get(4)?,
         repo_id: row.get(5)?,
         git_branch: row.get(6)?,
+        surface: row.get(7)?,
         ticket: None,
         ticket_source: None,
-        message_count: row.get(7)?,
-        total_input_tokens: row.get(8)?,
-        total_output_tokens: row.get(9)?,
-        total_cost_cents: row.get(10)?,
-        primary_model: row.get(11)?,
+        message_count: row.get(8)?,
+        total_input_tokens: row.get(9)?,
+        total_output_tokens: row.get(10)?,
+        total_cost_cents: row.get(11)?,
+        primary_model: row.get(12)?,
     })
 }
 
@@ -666,7 +665,15 @@ pub fn build_sync_envelope(conn: &Connection, config: &CloudConfig) -> Result<Sy
     let session_summaries = fetch_session_summaries(conn, session_watermark.as_deref())?;
 
     Ok(SyncEnvelope {
-        schema_version: 1,
+        // #723: bumped from 1 → 2 when the `surface` dimension joined the
+        // `DailyRollupRecord` / `SessionSummaryRecord` wire structs. The
+        // cloud schema (siropkin/budi-cloud migration 014) already accepts
+        // the field and `normalizeSurface` coalesces missing → `'unknown'`,
+        // so this is a logging marker for the cloud — not a forced break.
+        // Old daemons → new cloud still works (column defaults). New
+        // daemon → old cloud also works because column has landed since
+        // 014.
+        schema_version: 2,
         device_id,
         org_id,
         label: config.effective_label(),
@@ -1414,7 +1421,7 @@ mod tests {
         };
 
         let envelope = build_sync_envelope(&conn, &config).unwrap();
-        assert_eq!(envelope.schema_version, 1);
+        assert_eq!(envelope.schema_version, 2);
         assert_eq!(envelope.device_id, "dev_test");
         assert_eq!(envelope.org_id, "org_test");
         assert!(envelope.payload.daily_rollups.is_empty());
@@ -1501,7 +1508,7 @@ mod tests {
     #[test]
     fn envelope_serializes_to_expected_shape() {
         let envelope = SyncEnvelope {
-            schema_version: 1,
+            schema_version: 2,
             device_id: "dev_test".into(),
             org_id: "org_test".into(),
             label: "ivan-mbp".into(),
@@ -1514,6 +1521,7 @@ mod tests {
                     model: "claude-sonnet-4-6".into(),
                     repo_id: "sha256:abc".into(),
                     git_branch: "main".into(),
+                    surface: "cursor".into(),
                     ticket: None,
                     ticket_source: None,
                     message_count: 5,
@@ -1529,7 +1537,9 @@ mod tests {
         };
 
         let json = serde_json::to_value(&envelope).unwrap();
-        assert_eq!(json["schema_version"], 1);
+        // #723: bumped to 2 alongside the `surface` field landing on both
+        // wire structs.
+        assert_eq!(json["schema_version"], 2);
         assert_eq!(json["device_id"], "dev_test");
         // #552: label travels alongside device_id / org_id / synced_at
         // on the envelope root.
@@ -1558,6 +1568,8 @@ mod tests {
             json["payload"]["daily_rollups"][0]["cost_cents_ingested"],
             2.5
         );
+        // #723: surface always emitted (NOT NULL on the local column).
+        assert_eq!(json["payload"]["daily_rollups"][0]["surface"], "cursor");
     }
 
     /// #552: when `cloud.toml` omits `label`, `effective_label()` falls
@@ -1734,6 +1746,138 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    // -------- #723: surface dimension on cloud-sync wire structs --------
+
+    /// #723: rows ingested for every canonical surface value must
+    /// round-trip through the daily-rollup wire struct. Mirrors the
+    /// parser-output set landed in #701 (`vscode` / `cursor` /
+    /// `jetbrains` / `terminal` / `unknown`), so a regression that drops
+    /// the column from the SELECT list trips here rather than silently
+    /// re-landing 100% `'unknown'` on the cloud.
+    #[test]
+    fn rollup_round_trips_surface_for_every_canonical_value() {
+        let dir = std::env::temp_dir().join("budi-cloud-sync-test-rollup-surface");
+        std::fs::create_dir_all(&dir).ok();
+        let db_path = dir.join("test.db");
+        let _ = std::fs::remove_file(&db_path);
+
+        let conn = crate::analytics::open_db_with_migration(&db_path).unwrap();
+
+        let surfaces = ["vscode", "cursor", "jetbrains", "terminal", "unknown"];
+        for (i, surface) in surfaces.iter().enumerate() {
+            // One message per surface — the rollup trigger keys on
+            // (bucket_day, role, provider, model, repo_id, git_branch,
+            // surface), so distinct surfaces fan out to distinct rollup
+            // rows even with identical provider/model/repo/branch.
+            conn.execute(
+                "INSERT INTO messages (id, role, timestamp, model, provider, repo_id, git_branch,
+                                       surface, input_tokens, output_tokens,
+                                       cache_creation_tokens, cache_read_tokens,
+                                       cost_cents_ingested, cost_cents_effective)
+                 VALUES (?1, 'assistant', '2026-04-10T14:30:00Z', 'claude-sonnet-4-6', 'anthropic',
+                         'sha256:surface', 'main', ?2, 10, 20, 0, 0, 0.1, 0.1)",
+                params![format!("msg-surface-{i}"), surface],
+            )
+            .unwrap();
+        }
+
+        let rollups = fetch_daily_rollups(&conn, None).unwrap();
+        for surface in surfaces {
+            let r = rollups
+                .iter()
+                .find(|r| r.surface == surface)
+                .unwrap_or_else(|| panic!("rollup for surface={surface:?} present"));
+            // JSON round-trip — the cloud parses the same shape.
+            let json = serde_json::to_value(r).unwrap();
+            assert_eq!(json["surface"], surface);
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// #723: same coverage on the session wire struct. The `sessions`
+    /// table stores `surface` directly (no trigger), so the SELECT in
+    /// `fetch_session_summaries` is the only thing that has to project it.
+    #[test]
+    fn session_round_trips_surface_for_every_canonical_value() {
+        let dir = std::env::temp_dir().join("budi-cloud-sync-test-session-surface");
+        std::fs::create_dir_all(&dir).ok();
+        let db_path = dir.join("test.db");
+        let _ = std::fs::remove_file(&db_path);
+
+        let conn = crate::analytics::open_db_with_migration(&db_path).unwrap();
+
+        let surfaces = ["vscode", "cursor", "jetbrains", "terminal", "unknown"];
+        for (i, surface) in surfaces.iter().enumerate() {
+            conn.execute(
+                "INSERT INTO sessions (id, provider, started_at, ended_at, duration_ms,
+                                       repo_id, git_branch, surface)
+                 VALUES (?1, 'claude_code', '2026-04-10T09:00:00Z', '2026-04-10T10:00:00Z',
+                         3600000, 'sha256:surface', 'main', ?2)",
+                params![format!("sess-surface-{i}"), surface],
+            )
+            .unwrap();
+        }
+
+        let summaries = fetch_session_summaries(&conn, None).unwrap();
+        for surface in surfaces {
+            let s = summaries
+                .iter()
+                .find(|s| s.surface == surface)
+                .unwrap_or_else(|| panic!("session for surface={surface:?} present"));
+            let json = serde_json::to_value(s).unwrap();
+            assert_eq!(json["surface"], surface);
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// #723: snapshot the on-wire JSON shape with `surface` populated so
+    /// the wire payload is reviewable in PRs. The cloud ingest contract
+    /// is "field is optional but, when present, must be the literal
+    /// string surface value" — a regression where the daemon emits
+    /// e.g. `{"surface": null}` or skips the field would land all rows
+    /// back at `'unknown'` on the cloud (siropkin/budi-cloud#227).
+    #[test]
+    fn rollup_wire_snapshot_with_surface() {
+        let record = DailyRollupRecord {
+            bucket_day: "2026-04-10".into(),
+            role: "assistant".into(),
+            provider: "claude_code".into(),
+            model: "claude-sonnet-4-6".into(),
+            repo_id: "sha256:abc".into(),
+            git_branch: "main".into(),
+            surface: "jetbrains".into(),
+            ticket: None,
+            ticket_source: None,
+            message_count: 5,
+            input_tokens: 1000,
+            output_tokens: 500,
+            cache_creation_tokens: 100,
+            cache_read_tokens: 200,
+            cost_cents_effective: 2.5,
+            cost_cents_ingested: 2.5,
+        };
+        let json = serde_json::to_string(&record).unwrap();
+        let expected = "{\
+            \"bucket_day\":\"2026-04-10\",\
+            \"role\":\"assistant\",\
+            \"provider\":\"claude_code\",\
+            \"model\":\"claude-sonnet-4-6\",\
+            \"repo_id\":\"sha256:abc\",\
+            \"git_branch\":\"main\",\
+            \"surface\":\"jetbrains\",\
+            \"message_count\":5,\
+            \"input_tokens\":1000,\
+            \"output_tokens\":500,\
+            \"cache_creation_tokens\":100,\
+            \"cache_read_tokens\":200,\
+            \"cost_cents_effective\":2.5,\
+            \"cost_cents_ingested\":2.5\
+        }";
+        assert_eq!(json, expected);
+    }
+
     #[test]
     fn rollup_integration_branches_do_not_emit_ticket() {
         let dir = std::env::temp_dir().join("budi-cloud-sync-test-integration");
@@ -1773,6 +1917,7 @@ mod tests {
             model: model.into(),
             repo_id: "sha256:test".into(),
             git_branch: "main".into(),
+            surface: "unknown".into(),
             ticket: None,
             ticket_source: None,
             message_count: 1,
@@ -1794,6 +1939,7 @@ mod tests {
             duration_ms: None,
             repo_id: None,
             git_branch: None,
+            surface: "unknown".into(),
             ticket: None,
             ticket_source: None,
             message_count: 1,
