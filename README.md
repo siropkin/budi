@@ -54,6 +54,8 @@ Everything stays on your machine by default. Optional cloud sync pushes aggregat
 | **[budi](https://github.com/siropkin/budi)** ← you are here | Core Rust daemon and CLI |
 | **[budi-cloud](https://github.com/siropkin/budi-cloud)** | Team dashboard and ingest API at [app.getbudi.dev](https://app.getbudi.dev) |
 | **[budi-cursor](https://github.com/siropkin/budi-cursor)** | VS Code / Cursor status bar extension |
+| **[budi-jetbrains](https://github.com/siropkin/budi-jetbrains)** | JetBrains IDE status bar plugin (Kotlin) |
+| **[homebrew-budi](https://github.com/siropkin/homebrew-budi)** | Homebrew tap for `brew install siropkin/budi/budi` |
 | **[getbudi.dev](https://getbudi.dev)** | Website and documentation |
 
 ## Supported agents
