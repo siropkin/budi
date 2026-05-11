@@ -389,7 +389,7 @@ pub enum PricingView {
     Status,
     /// Network: fetch the latest LiteLLM manifest into the local cache, then show state
     Sync,
-    /// Network: re-poll the cloud price list and recompute effective costs (#732)
+    /// Network: re-poll the cloud price list and recompute effective costs
     Recompute {
         /// Re-run the recompute pass even when `list_version` is unchanged
         #[arg(long)]
