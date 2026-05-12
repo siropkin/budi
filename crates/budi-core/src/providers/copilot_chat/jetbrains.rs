@@ -912,14 +912,24 @@ fn deterministic_uuid(session_id: &str, path: &str) -> String {
     )
 }
 
-/// #779: walk every JetBrains-side session dir under the active config
-/// roots and return a `(session_id, title)` map suitable for backfilling
-/// `sessions.title`. The title is the parser's `ParsedMessage.session_title`
-/// — either the resolved IntelliJ `projectName` (Phase 1 #766 or Phase 2
-/// #778) or the session-type label fallback (`chat`, `chat-agent`,
-/// `chat-edit`, `bg-agent`). Cheap (one byte-scan per session dir);
-/// idempotent — callers should still gate on `title IS NULL OR title = ''`
-/// at write time so a manual-rename in the cloud isn't overwritten.
+/// One-shot migration helper for backfilling `sessions.title` on
+/// historical JetBrains Copilot rows that pre-date the #787 enricher.
+///
+/// Walks every JetBrains-side session dir under the active config roots
+/// and returns a `(session_id, title)` map. The title is the parser's
+/// `ParsedMessage.session_title` — either the resolved IntelliJ
+/// `projectName` (Phase 1 #766 or Phase 2 #778) or the session-type
+/// label fallback (`chat`, `chat-agent`, `chat-edit`, `bg-agent`).
+///
+/// Not called from the live sync path: since #787, the
+/// `IdentityEnricher` promotes `session_title` to a tag on every new
+/// ingest, and `backfill_session_titles` picks it up via a pure SQL
+/// UPDATE off the `tags` table. This helper exists only for an explicit
+/// one-shot migration of pre-#787 historical data.
+///
+/// Cheap (one byte-scan per session dir); idempotent — callers should
+/// still gate on `title IS NULL OR title = ''` at write time so a
+/// manual-rename in the cloud isn't overwritten.
 ///
 /// Returns an empty map when no JetBrains config root exists on this host.
 pub fn collect_jetbrains_session_titles() -> std::collections::HashMap<String, String> {

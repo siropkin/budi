@@ -332,6 +332,21 @@ impl Enricher for IdentityEnricher {
             });
         }
 
+        // #787: promote the parser-set session title to a tag so the
+        // analytics layer can pick it up uniformly. `SESSION_TITLE` is
+        // in `SESSION_IDENTITY_KEYS`, so `Pipeline::process` already
+        // deduplicates it down to one assistant message per session.
+        // Only emitted when the parser supplied a non-empty value — no
+        // host-derived fallback.
+        if let Some(title) = msg.session_title.as_deref()
+            && !title.is_empty()
+        {
+            tags.push(Tag {
+                key: tk::SESSION_TITLE.to_string(),
+                value: title.to_string(),
+            });
+        }
+
         tags
     }
 }
@@ -523,6 +538,56 @@ mod tests {
         if !enricher.git_user.is_empty() {
             assert!(tags.iter().any(|t| t.key == "git_user"));
         }
+    }
+
+    #[test]
+    fn identity_enricher_emits_session_title_when_parser_sets_it() {
+        // #787: the parser-set `session_title` must surface as a tag so
+        // `backfill_session_titles` can promote it into `sessions.title`.
+        // SESSION_IDENTITY_KEYS dedup happens at the pipeline level — this
+        // unit test only confirms the enricher emits the tag at all.
+        let mut enricher = IdentityEnricher {
+            user_name: String::new(),
+            machine_name: String::new(),
+            platform: String::new(),
+            git_user: String::new(),
+        };
+        let mut msg = test_msg();
+        msg.session_title = Some("Verkada-Web".to_string());
+        let tags = enricher.enrich(&mut msg);
+        assert!(
+            tags.iter()
+                .any(|t| t.key == tk::SESSION_TITLE && t.value == "Verkada-Web"),
+            "expected session_title tag, got: {tags:?}"
+        );
+    }
+
+    #[test]
+    fn identity_enricher_skips_session_title_when_unset() {
+        let mut enricher = IdentityEnricher {
+            user_name: String::new(),
+            machine_name: String::new(),
+            platform: String::new(),
+            git_user: String::new(),
+        };
+        let mut msg = test_msg();
+        msg.session_title = None;
+        let tags = enricher.enrich(&mut msg);
+        assert!(!tags.iter().any(|t| t.key == tk::SESSION_TITLE));
+    }
+
+    #[test]
+    fn identity_enricher_skips_session_title_when_empty() {
+        let mut enricher = IdentityEnricher {
+            user_name: String::new(),
+            machine_name: String::new(),
+            platform: String::new(),
+            git_user: String::new(),
+        };
+        let mut msg = test_msg();
+        msg.session_title = Some(String::new());
+        let tags = enricher.enrich(&mut msg);
+        assert!(!tags.iter().any(|t| t.key == tk::SESSION_TITLE));
     }
 
     #[test]
