@@ -133,9 +133,16 @@ pub async fn run(db_path: PathBuf, initial_config: CloudConfig, cloud_syncing: A
                 tracing::error!("Cloud sync: authentication failed (401)");
                 continue; // Skip normal sleep, handled at loop top
             }
-            Ok(SyncResult::SchemaMismatch(msg)) => {
+            Ok(SyncResult::SchemaMismatch(mismatch)) => {
                 schema_mismatch = true;
-                tracing::error!("Cloud sync: schema mismatch (422): {msg}");
+                // #756: log the server's actual body and our classification
+                // so on-call doesn't have to guess whether budi or the
+                // cloud is the lagging side.
+                tracing::error!(
+                    kind = ?mismatch.kind,
+                    "Cloud sync: server returned 422: {}",
+                    mismatch.body,
+                );
                 continue; // Skip normal sleep, handled at loop top
             }
             Ok(SyncResult::TransientError(msg)) => {

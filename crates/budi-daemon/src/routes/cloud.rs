@@ -15,7 +15,7 @@ use axum::Json;
 use axum::extract::State;
 use axum::http::StatusCode;
 use budi_core::analytics;
-use budi_core::cloud_sync::{self, SyncResult, SyncTickReport};
+use budi_core::cloud_sync::{self, SchemaMismatchKind, SyncResult, SyncTickReport};
 use budi_core::config::{self, CloudConfig};
 use serde_json::{Value, json};
 
@@ -267,19 +267,23 @@ fn report_to_json(report: SyncTickReport) -> Value {
             "Authentication failed (401). Check `api_key` in ~/.config/budi/cloud.toml."
                 .to_string(),
         ),
-        SyncResult::SchemaMismatch(msg) if chunks_succeeded > 0 => (
+        SyncResult::SchemaMismatch(mismatch) if chunks_succeeded > 0 => (
             false,
             RESULT_SCHEMA_MISMATCH,
             format!(
-                "Server rejected chunk {} of {chunks_total} as schema-incompatible (422) after confirming {chunks_succeeded}. Update budi to resume syncing. Detail: {msg}",
+                "Server rejected chunk {} of {chunks_total} with 422 after confirming {chunks_succeeded}. {} Detail: {}",
                 chunks_succeeded + 1,
+                schema_mismatch_advice(&mismatch.kind),
+                mismatch.body,
             ),
         ),
-        SyncResult::SchemaMismatch(msg) => (
+        SyncResult::SchemaMismatch(mismatch) => (
             false,
             RESULT_SCHEMA_MISMATCH,
             format!(
-                "Server rejected the payload as schema-incompatible (422). Update budi to resume syncing. Detail: {msg}"
+                "Server rejected the payload with 422. {} Detail: {}",
+                schema_mismatch_advice(&mismatch.kind),
+                mismatch.body,
             ),
         ),
         SyncResult::TransientError(msg) if chunks_succeeded > 0 => (
@@ -309,6 +313,41 @@ fn report_to_json(report: SyncTickReport) -> Value {
         "chunks_total": chunks_total,
         "chunks_succeeded": chunks_succeeded,
     })
+}
+
+/// #756: render the recovery advice for a 422 based on which side of the
+/// schema_version split the client is on. Returns a complete sentence so
+/// callers can splat it into a status message verbatim.
+///
+/// - `ClientTooOld`: the user's local budi is older than the cloud accepts.
+///   Tell them to update. This is the only path where "update budi" is right.
+/// - `CloudTooOld`: the cloud is the lagging side (e.g. a recent CLI release
+///   shipped a `schema_version` bump that hasn't reached the deployed cloud
+///   yet). Updating budi locally would make it worse; point at the
+///   maintainers instead. This is the exact failure mode flagged in #749's
+///   body.
+/// - `NotSchemaRelated`: the 422 is from per-field validation
+///   (`cost_cents must be a finite, non-negative number`, etc.) or some
+///   other business rule. The body is the diagnostic; don't pretend it's
+///   a version issue.
+fn schema_mismatch_advice(kind: &SchemaMismatchKind) -> String {
+    match kind {
+        SchemaMismatchKind::ClientTooOld {
+            client,
+            expected_min,
+        } => format!(
+            "Client schema_version {client} is below the minimum the cloud accepts ({expected_min}). Update budi to resume syncing."
+        ),
+        SchemaMismatchKind::CloudTooOld {
+            client,
+            expected_max,
+        } => format!(
+            "Cloud is older than this client (client schema_version {client}, cloud max {expected_max}). Updating budi locally will not help — wait for the cloud to catch up or ping the maintainers."
+        ),
+        SchemaMismatchKind::NotSchemaRelated => {
+            "The cloud rejected the envelope; check the server detail below before assuming budi is out of date.".to_string()
+        }
+    }
 }
 
 #[cfg(test)]
@@ -409,5 +448,73 @@ mod tests {
         let msg = body["message"].as_str().unwrap();
         assert!(msg.contains("chunk 3 of 5"), "got: {msg}");
         assert!(msg.contains("after confirming 2"), "got: {msg}");
+    }
+
+    /// #756: a 422 caused by per-field validation (the failure mode
+    /// from the v8.4.4 smoke test where the cloud rejected the
+    /// `cost_cents` rename) must surface the body verbatim and must
+    /// NOT tell the user to "update budi" — the client wasn't the
+    /// lagging side. Mirrors acceptance criterion 2 on #756.
+    #[test]
+    fn report_to_json_422_field_validation_does_not_say_update_budi() {
+        use budi_core::cloud_sync::{SchemaMismatch, SchemaMismatchKind};
+        let report = SyncTickReport {
+            result: SyncResult::SchemaMismatch(SchemaMismatch {
+                body: "daily_rollups[0].cost_cents must be a finite, non-negative number".into(),
+                kind: SchemaMismatchKind::NotSchemaRelated,
+            }),
+            endpoint: "https://app.getbudi.dev".into(),
+            envelope_rollups: 1,
+            envelope_sessions: 0,
+            server_records_upserted: None,
+            server_watermark: None,
+            chunks_total: 1,
+            chunks_succeeded: 0,
+        };
+        let body = report_to_json(report);
+        let msg = body["message"].as_str().unwrap();
+        assert!(
+            msg.contains("cost_cents must be a finite"),
+            "server body must round-trip into the message: {msg}"
+        );
+        assert!(
+            !msg.contains("Update budi"),
+            "non-schema 422 must not advise updating budi: {msg}"
+        );
+    }
+
+    /// #756: when the client is *above* the cloud's accepted set, the
+    /// message must call out the cloud as the lagging side, not blame
+    /// budi. This is the exact regression the original #749 body
+    /// flagged.
+    #[test]
+    fn report_to_json_422_cloud_too_old_blames_cloud() {
+        use budi_core::cloud_sync::{SchemaMismatch, SchemaMismatchKind};
+        let report = SyncTickReport {
+            result: SyncResult::SchemaMismatch(SchemaMismatch {
+                body: "Unsupported schema_version: 3. Expected one of: [1, 2]".into(),
+                kind: SchemaMismatchKind::CloudTooOld {
+                    client: 3,
+                    expected_max: 2,
+                },
+            }),
+            endpoint: "https://app.getbudi.dev".into(),
+            envelope_rollups: 1,
+            envelope_sessions: 0,
+            server_records_upserted: None,
+            server_watermark: None,
+            chunks_total: 1,
+            chunks_succeeded: 0,
+        };
+        let body = report_to_json(report);
+        let msg = body["message"].as_str().unwrap();
+        assert!(
+            msg.contains("Cloud is older than this client"),
+            "msg should call out cloud, not budi: {msg}"
+        );
+        assert!(
+            !msg.contains("Update budi"),
+            "cloud-too-old 422 must not advise updating budi: {msg}"
+        );
     }
 }
