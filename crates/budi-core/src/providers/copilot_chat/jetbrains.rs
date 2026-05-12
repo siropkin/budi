@@ -262,17 +262,19 @@ pub(super) fn parse_session_dir(session_dir: &Path) -> Vec<ParsedMessage> {
         .as_deref()
         .map(|s| s.trim_end_matches("-sessions").to_string());
 
-    // #766: pull the IntelliJ project name + resolved repo/branch out of
-    // the Xodus log. The result is shared across every row this session
-    // emits (one row per turn for Nitrite, one row per session for the
-    // legacy .xd path). Nitrite-only sessions fall through to
-    // `repo_id = None` until Phase 2 lands the `NtAgentWorkingSetItem`
-    // decoder.
-    let (project_name, repo_resolution) = if store_path
-        .file_name()
-        .and_then(|s| s.to_str())
-        .is_some_and(|name| name == "00000000000.xd")
-        && let Ok(bytes) = std::fs::read(&store_path)
+    // #766: pull the IntelliJ project name + resolved repo/branch from
+    // the Xodus log regardless of which store the populated-entity probe
+    // picked. Dual-store sessions on disk write `XdChatSession.projectName`
+    // into `00000000000.xd` *and* `Nt*Turn` documents into the matching
+    // `*.nitrite.db` — the two stores are complementary, not alternative
+    // shapes of the same data. The original 8.4.6 implementation treated
+    // them as mutually exclusive (repo only set when .xd was the
+    // "populated" store, turn extraction only when Nitrite was), so every
+    // dual-store session emitted either a one-row placeholder with
+    // `repo_id` or a per-turn batch without it. Now we try both
+    // unconditionally and combine.
+    let xd_candidate = session_dir.join("00000000000.xd");
+    let (project_name, repo_resolution) = if let Ok(bytes) = std::fs::read(&xd_candidate)
         && let Some(project_name) = extract_xodus_project_name(&bytes)
     {
         let resolution = resolve_project_workspace(&project_name);
@@ -281,21 +283,26 @@ pub(super) fn parse_session_dir(session_dir: &Path) -> Vec<ParsedMessage> {
         (None, None)
     };
 
-    // #764: Phase 1 per-turn extraction for Nitrite stores. Walk the
-    // serialized `Nt(Agent|Edit)?Turn` documents for their `uuid` field
-    // and emit one assistant `ParsedMessage` per turn. Tokens stay zero;
-    // cost reconciliation flows through `crate::sync::copilot_chat_billing`
-    // (#765's even-distribution path is what dollarizes these rows).
-    let nitrite_turns = if store_path
-        .file_name()
-        .and_then(|s| s.to_str())
-        .is_some_and(|n| NITRITE_DB_FILES.contains(&n))
-        && let Ok(bytes) = std::fs::read(&store_path)
+    // #764: Phase 1 per-turn extraction. Walk every `*.nitrite.db` in
+    // the session dir for `Nt(Agent|Edit)?Turn` documents and collect
+    // their `uuid` fields. Combine across all Nitrite files because a
+    // single session-dir can carry both `copilot-chat-nitrite.db` and
+    // `copilot-agent-sessions-nitrite.db` post-migration.
+    let mut nitrite_turns: Vec<String> = Vec::new();
     {
-        extract_nitrite_turn_ids(&bytes)
-    } else {
-        Vec::new()
-    };
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for filename in NITRITE_DB_FILES {
+            let candidate = session_dir.join(filename);
+            let Ok(bytes) = std::fs::read(&candidate) else {
+                continue;
+            };
+            for turn_id in extract_nitrite_turn_ids(&bytes) {
+                if seen.insert(turn_id.clone()) {
+                    nitrite_turns.push(turn_id);
+                }
+            }
+        }
+    }
 
     let build_msg = |uuid: String, request_id: Option<String>| -> ParsedMessage {
         let mut msg = ParsedMessage {
@@ -1169,6 +1176,65 @@ mod tests {
             1,
             "duplicate uuids must collapse, got {extracted:?}"
         );
+    }
+
+    /// Regression coverage for the v8.4.6 dual-store bug: when a
+    /// session-dir holds both a populated `.xd` (with `projectName`) and
+    /// a populated `.nitrite.db` (with `Nt*Turn` documents), the parser
+    /// must combine the two — Nitrite supplies per-turn UUIDs, Xodus
+    /// supplies the repo enrichment that lands on every per-turn row.
+    /// The pre-fix 8.4.6 implementation read whichever store the
+    /// populated-entity probe returned and ignored the other, so every
+    /// `surface=jetbrains` row landed with `repo_id = NULL` even on
+    /// sessions whose .xd carried a clean `Verkada-Web`-style project
+    /// name.
+    #[test]
+    fn dual_store_session_combines_xodus_repo_with_nitrite_turns() {
+        let tmp = std::env::temp_dir().join("budi-jetbrains-dual-combined");
+        let _ = std::fs::remove_dir_all(&tmp);
+        let session_dir = tmp.join("iu/chat-agent-sessions/sess-dual-combined");
+        std::fs::create_dir_all(&session_dir).unwrap();
+
+        // Synthetic .xd with the projectName property + value record. The
+        // resolve_project_workspace probe will return None on most CI
+        // hosts (no `~/_projects/budi-test-fake-name/.git`), so the
+        // assertion focuses on `session_title` and the row count — those
+        // two cover the wire shape that flows to the cloud and the
+        // dashboard's Repo column fallback.
+        let mut xd = Vec::new();
+        xd.extend_from_slice(b"XdAgentSession");
+        xd.extend_from_slice(b"\x86\x86\x8e\x8cprojectName\x00\x04");
+        xd.extend_from_slice(b"\x86\x99\x90\x82\x00\x04\x82budi-test-fake-name\x00");
+        std::fs::write(session_dir.join("00000000000.xd"), &xd).unwrap();
+
+        // Synthetic Nitrite with one NtAgentTurn + uuid pair.
+        let uuid = "11afee98-04f2-4da1-a282-3fc0d14e9054";
+        let mut nit = Vec::new();
+        nit.extend_from_slice(b"H:2,blockSize:1000,format:3,version:f\n");
+        nit.extend_from_slice(&[0u8; 64]);
+        nit.extend_from_slice(b"NtAgentTurn");
+        nit.extend_from_slice(b"\xac\xed\x00\x05");
+        nit.extend_from_slice(b"t\x00\x04uuid");
+        nit.extend_from_slice(b"t\x00\x24");
+        nit.extend_from_slice(uuid.as_bytes());
+        nit.extend_from_slice(b"\x00trailer\x00");
+        std::fs::write(session_dir.join("copilot-agent-sessions-nitrite.db"), &nit).unwrap();
+
+        let parsed = parse_session_dir(&session_dir);
+        // One row per Nitrite turn — the Xodus probe doesn't add a
+        // separate placeholder, it only enriches.
+        assert_eq!(parsed.len(), 1, "expected one per-turn row, got {parsed:?}");
+        // The Xodus-derived project name lands on the per-turn row's
+        // `session_title` even when the filesystem-probe step fails to
+        // resolve a `.git` checkout, so the dashboard renders the
+        // IntelliJ name instead of a sea of `(unknown)`.
+        assert_eq!(
+            parsed[0].session_title.as_deref(),
+            Some("budi-test-fake-name"),
+            "Xodus project name must reach the per-turn row's session_title"
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     /// #764: sessions whose only Nitrite documents are sessions (not
