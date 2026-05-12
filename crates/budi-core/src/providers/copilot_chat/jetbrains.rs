@@ -105,6 +105,13 @@ const NITRITE_DB_FILES: &[&str] = &[
     "copilot-chat-nitrite.db",
     "copilot-agent-sessions-nitrite.db",
     "copilot-chat-edit-sessions-nitrite.db",
+    // Older plugin builds write the edit-session store under a shorter
+    // name (no `chat-` prefix). Observed on real user DBs in v8.4.7's
+    // post-release smoke test where session dirs hold only
+    // `copilot-edit-sessions-nitrite.db` — without this entry the
+    // populated-entity probe skips them and the matching .xd's
+    // `projectName` never reaches the parser.
+    "copilot-edit-sessions-nitrite.db",
 ];
 
 /// Platform-specific roots that contain the per-IDE-slug session subtrees.
