@@ -292,10 +292,10 @@ pub(super) fn parse_session_dir(session_dir: &Path) -> Vec<ParsedMessage> {
 /// from the Nitrite store.
 fn populated_store_in(session_dir: &Path) -> Option<std::path::PathBuf> {
     let xd_path = session_dir.join("00000000000.xd");
-    if let Ok(bytes) = std::fs::read(&xd_path) {
-        if has_populated_entity_marker(&bytes) {
-            return Some(xd_path);
-        }
+    if let Ok(bytes) = std::fs::read(&xd_path)
+        && has_populated_entity_marker(&bytes)
+    {
+        return Some(xd_path);
     }
     for filename in NITRITE_DB_FILES {
         let candidate = session_dir.join(filename);
