@@ -22,7 +22,7 @@ use sha2::{Digest, Sha256};
 use crate::jsonl::ParsedMessage;
 use crate::provider::{DiscoveredFile, Provider};
 
-mod jetbrains;
+pub mod jetbrains;
 
 /// Canonical provider id. ADR-0093 §1: JetBrains is a host of the same
 /// Copilot Chat provider as VS Code — the `surface` dimension carries the
