@@ -573,6 +573,26 @@ mod tests {
         assert!((result - 1800.0).abs() < 1e-6, "got {result}");
     }
 
+    /// #755: tests that need to simulate the pre-fix nullable shape of
+    /// `messages.cost_cents_effective` (so they can seed a legacy NULL row)
+    /// drop the indexes that reference the column, drop the column itself,
+    /// and re-add it as plain nullable `REAL`. The fresh-install schema
+    /// declares `NOT NULL DEFAULT 0`, which we reverse here.
+    fn revert_effective_to_legacy_nullable(conn: &rusqlite::Connection) {
+        conn.execute_batch(
+            "DROP TRIGGER IF EXISTS trg_messages_rollup_insert;
+             DROP TRIGGER IF EXISTS trg_messages_rollup_delete;
+             DROP TRIGGER IF EXISTS trg_messages_rollup_update;
+             DROP INDEX IF EXISTS idx_messages_ts_cost;
+             DROP INDEX IF EXISTS idx_messages_role_ts_cost;
+             DROP INDEX IF EXISTS idx_messages_role_branch_cost;
+             DROP INDEX IF EXISTS idx_messages_session_role_cost;
+             ALTER TABLE messages DROP COLUMN cost_cents_effective;
+             ALTER TABLE messages ADD COLUMN cost_cents_effective REAL;",
+        )
+        .expect("revert column to legacy nullable shape");
+    }
+
     #[test]
     fn install_and_snapshot_roundtrip() {
         install(Some(sample_pricing()));
@@ -642,10 +662,16 @@ mod tests {
     // loop used to read the column as `f64` and crash with "Invalid column
     // type Null"; assert it now (a) survives the read, and (b) repairs
     // the NULL into a real number.
+    //
+    // #755 tightened the column to NOT NULL DEFAULT 0 on fresh installs,
+    // so this test has to simulate the legacy nullable-column shape by
+    // dropping the constraint via `DROP COLUMN`/`ADD COLUMN` before
+    // seeding the NULL row.
     #[test]
     fn recompute_repairs_null_effective_rows() {
         let conn = crate::analytics::open_db_with_migration(std::path::Path::new(":memory:"))
             .expect("open db");
+        revert_effective_to_legacy_nullable(&conn);
         conn.execute(
             "INSERT INTO messages (id, role, timestamp, model, provider,
                                    input_tokens, output_tokens,

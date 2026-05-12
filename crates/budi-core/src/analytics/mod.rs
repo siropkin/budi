@@ -500,8 +500,13 @@ pub fn ingest_messages_with_sync(
         // ADR-0094 §1: write the same value into both `cost_cents_ingested`
         // (immutable per ADR-0091 §5 Rule D) and `cost_cents_effective`
         // (read surface). The team-pricing worker (#731) rewrites only
-        // `_effective`; until it ships `_effective = _ingested`.
+        // `_effective`; until it ships `_effective = _ingested`. #755:
+        // `_effective` is never legitimately NULL — user rows (no LLM
+        // spend) bind 0.0, same as `_ingested`. The schema enforces
+        // `NOT NULL DEFAULT 0` so any future bind that skips the column
+        // still lands a 0 instead of a NULL.
         let cost_cents_ingested = cost_cents.unwrap_or(0.0);
+        let cost_cents_effective = cost_cents.unwrap_or(0.0);
         let inserted = tx.execute(
             "INSERT OR IGNORE INTO messages
              (id, session_id, role, timestamp, model,
@@ -526,7 +531,7 @@ pub fn ingest_messages_with_sync(
                 msg.repo_id,
                 msg.provider,
                 cost_cents_ingested,
-                cost_cents,
+                cost_cents_effective,
                 msg.parent_uuid,
                 git_branch,
                 msg.cost_confidence,

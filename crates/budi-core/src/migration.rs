@@ -228,7 +228,7 @@ fn create_current_schema(conn: &Connection) -> Result<()> {
             repo_id                TEXT,
             provider               TEXT DEFAULT 'claude_code',
             cost_cents_ingested    REAL NOT NULL DEFAULT 0,
-            cost_cents_effective   REAL,
+            cost_cents_effective   REAL NOT NULL DEFAULT 0,
             parent_uuid            TEXT,
             git_branch             TEXT,
             cost_confidence        TEXT DEFAULT 'estimated',
@@ -2260,6 +2260,24 @@ mod tests {
     fn reconcile_backfills_null_effective_on_already_migrated_db() {
         let conn = Connection::open_in_memory().unwrap();
         migrate(&conn).unwrap();
+
+        // #755 tightened the live schema to `cost_cents_effective REAL NOT
+        // NULL DEFAULT 0`, so the test has to recreate the legacy nullable
+        // shape before it can seed the NULL row that the backfill is
+        // supposed to repair. Drop the indexes that reference the column,
+        // drop the column, and re-add as plain `REAL`.
+        conn.execute_batch(
+            "DROP TRIGGER IF EXISTS trg_messages_rollup_insert;
+             DROP TRIGGER IF EXISTS trg_messages_rollup_delete;
+             DROP TRIGGER IF EXISTS trg_messages_rollup_update;
+             DROP INDEX IF EXISTS idx_messages_ts_cost;
+             DROP INDEX IF EXISTS idx_messages_role_ts_cost;
+             DROP INDEX IF EXISTS idx_messages_role_branch_cost;
+             DROP INDEX IF EXISTS idx_messages_session_role_cost;
+             ALTER TABLE messages DROP COLUMN cost_cents_effective;
+             ALTER TABLE messages ADD COLUMN cost_cents_effective REAL;",
+        )
+        .unwrap();
 
         // Insert a row in the post-migration shape but force `_effective`
         // back to NULL, mimicking history that came through the broken
