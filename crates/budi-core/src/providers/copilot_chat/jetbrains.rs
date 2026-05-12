@@ -61,11 +61,51 @@ const NON_IDE_TOP_LEVEL: &[&str] = &[
 ];
 
 /// Entity-type markers that indicate a session with actual chat activity.
-/// Xodus persists entity types as length-prefixed ASCII strings inside the
-/// `.xd` log header; an empty session contains only `XdMigration` bootstrap
-/// rows, so the presence of either of these markers is the signal that the
-/// session is worth emitting a row for. See ADR-0093 §4.
-const POPULATED_ENTITY_MARKERS: &[&[u8]] = &[b"XdChatSession", b"XdAgentSession"];
+///
+/// The JetBrains-side storage shape has gone through two iterations and the
+/// parser has to recognize either:
+///
+/// - **Xodus log (`00000000000.xd`)** — the legacy shape from ADR-0093 §4.
+///   Empty sessions hold only `XdMigration` bootstrap rows; sessions with
+///   chat activity carry an `XdChatSession` or `XdAgentSession` entity-type
+///   record (length-prefixed ASCII inside the binary log header).
+///
+/// - **Nitrite store (`copilot-chat-nitrite.db`, `copilot-agent-sessions-
+///   nitrite.db`, `copilot-chat-edit-sessions-nitrite.db`)** — the current
+///   shape (#757). Nitrite is a Java-side embedded NoSQL DB that writes
+///   class names into its catalog as `com.github.copilot.chat.session.
+///   persistence.nitrite.entity.Nt<...>`. An empty session contains only
+///   `NtSelectedModel` (the per-session model preference); sessions with
+///   user turns also carry `NtChatSession`/`NtAgentSession` and the
+///   per-turn `NtTurn`/`NtAgentTurn` records. The byte-level scan looks
+///   for these literal class-name suffixes — Nitrite's MVStore-format
+///   pages embed them verbatim, so a full Nitrite/MVStore decoder isn't
+///   needed for the "session exists and is non-empty" signal.
+const POPULATED_ENTITY_MARKERS: &[&[u8]] = &[
+    // Xodus log markers (legacy shape).
+    b"XdChatSession",
+    b"XdAgentSession",
+    // Nitrite catalog markers (#757). Match the Nt-prefixed entity class
+    // names rather than the fully-qualified path so the test fixtures can
+    // be tiny and the scan stays robust to future Java-package renames.
+    b"NtChatSession",
+    b"NtAgentSession",
+    b"NtEditSession",
+    b"NtTurn",
+    b"NtAgentTurn",
+    b"NtEditTurn",
+];
+
+/// Filenames the JetBrains Copilot plugin uses for its Nitrite stores.
+/// One per session-type subdirectory; only one of these typically exists
+/// in any given session directory, but #757 covers all three shapes so
+/// the parser doesn't regress when a future plugin version splits another
+/// session-type out.
+const NITRITE_DB_FILES: &[&str] = &[
+    "copilot-chat-nitrite.db",
+    "copilot-agent-sessions-nitrite.db",
+    "copilot-chat-edit-sessions-nitrite.db",
+];
 
 /// Platform-specific roots that contain the per-IDE-slug session subtrees.
 pub(super) fn jetbrains_config_roots() -> Vec<PathBuf> {
@@ -181,17 +221,26 @@ pub(super) fn discover_session_dirs(config_roots: &[PathBuf]) -> Vec<PathBuf> {
 /// `ParsedMessage` representing "this session exists and carries chat
 /// activity". Returns an empty vector for empty sessions (ADR-0093 §4)
 /// and for directories that cannot be read.
+///
+/// #757 widened the storage probe to accept either of the two shapes the
+/// JetBrains Copilot plugin has shipped: the legacy Xodus log
+/// (`00000000000.xd`) and the current Nitrite store
+/// (`copilot-chat-nitrite.db` / `copilot-agent-sessions-nitrite.db` /
+/// `copilot-chat-edit-sessions-nitrite.db`). Recent plugin versions skip
+/// the Xodus file entirely; pre-#757 the parser would bail on
+/// `.xd not found` and the session would never emit a row even though
+/// `nitrite.db` contained the conversation.
 pub(super) fn parse_session_dir(session_dir: &Path) -> Vec<ParsedMessage> {
-    let xd_path = session_dir.join("00000000000.xd");
-    let Ok(xd_bytes) = std::fs::read(&xd_path) else {
+    // Look at both candidate stores. The first that exists *and* carries
+    // a populated-entity marker wins — its mtime feeds the message
+    // timestamp. We do not require the .xd file when nitrite.db is
+    // present (#757) — the storage shapes are alternatives, not layers.
+    let populated_path = populated_store_in(session_dir);
+    let Some(store_path) = populated_path else {
         return Vec::new();
     };
 
-    if !has_populated_entity_marker(&xd_bytes) {
-        return Vec::new();
-    }
-
-    let timestamp = xd_path
+    let timestamp = store_path
         .metadata()
         .and_then(|m| m.modified())
         .map(DateTime::<Utc>::from)
@@ -230,14 +279,45 @@ pub(super) fn parse_session_dir(session_dir: &Path) -> Vec<ParsedMessage> {
     vec![msg]
 }
 
-/// Scan the Xodus log bytes for entity-type markers that indicate the
-/// session carries chat activity. Empty sessions hold only `XdMigration`
-/// bootstrap rows, so the absence of any populated-entity marker is the
-/// honest signal that there is nothing for the parser to emit.
-fn has_populated_entity_marker(xd_bytes: &[u8]) -> bool {
+/// #757: locate the store file in `session_dir` that the parser should
+/// treat as the timestamp source for this session. Returns the first
+/// candidate that exists on disk *and* carries a populated-entity
+/// marker.
+///
+/// Probe order: `00000000000.xd` first (legacy sessions still parse the
+/// same way they used to), then each `NITRITE_DB_FILES` entry. A session
+/// directory that contains both — observed on a real DB at the time of
+/// #757 — is treated as Xodus-driven for back-compat. Sessions that
+/// contain only the `.nitrite.db` (the common case post-migration) read
+/// from the Nitrite store.
+fn populated_store_in(session_dir: &Path) -> Option<std::path::PathBuf> {
+    let xd_path = session_dir.join("00000000000.xd");
+    if let Ok(bytes) = std::fs::read(&xd_path)
+        && has_populated_entity_marker(&bytes)
+    {
+        return Some(xd_path);
+    }
+    for filename in NITRITE_DB_FILES {
+        let candidate = session_dir.join(filename);
+        let Ok(bytes) = std::fs::read(&candidate) else {
+            continue;
+        };
+        if has_populated_entity_marker(&bytes) {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+/// Scan the store-file bytes for entity-type markers that indicate the
+/// session carries chat activity. Empty sessions hold only bootstrap
+/// rows (Xodus: `XdMigration`; Nitrite: `NtSelectedModel`), so the
+/// absence of any populated-entity marker is the honest signal that
+/// there is nothing for the parser to emit. See [`POPULATED_ENTITY_MARKERS`].
+fn has_populated_entity_marker(bytes: &[u8]) -> bool {
     POPULATED_ENTITY_MARKERS
         .iter()
-        .any(|needle| byte_contains(xd_bytes, needle))
+        .any(|needle| byte_contains(bytes, needle))
 }
 
 fn byte_contains(haystack: &[u8], needle: &[u8]) -> bool {
@@ -391,6 +471,131 @@ mod tests {
         std::fs::create_dir_all(&session_dir).unwrap();
         // No 00000000000.xd written.
         assert!(parse_session_dir(&session_dir).is_empty());
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// #757: post-migration JetBrains Copilot sessions skip the Xodus
+    /// `.xd` log entirely and write only `copilot-chat-nitrite.db`. The
+    /// parser used to bail (no `.xd` → return empty) and the JetBrains
+    /// surface stayed at $0.00 forever. After the fix it reads the
+    /// Nitrite store, recognizes the populated-entity marker (`NtTurn`
+    /// or `NtChatSession`), and emits one assistant-role placeholder
+    /// the same shape an Xodus-only session would have produced.
+    #[test]
+    fn nitrite_only_session_emits_one_row() {
+        let tmp = std::env::temp_dir().join("budi-jetbrains-nitrite-only");
+        let _ = std::fs::remove_dir_all(&tmp);
+        let session_id = "32REEyBFLmeFBR9TT7Luu0z1Rh8";
+        let session_dir = tmp.join("ws/chat-sessions").join(session_id);
+        std::fs::create_dir_all(&session_dir).unwrap();
+        // Simulate Nitrite's MVStore header + a single Nitrite catalog
+        // entry naming the populated-entity class. Real-world bytes
+        // around the marker are MVStore page payload + Java
+        // serialization; only the literal class-name suffix needs to
+        // round-trip for the byte scan to fire.
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"H:2,blockSize:1000,format:3,version:f\n");
+        bytes.extend_from_slice(&[0u8; 64]);
+        bytes.extend_from_slice(
+            b"com.github.copilot.chat.session.persistence.nitrite.entity.NtChatSession",
+        );
+        bytes.extend_from_slice(&[0u8; 32]);
+        bytes.extend_from_slice(
+            b"com.github.copilot.chat.session.persistence.nitrite.entity.NtTurn",
+        );
+        std::fs::write(session_dir.join("copilot-chat-nitrite.db"), &bytes).unwrap();
+
+        let parsed = parse_session_dir(&session_dir);
+        assert_eq!(parsed.len(), 1, "Nitrite session should emit one row");
+        let m = &parsed[0];
+        assert_eq!(m.role, "assistant");
+        assert_eq!(m.provider, super::super::PROVIDER_ID);
+        assert_eq!(m.surface.as_deref(), Some(crate::surface::JETBRAINS));
+        assert_eq!(m.session_id.as_deref(), Some(session_id));
+        assert_eq!(m.session_title.as_deref(), Some("chat"));
+        assert_eq!(m.input_tokens, 0);
+        assert_eq!(m.output_tokens, 0);
+        assert!(
+            m.cost_cents.is_none(),
+            "tokens come from billing API per ADR-0093 §5"
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// #757: a Nitrite store that carries *only* `NtSelectedModel` (the
+    /// per-session model preference Nitrite writes the moment the user
+    /// opens a chat pane, even before sending a message) must NOT emit
+    /// a row — that mirrors the existing Xodus rule about
+    /// `XdMigration`-only sessions. Without this, every freshly-opened
+    /// chat tab would synthesize a fake assistant turn.
+    #[test]
+    fn nitrite_with_only_selected_model_emits_no_row() {
+        let tmp = std::env::temp_dir().join("budi-jetbrains-nitrite-prefonly");
+        let _ = std::fs::remove_dir_all(&tmp);
+        let session_dir = tmp.join("ic/chat-sessions/sess-prefs-only");
+        std::fs::create_dir_all(&session_dir).unwrap();
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"H:2,blockSize:1000,format:3,version:f\n");
+        bytes.extend_from_slice(&[0u8; 64]);
+        bytes.extend_from_slice(
+            b"com.github.copilot.chat.session.persistence.nitrite.entity.NtSelectedModel",
+        );
+        std::fs::write(session_dir.join("copilot-chat-nitrite.db"), &bytes).unwrap();
+        assert!(parse_session_dir(&session_dir).is_empty());
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// #757: chat-agent sessions write `copilot-agent-sessions-nitrite.db`
+    /// (different filename from `copilot-chat-nitrite.db`). The parser
+    /// must look at both — otherwise post-migration agent sessions stay
+    /// invisible the same way chat sessions did.
+    #[test]
+    fn nitrite_agent_session_emits_row_with_agent_title() {
+        let tmp = std::env::temp_dir().join("budi-jetbrains-nitrite-agent");
+        let _ = std::fs::remove_dir_all(&tmp);
+        let session_dir = tmp.join("iu/chat-agent-sessions/sess-agent");
+        std::fs::create_dir_all(&session_dir).unwrap();
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"H:2,blockSize:1000,format:3,version:f\n");
+        bytes.extend_from_slice(&[0u8; 64]);
+        bytes.extend_from_slice(
+            b"com.github.copilot.chat.session.persistence.nitrite.entity.NtAgentTurn",
+        );
+        std::fs::write(
+            session_dir.join("copilot-agent-sessions-nitrite.db"),
+            &bytes,
+        )
+        .unwrap();
+
+        let parsed = parse_session_dir(&session_dir);
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].session_title.as_deref(), Some("chat-agent"));
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// #757: when both stores are present (real-world dual-store DBs
+    /// during migration), the parser must still emit exactly one row —
+    /// not two. The Xodus probe runs first; a populated `.xd` wins and
+    /// supplies the timestamp.
+    #[test]
+    fn dual_store_session_emits_exactly_one_row() {
+        let tmp = std::env::temp_dir().join("budi-jetbrains-dual-store");
+        let _ = std::fs::remove_dir_all(&tmp);
+        let session_dir = tmp.join("ic/chat-sessions/sess-dual");
+        std::fs::create_dir_all(&session_dir).unwrap();
+        std::fs::write(
+            session_dir.join("00000000000.xd"),
+            b"prefix XdChatSession suffix",
+        )
+        .unwrap();
+        std::fs::write(
+            session_dir.join("copilot-chat-nitrite.db"),
+            b"H:2,blockSize:1000\nNtChatSession\nNtTurn",
+        )
+        .unwrap();
+
+        let parsed = parse_session_dir(&session_dir);
+        assert_eq!(parsed.len(), 1);
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
