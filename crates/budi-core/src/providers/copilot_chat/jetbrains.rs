@@ -40,6 +40,13 @@ use crate::jsonl::ParsedMessage;
 /// UUIDs (which use a different prefix in `super::deterministic_uuid`).
 const UUID_NAMESPACE: &[u8] = b"copilot_chat:jetbrains:";
 
+/// #788: `cwd_source` label written when Phase 2 recovered `file://` URIs
+/// but couldn't walk the longest-common-prefix up to a `.git` checkout
+/// (e.g. the repo isn't checked out on this host, or its `origin` remote
+/// isn't configured). Mirrors `<provider>:<signal>` shape used elsewhere
+/// in the analytics vocabulary so downstream queries can grep for it.
+const CWD_SOURCE_JETBRAINS_PHASE2_PREFIX: &str = "copilot_chat:jetbrains_phase2_prefix";
+
 /// Session directories live under `<ide-slug>/<session-type>/<session-id>/`.
 /// `intellij/` is the shared cross-IDE settings dir (markdown instructions,
 /// `mcp.json`) — it is not a session-bearing slug, see ADR-0093 §3.
@@ -303,7 +310,11 @@ pub(super) fn parse_session_dir(session_dir: &Path) -> Vec<ParsedMessage> {
     // the data-shape caveat: the majority of agent sessions write no
     // `file://` token at all, so this path lights up a small fraction of
     // additional sessions, not the bulk.
-    let phase2_resolution = if phase1_resolution.is_none() {
+    //
+    // #788: when Phase 2 fires we always compute a `Phase2WorkspaceResolution`
+    // so the caller can surface diagnostics + a `common_prefix` hint even
+    // when the chain doesn't terminate in a resolvable `.git` checkout.
+    let phase2 = if phase1_resolution.is_none() {
         let mut all_paths: Vec<String> = Vec::new();
         let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
         for filename in NITRITE_DB_FILES {
@@ -317,12 +328,27 @@ pub(super) fn parse_session_dir(session_dir: &Path) -> Vec<ParsedMessage> {
                 }
             }
         }
-        resolve_workspace_from_paths(&all_paths)
+        let res = resolve_phase2_workspace(&all_paths);
+        // Emit a single DEBUG line per attempt that produced URIs but no
+        // repo_id. Greppable from `~/Library/Logs/budi-daemon.log` to
+        // answer "why didn't this session resolve" without a debugger.
+        if !all_paths.is_empty() && res.repo.is_none() {
+            tracing::debug!(
+                session_id = session_id.as_deref().unwrap_or("?"),
+                session_dir = %session_dir.display(),
+                uri_count = all_paths.len(),
+                common_prefix = res.common_prefix.as_deref().unwrap_or("?"),
+                reason = res.failure_reason.unwrap_or("unknown"),
+                "jetbrains phase2 workspace resolution did not produce a repo_id"
+            );
+        }
+        Some(res)
     } else {
         None
     };
 
-    let repo_resolution = phase1_resolution.or(phase2_resolution);
+    let repo_resolution =
+        phase1_resolution.or_else(|| phase2.as_ref().and_then(|p| p.repo.clone()));
 
     // #764: Phase 1 per-turn extraction. Walk every `*.nitrite.db` in
     // the session dir for `Nt(Agent|Edit)?Turn` documents and collect
@@ -366,6 +392,15 @@ pub(super) fn parse_session_dir(session_dir: &Path) -> Vec<ParsedMessage> {
             if let Some(b) = branch {
                 msg.git_branch = Some(b.clone());
             }
+        } else if let Some(p) = phase2.as_ref()
+            && let Some(prefix) = p.common_prefix.as_ref()
+        {
+            // #788: Phase 2 recovered file URIs but couldn't walk up to a
+            // resolvable `.git` checkout. Surface the longest-common-prefix
+            // path on the message so the dashboard / messages.cwd has a
+            // local-path hint even when we have no remote-backed identity.
+            msg.cwd = Some(prefix.clone());
+            msg.cwd_source = Some(CWD_SOURCE_JETBRAINS_PHASE2_PREFIX.to_string());
         }
         msg
     };
@@ -770,33 +805,82 @@ fn percent_decode(s: &str) -> Option<String> {
     String::from_utf8(out).ok()
 }
 
+/// #788: structured outcome of a Phase 2 workspace resolution attempt.
+///
+/// Carries enough information for the caller to (a) emit a diagnostic log
+/// line explaining why resolution failed, and (b) surface the longest
+/// common prefix as a `cwd` hint on the emitted message even when no
+/// `repo_id` could be derived. Replaces the earlier
+/// `Option<(repo_id, branch)>` return so we no longer throw away the
+/// common-prefix path on the failure paths.
+#[derive(Debug, Default)]
+struct Phase2WorkspaceResolution {
+    /// Longest common directory prefix of the recovered paths, or `None`
+    /// when there were no paths / the paths shared no usable prefix.
+    common_prefix: Option<String>,
+    /// `(repo_id, branch)` when the prefix-or-an-ancestor contains a
+    /// `.git` checkout and `crate::repo_id::resolve_repo_id` succeeded.
+    repo: Option<(String, Option<String>)>,
+    /// A short tag describing why `repo` is `None`. `None` iff `repo`
+    /// is `Some(_)`. One of:
+    ///   - `"no_paths"` — extractor returned an empty list,
+    ///   - `"no_common_prefix"` — paths shared nothing beyond `/`,
+    ///   - `"no_git_along_chain"` — walked to `/` without finding a `.git`,
+    ///   - `"repo_id_resolver_returned_none"` — `.git` exists but
+    ///     `resolve_repo_id` rejected it (no `origin` remote, etc.).
+    failure_reason: Option<&'static str>,
+}
+
 /// Given a list of absolute file paths recovered from a single session's
 /// Nitrite store, compute the deepest common-prefix directory that
 /// contains a `.git` checkout, and resolve it via
 /// [`crate::repo_id::resolve_repo_id`]. Walks the common prefix
 /// upward until a `.git` entry is found or the prefix collapses to `/`.
 ///
-/// Returns `None` when:
-/// - the input is empty,
-/// - the paths share no usable common prefix,
-/// - no `.git` checkout sits along the chain (e.g. files under
-///   `/tmp` or a scratch path with no repo above).
-fn resolve_workspace_from_paths(paths: &[String]) -> Option<(String, Option<String>)> {
+/// Always returns a [`Phase2WorkspaceResolution`]: when resolution fails,
+/// the struct still carries the recovered `common_prefix` (when one
+/// existed) and a `failure_reason` for the caller to log. See #788.
+fn resolve_phase2_workspace(paths: &[String]) -> Phase2WorkspaceResolution {
     if paths.is_empty() {
-        return None;
+        return Phase2WorkspaceResolution {
+            common_prefix: None,
+            repo: None,
+            failure_reason: Some("no_paths"),
+        };
     }
-    let common = longest_common_path_prefix(paths)?;
+    let Some(common) = longest_common_path_prefix(paths) else {
+        return Phase2WorkspaceResolution {
+            common_prefix: None,
+            repo: None,
+            failure_reason: Some("no_common_prefix"),
+        };
+    };
     let mut probe: Option<&Path> = Some(Path::new(&common));
+    let mut saw_git_without_remote = false;
     while let Some(dir) = probe {
-        if dir.join(".git").exists()
-            && let Some(repo_id) = crate::repo_id::resolve_repo_id(dir)
-        {
-            let branch = read_git_head_branch(dir);
-            return Some((repo_id, branch));
+        if dir.join(".git").exists() {
+            if let Some(repo_id) = crate::repo_id::resolve_repo_id(dir) {
+                let branch = read_git_head_branch(dir);
+                return Phase2WorkspaceResolution {
+                    common_prefix: Some(common),
+                    repo: Some((repo_id, branch)),
+                    failure_reason: None,
+                };
+            }
+            saw_git_without_remote = true;
         }
         probe = dir.parent();
     }
-    None
+    let reason = if saw_git_without_remote {
+        "repo_id_resolver_returned_none"
+    } else {
+        "no_git_along_chain"
+    };
+    Phase2WorkspaceResolution {
+        common_prefix: Some(common),
+        repo: None,
+        failure_reason: Some(reason),
+    }
 }
 
 /// Component-wise longest common prefix of a non-empty list of absolute
@@ -1692,26 +1776,81 @@ mod tests {
             format!("{tmp_str}/src/sub/inner/a.rs"),
             format!("{tmp_str}/src/sub/inner/b.rs"),
         ];
-        let Some(resolved) = resolve_workspace_from_paths(&paths) else {
+        let res = resolve_phase2_workspace(&paths);
+        let Some((repo_id, branch)) = res.repo else {
             // git binary unavailable — bail without failing CI.
             let _ = std::fs::remove_dir_all(&tmp);
             return;
         };
-        assert!(resolved.0.contains("phase2-repo"), "got {:?}", resolved);
-        assert_eq!(resolved.1.as_deref(), Some("main"));
+        assert!(repo_id.contains("phase2-repo"), "got {repo_id}");
+        assert_eq!(branch.as_deref(), Some("main"));
+        assert!(res.failure_reason.is_none());
+        assert!(res.common_prefix.is_some());
 
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
+    /// #788: when no `.git` checkout sits along the path chain, resolution
+    /// returns `None` repo *and* the still-useful longest common prefix,
+    /// tagged with `no_git_along_chain` for the diagnostic log line.
+    ///
+    /// Unix-only: `longest_common_path_prefix` requires `/`-anchored
+    /// absolute paths. The Windows temp dir (`C:\...`) is rejected before
+    /// the resolver runs, which is covered by
+    /// `longest_common_path_prefix_drops_to_root_dir_when_no_shared_subdir`.
+    #[cfg(unix)]
     #[test]
-    fn resolve_workspace_from_paths_returns_none_when_no_git_along_chain() {
+    fn resolve_phase2_workspace_returns_prefix_and_reason_when_no_git_along_chain() {
         let tmp = std::env::temp_dir().join("budi-jetbrains-phase2-no-git");
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(tmp.join("src")).unwrap();
         // No `.git/` anywhere in the chain.
         let tmp_str = tmp.to_string_lossy().to_string();
         let paths = vec![format!("{tmp_str}/src/a.rs")];
-        assert!(resolve_workspace_from_paths(&paths).is_none());
+        let res = resolve_phase2_workspace(&paths);
+        assert!(res.repo.is_none());
+        assert_eq!(res.failure_reason, Some("no_git_along_chain"));
+        assert_eq!(
+            res.common_prefix.as_deref(),
+            Some(format!("{tmp_str}/src").as_str())
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// #788: empty input → `no_paths` reason and no prefix.
+    #[test]
+    fn resolve_phase2_workspace_flags_empty_input() {
+        let res = resolve_phase2_workspace(&[]);
+        assert!(res.repo.is_none());
+        assert!(res.common_prefix.is_none());
+        assert_eq!(res.failure_reason, Some("no_paths"));
+    }
+
+    /// #788: when `.git` exists along the chain but `resolve_repo_id`
+    /// returns `None` (e.g. no `origin` remote, the exact failure mode
+    /// described in the Terraform smoke-test ticket), the resolver
+    /// surfaces a distinct `repo_id_resolver_returned_none` reason rather
+    /// than collapsing into the catch-all `no_git_along_chain`.
+    ///
+    /// Unix-only — see note on the prior `no_git_along_chain` test.
+    #[cfg(unix)]
+    #[test]
+    fn resolve_phase2_workspace_distinguishes_resolver_returned_none() {
+        let tmp = std::env::temp_dir().join("budi-jetbrains-phase2-no-remote");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(tmp.join("src")).unwrap();
+        // `.git` directory exists but is empty — `resolve_repo_id` requires
+        // a valid `origin` remote, which an empty dir cannot provide.
+        std::fs::create_dir_all(tmp.join(".git")).unwrap();
+        let tmp_str = tmp.to_string_lossy().to_string();
+        let paths = vec![format!("{tmp_str}/src/a.rs")];
+        let res = resolve_phase2_workspace(&paths);
+        // `resolve_repo_id` shells out to `git`; if git isn't available
+        // we still get `repo_id_resolver_returned_none` because the empty
+        // `.git` dir trips the resolver before any other failure.
+        assert!(res.repo.is_none());
+        assert_eq!(res.failure_reason, Some("repo_id_resolver_returned_none"));
+        assert!(res.common_prefix.is_some());
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
@@ -1760,6 +1899,62 @@ mod tests {
             );
             assert_eq!(msg.git_branch.as_deref(), Some("feature"));
         }
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// #788: when Phase 2 recovers `file://` URIs but the chain doesn't
+    /// lead to a resolvable `.git` checkout (e.g. the Terraform smoke-test
+    /// scenario where the repo isn't checked out on this host), the
+    /// emitted message must still carry the longest-common-prefix path
+    /// as a `cwd` hint with the `copilot_chat:jetbrains_phase2_prefix`
+    /// `cwd_source` marker. Gives the dashboard / messages.cwd something
+    /// to render even when `repo_id` is null.
+    ///
+    /// Unix-only — relies on `/`-anchored temp paths flowing through the
+    /// extractor's URI decoder.
+    #[cfg(unix)]
+    #[test]
+    fn phase2_with_uris_but_no_git_emits_cwd_hint_with_phase2_prefix_source() {
+        let tmp = std::env::temp_dir().join("budi-jetbrains-phase2-cwd-hint");
+        let _ = std::fs::remove_dir_all(&tmp);
+        // Synth a path that exists but has no `.git` above it.
+        let scratch_root = tmp.join("scratch/PhantomRepo");
+        std::fs::create_dir_all(scratch_root.join("src")).unwrap();
+        let scratch_str = scratch_root.to_string_lossy().to_string();
+
+        let mut bytes = synth_nitrite_with_turns(&["bfe8768a-b11e-469a-852b-fc22c7dd9f23"]);
+        bytes.extend_from_slice(b"...currentFileUri\\\\\\\":\\\\\\\"file://");
+        bytes.extend_from_slice(scratch_str.as_bytes());
+        bytes.extend_from_slice(b"/src/bar.rs\\\\\\\",\\\\\\\"isVisionEnabled\\\\\\\":true...");
+
+        let session_dir = tmp.join("iu/chat-agent-sessions/sess-phase2-cwd-hint");
+        std::fs::create_dir_all(&session_dir).unwrap();
+        std::fs::write(
+            session_dir.join("copilot-agent-sessions-nitrite.db"),
+            &bytes,
+        )
+        .unwrap();
+
+        let parsed = parse_session_dir(&session_dir);
+        assert_eq!(parsed.len(), 1, "one row per turn, got {parsed:?}");
+        let msg = &parsed[0];
+        assert!(
+            msg.repo_id.is_none(),
+            "no .git → no repo_id (got {:?})",
+            msg.repo_id
+        );
+        // The byte-walker recovered the URI and the resolver could not
+        // walk up to a `.git`, so we should still surface the prefix.
+        assert_eq!(
+            msg.cwd.as_deref(),
+            Some(format!("{scratch_str}/src").as_str()),
+            "cwd hint should equal the longest common prefix"
+        );
+        assert_eq!(
+            msg.cwd_source.as_deref(),
+            Some("copilot_chat:jetbrains_phase2_prefix")
+        );
 
         let _ = std::fs::remove_dir_all(&tmp);
     }
