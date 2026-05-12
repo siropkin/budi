@@ -138,6 +138,26 @@ pub const CLOUD_SYNC_WATERMARK_KEY: &str = "__budi_cloud_sync__";
 /// Sentinel key for tracking the last session sync timestamp.
 pub const CLOUD_SYNC_SESSION_WATERMARK_KEY: &str = "__budi_cloud_sync_sessions__";
 
+/// #767: wire-shape version embedded in this binary for the
+/// `message_rollups_daily` upload projection. Bump this constant any time a
+/// new column joins [`DailyRollupRecord`] (or an existing one changes
+/// semantics on the wire). On boot, [`reset_stale_shape_watermarks`]
+/// compares this against the local rows' `wire_shape_version`; any drift
+/// drops [`CLOUD_SYNC_WATERMARK_KEY`] so the next sync re-emits history
+/// under the current shape.
+///
+/// History: `1` = pre-surface (≤ 8.4.2). `2` = surface dimension joined the
+/// wire (#723, shipped in 8.4.3).
+pub const WIRE_SHAPE_VERSION_ROLLUPS: u32 = 2;
+
+/// #767: wire-shape version embedded in this binary for the `sessions`
+/// upload projection. Bump any time a new column joins
+/// [`SessionSummaryRecord`].
+///
+/// History: `1` = pre-surface (≤ 8.4.2). `2` = surface dimension joined the
+/// wire (#723, shipped in 8.4.3).
+pub const WIRE_SHAPE_VERSION_SESSIONS: u32 = 2;
+
 /// Update the cloud sync watermark after server confirmation.
 pub fn set_cloud_watermark(conn: &Connection, watermark: &str) -> Result<()> {
     let now = chrono::Utc::now().to_rfc3339();
@@ -216,6 +236,116 @@ pub fn reset_cloud_watermarks(conn: &Connection) -> Result<usize> {
         ],
     )?;
     Ok(removed)
+}
+
+/// #767: outcome of a [`reset_stale_shape_watermarks`] call. Logged at INFO
+/// at daemon boot so on-call can correlate "the cloud dashboard suddenly
+/// reflowed all my history" with the wire-shape upgrade event.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct StaleShapeReset {
+    /// True when the rollup watermark (`__budi_cloud_sync__` + its `_value`
+    /// row) was dropped because at least one row in `message_rollups_daily`
+    /// carried a `wire_shape_version` other than
+    /// [`WIRE_SHAPE_VERSION_ROLLUPS`].
+    pub rollups_reset: bool,
+    /// Same for the session watermark
+    /// (`__budi_cloud_sync_sessions__`) and `sessions`.
+    pub sessions_reset: bool,
+    /// Number of `message_rollups_daily` rows whose `wire_shape_version`
+    /// was bumped to the current binary expectation.
+    pub rollup_rows_updated: usize,
+    /// Number of `sessions` rows whose `wire_shape_version` was bumped.
+    pub session_rows_updated: usize,
+    /// Maximum `wire_shape_version` observed in `message_rollups_daily`
+    /// before the reset. `None` when the table is empty.
+    pub rollup_local_max: Option<u32>,
+    /// Maximum `wire_shape_version` observed in `sessions` before the
+    /// reset. `None` when the table is empty.
+    pub sessions_local_max: Option<u32>,
+}
+
+impl StaleShapeReset {
+    /// True iff either watermark was dropped. Used by the daemon's boot
+    /// log to decide whether to emit the INFO line announcing the upgrade
+    /// dance.
+    pub fn any_reset(&self) -> bool {
+        self.rollups_reset || self.sessions_reset
+    }
+}
+
+/// #767: on daemon boot, detect rows whose `wire_shape_version` is below
+/// what the current binary will emit, and force a re-upload of all
+/// affected rows by dropping the matching cloud-sync watermark
+/// ([`CLOUD_SYNC_WATERMARK_KEY`] for rollups, [`CLOUD_SYNC_SESSION_WATERMARK_KEY`]
+/// for sessions). Each affected row's `wire_shape_version` is bulk-updated
+/// to the binary's expected version so the check doesn't fire again on
+/// the next boot.
+///
+/// Safe on databases that predate the column (returns an all-false
+/// [`StaleShapeReset`]; the migration's `reconcile_schema` runs before this
+/// function in the daemon's startup order, so a missing column means the
+/// DB pre-dates 8.4.6 *and* `repair` was never invoked — neither path
+/// the daemon takes on a healthy boot).
+pub fn reset_stale_shape_watermarks(conn: &Connection) -> Result<StaleShapeReset> {
+    let mut out = StaleShapeReset::default();
+
+    if crate::migration::table_exists(conn, "sessions")?
+        && crate::migration::has_column(conn, "sessions", "wire_shape_version")?
+    {
+        let max_local: Option<u32> = conn
+            .query_row("SELECT MAX(wire_shape_version) FROM sessions", [], |row| {
+                row.get::<_, Option<i64>>(0)
+            })?
+            .map(|v| v as u32);
+        out.sessions_local_max = max_local;
+        if let Some(max) = max_local
+            && max != WIRE_SHAPE_VERSION_SESSIONS
+        {
+            conn.execute(
+                "DELETE FROM sync_state WHERE file_path = ?1",
+                params![CLOUD_SYNC_SESSION_WATERMARK_KEY],
+            )?;
+            let updated = conn.execute(
+                "UPDATE sessions SET wire_shape_version = ?1 WHERE wire_shape_version != ?1",
+                params![WIRE_SHAPE_VERSION_SESSIONS],
+            )?;
+            out.sessions_reset = true;
+            out.session_rows_updated = updated;
+        }
+    }
+
+    if crate::migration::table_exists(conn, "message_rollups_daily")?
+        && crate::migration::has_column(conn, "message_rollups_daily", "wire_shape_version")?
+    {
+        let max_local: Option<u32> = conn
+            .query_row(
+                "SELECT MAX(wire_shape_version) FROM message_rollups_daily",
+                [],
+                |row| row.get::<_, Option<i64>>(0),
+            )?
+            .map(|v| v as u32);
+        out.rollup_local_max = max_local;
+        if let Some(max) = max_local
+            && max != WIRE_SHAPE_VERSION_ROLLUPS
+        {
+            conn.execute(
+                "DELETE FROM sync_state WHERE file_path IN (?1, ?2)",
+                params![
+                    CLOUD_SYNC_WATERMARK_KEY,
+                    format!("{CLOUD_SYNC_WATERMARK_KEY}_value"),
+                ],
+            )?;
+            let updated = conn.execute(
+                "UPDATE message_rollups_daily SET wire_shape_version = ?1 \
+                 WHERE wire_shape_version != ?1",
+                params![WIRE_SHAPE_VERSION_ROLLUPS],
+            )?;
+            out.rollups_reset = true;
+            out.rollup_rows_updated = updated;
+        }
+    }
+
+    Ok(out)
 }
 
 /// Snapshot of the cloud sync state for reporting via `budi cloud status`.
@@ -1359,6 +1489,178 @@ mod tests {
             crate::analytics::last_sync_completed_at(&conn)
                 .unwrap()
                 .is_some(),
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// #767: simulate the upgrade boundary the v8.4.5 smoke test exposed —
+    /// local DB carries history that landed under wire shape v1 (rows
+    /// without the `surface` field populated correctly on the cloud
+    /// because the daemon never re-uploaded them). On boot, the binary
+    /// expects v2; the reset must drop the matching watermark so the
+    /// next sync re-emits every affected row, and must bump each row's
+    /// `wire_shape_version` to the binary's value so the next boot is a
+    /// no-op.
+    #[test]
+    fn reset_stale_shape_watermarks_drops_watermark_on_version_drift() {
+        let dir = std::env::temp_dir().join("budi-cloud-sync-test-wire-shape-drift");
+        std::fs::create_dir_all(&dir).ok();
+        let db_path = dir.join("test.db");
+        let _ = std::fs::remove_file(&db_path);
+
+        let conn = crate::analytics::open_db_with_migration(&db_path).unwrap();
+
+        // Two sessions + one rollup row, simulating the pre-8.4.6 state.
+        conn.execute(
+            "INSERT INTO sessions (id, provider, started_at, ended_at, duration_ms,
+                                   surface, wire_shape_version)
+             VALUES ('s1', 'copilot_chat', '2026-04-10T09:00:00Z', '2026-04-10T10:00:00Z',
+                     3600000, 'jetbrains', 1)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO sessions (id, provider, started_at, ended_at, duration_ms,
+                                   surface, wire_shape_version)
+             VALUES ('s2', 'copilot_chat', '2026-04-10T09:00:00Z', '2026-04-10T10:00:00Z',
+                     3600000, 'jetbrains', 1)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO message_rollups_daily (bucket_day, role, provider, model,
+                                                 repo_id, git_branch, surface,
+                                                 message_count, wire_shape_version)
+             VALUES ('2026-04-10', 'assistant', 'copilot_chat', 'gpt-5',
+                     'sha256:abc', 'main', 'jetbrains', 3, 1)",
+            [],
+        )
+        .unwrap();
+
+        // Plant the watermarks that the pre-upgrade daemon would have
+        // advanced past — the entire bug is that history landed *under*
+        // these watermarks under shape v1.
+        set_cloud_watermark(&conn, "2026-04-10").unwrap();
+        set_session_watermark(&conn, "2026-04-10T10:00:00Z").unwrap();
+
+        let report = reset_stale_shape_watermarks(&conn).unwrap();
+        assert!(report.sessions_reset, "session watermark must be dropped");
+        assert!(report.rollups_reset, "rollup watermark must be dropped");
+        assert_eq!(report.session_rows_updated, 2);
+        assert_eq!(report.rollup_rows_updated, 1);
+        assert_eq!(report.sessions_local_max, Some(1));
+        assert_eq!(report.rollup_local_max, Some(1));
+
+        // Watermarks gone → next sync re-emits everything.
+        assert!(get_session_watermark(&conn).unwrap().is_none());
+        assert!(get_cloud_watermark_value(&conn).unwrap().is_none());
+
+        // Per-row versions bumped so the next boot is a no-op.
+        let session_max: i64 = conn
+            .query_row("SELECT MAX(wire_shape_version) FROM sessions", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(session_max as u32, WIRE_SHAPE_VERSION_SESSIONS);
+        let rollup_max: i64 = conn
+            .query_row(
+                "SELECT MAX(wire_shape_version) FROM message_rollups_daily",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(rollup_max as u32, WIRE_SHAPE_VERSION_ROLLUPS);
+
+        // Second invocation is a no-op (rows already at expected version).
+        let second = reset_stale_shape_watermarks(&conn).unwrap();
+        assert!(!second.any_reset());
+        assert_eq!(second.session_rows_updated, 0);
+        assert_eq!(second.rollup_rows_updated, 0);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// #767: a fresh install has no rows. The boot check must not drop
+    /// the watermarks just because the tables are empty (the next sync
+    /// would otherwise be a no-op anyway, but we still want the boot
+    /// check to be quiet on a healthy first run).
+    #[test]
+    fn reset_stale_shape_watermarks_noop_on_empty_db() {
+        let dir = std::env::temp_dir().join("budi-cloud-sync-test-wire-shape-empty");
+        std::fs::create_dir_all(&dir).ok();
+        let db_path = dir.join("test.db");
+        let _ = std::fs::remove_file(&db_path);
+
+        let conn = crate::analytics::open_db_with_migration(&db_path).unwrap();
+
+        // Plant watermarks that a healthy daemon would have advanced.
+        set_cloud_watermark(&conn, "2026-04-10").unwrap();
+        set_session_watermark(&conn, "2026-04-10T10:00:00Z").unwrap();
+
+        let report = reset_stale_shape_watermarks(&conn).unwrap();
+        assert!(!report.any_reset());
+        assert_eq!(report.sessions_local_max, None);
+        assert_eq!(report.rollup_local_max, None);
+
+        // Watermarks survive — empty tables don't drift.
+        assert_eq!(
+            get_session_watermark(&conn).unwrap().as_deref(),
+            Some("2026-04-10T10:00:00Z")
+        );
+        assert_eq!(
+            get_cloud_watermark_value(&conn).unwrap().as_deref(),
+            Some("2026-04-10")
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// #767: only the affected table's watermark gets dropped. If rollups
+    /// are up-to-date but sessions lag, the session watermark resets and
+    /// the rollup watermark survives (otherwise we'd re-emit hundreds of
+    /// rollup days for no reason — the briefing's "Option A is surgical"
+    /// promise).
+    #[test]
+    fn reset_stale_shape_watermarks_scoped_to_affected_table() {
+        let dir = std::env::temp_dir().join("budi-cloud-sync-test-wire-shape-scoped");
+        std::fs::create_dir_all(&dir).ok();
+        let db_path = dir.join("test.db");
+        let _ = std::fs::remove_file(&db_path);
+
+        let conn = crate::analytics::open_db_with_migration(&db_path).unwrap();
+
+        // Rollups already at the binary's version; sessions still v1.
+        conn.execute(
+            "INSERT INTO sessions (id, provider, started_at, ended_at, duration_ms,
+                                   surface, wire_shape_version)
+             VALUES ('s1', 'copilot_chat', '2026-04-10T09:00:00Z', '2026-04-10T10:00:00Z',
+                     3600000, 'jetbrains', 1)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO message_rollups_daily (bucket_day, role, provider, model,
+                                                 repo_id, git_branch, surface,
+                                                 message_count, wire_shape_version)
+             VALUES ('2026-04-10', 'assistant', 'copilot_chat', 'gpt-5',
+                     'sha256:abc', 'main', 'jetbrains', 3, ?1)",
+            params![WIRE_SHAPE_VERSION_ROLLUPS],
+        )
+        .unwrap();
+
+        set_cloud_watermark(&conn, "2026-04-10").unwrap();
+        set_session_watermark(&conn, "2026-04-10T10:00:00Z").unwrap();
+
+        let report = reset_stale_shape_watermarks(&conn).unwrap();
+        assert!(report.sessions_reset);
+        assert!(!report.rollups_reset);
+
+        // Session watermark gone, rollup watermark survives.
+        assert!(get_session_watermark(&conn).unwrap().is_none());
+        assert_eq!(
+            get_cloud_watermark_value(&conn).unwrap().as_deref(),
+            Some("2026-04-10")
         );
 
         let _ = std::fs::remove_dir_all(&dir);

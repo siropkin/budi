@@ -286,6 +286,35 @@ async fn main() -> Result<()> {
                         "ticket-extraction denylist backfill failed"
                     ),
                 }
+
+                // #767: detect rows whose `wire_shape_version` lags the
+                // current binary's expected shape and drop the matching
+                // cloud-sync watermark so the next sync re-emits history
+                // under the new shape (e.g. with the surface dimension
+                // populated). Previously this required `POST /cloud/reset`
+                // as undocumented institutional knowledge; the v8.4.5 smoke
+                // test caught only 1 of 23 JetBrains sessions on the
+                // dashboard until a manual reset re-uploaded the rest.
+                match budi_core::cloud_sync::reset_stale_shape_watermarks(&conn) {
+                    Ok(report) if report.any_reset() => tracing::info!(
+                        target: "budi_daemon::wire_shape",
+                        sessions_reset = report.sessions_reset,
+                        rollups_reset = report.rollups_reset,
+                        session_rows_updated = report.session_rows_updated,
+                        rollup_rows_updated = report.rollup_rows_updated,
+                        sessions_local_max = ?report.sessions_local_max,
+                        rollups_local_max = ?report.rollup_local_max,
+                        expected_sessions = budi_core::cloud_sync::WIRE_SHAPE_VERSION_SESSIONS,
+                        expected_rollups = budi_core::cloud_sync::WIRE_SHAPE_VERSION_ROLLUPS,
+                        "wire-shape upgrade detected; dropped cloud watermark(s) to force re-upload (#767)"
+                    ),
+                    Ok(_) => {}
+                    Err(e) => tracing::warn!(
+                        target: "budi_daemon::wire_shape",
+                        error = %e,
+                        "wire-shape boot check failed; cloud sync may need manual `budi cloud reset` after a wire-shape change"
+                    ),
+                }
             }
         }
     }
