@@ -300,6 +300,15 @@ fn fetch_pricing(
         .call();
     match result {
         Ok(mut response) => {
+            // #747: ureq's `call()` returns `Ok` for 304 in this workspace's
+            // pinned version (304 is not a 4xx/5xx). The body is empty, so
+            // `read_json()` would surface an EOF parse error to the user.
+            // Short-circuit before touching the body. The matching 304 arm
+            // on the `Err` side stays as defense-in-depth in case a future
+            // ureq bump flips the classification.
+            if response.status() == 304 {
+                return Ok(FetchOutcome::Unchanged);
+            }
             let pricing: TeamPricing = response
                 .body_mut()
                 .read_json()
@@ -400,6 +409,45 @@ mod tests {
         let interval = resolve_interval();
         unsafe { std::env::remove_var(REFRESH_INTERVAL_ENV) };
         assert_eq!(interval, DEFAULT_REFRESH_INTERVAL);
+    }
+
+    /// Spawn a one-shot TCP server that replies with the canned response and
+    /// returns its `http://127.0.0.1:PORT` endpoint. Keeps the test free of
+    /// any new test-only dependency — the existing workspace already exposes
+    /// `std::net` and `std::thread`.
+    fn spawn_one_shot_server(response: &'static [u8]) -> String {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            use std::io::{Read, Write};
+            let (mut stream, _) = listener.accept().expect("accept");
+            // Drain the request — the daemon will send GET headers + CRLFCRLF.
+            // We don't need the bytes, just to read past them so the kernel
+            // delivers our write back as the response.
+            let mut buf = [0u8; 1024];
+            let _ = stream.read(&mut buf);
+            stream.write_all(response).expect("write response");
+        });
+        format!("http://127.0.0.1:{port}")
+    }
+
+    /// #747: prior to this fix, ureq's `call()` returned `Ok` for a 304
+    /// response in the pinned version, which then tripped `read_json()` on
+    /// the empty body and surfaced an EOF parse error to the user every
+    /// hourly tick. Assert the worker now reports `Unchanged` instead.
+    #[test]
+    fn fetch_pricing_treats_ok_304_as_unchanged() {
+        let endpoint = spawn_one_shot_server(
+            b"HTTP/1.1 304 Not Modified\r\n\
+              Content-Length: 0\r\n\
+              Connection: close\r\n\
+              \r\n",
+        );
+        let outcome = fetch_pricing(&endpoint, "test-key", 7).expect("304 must not error");
+        assert!(
+            matches!(outcome, FetchOutcome::Unchanged),
+            "got {outcome:?}"
+        );
     }
 
     /// When `BUDI_PRICING_REFRESH=0` is set, `run()` must exit quickly
