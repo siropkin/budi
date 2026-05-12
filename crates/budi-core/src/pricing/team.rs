@@ -356,10 +356,14 @@ pub fn recompute_messages(
     };
 
     let Some(pricing) = pricing else {
+        // `!=` returns NULL (not TRUE) when one side is NULL, so the
+        // legacy filter skipped pre-#730 NULL rows and the worker silently
+        // no-op'd them (#746). The `IS NULL` clause picks those rows up.
         let changed = conn.execute(
             "UPDATE messages
                 SET cost_cents_effective = cost_cents_ingested
-              WHERE cost_cents_effective != cost_cents_ingested",
+              WHERE cost_cents_effective IS NULL
+                 OR cost_cents_effective != cost_cents_ingested",
             [],
         )?;
         summary.rows_changed = changed as i64;
@@ -393,7 +397,11 @@ pub fn recompute_messages(
         let cache_creation_t: i64 = r.get(5)?;
         let cache_read_t: i64 = r.get(6)?;
         let ingested: f64 = r.get(7)?;
-        let current_eff: f64 = r.get(8)?;
+        // #746: pre-#730 history can still carry NULL `_effective` rows if the
+        // user's DB shipped past the rename before the backfill landed. Read
+        // as Option<f64> so the loop survives those rows; the NULL case below
+        // schedules an unconditional write to repair them.
+        let current_eff: Option<f64> = r.get(8)?;
 
         let new_eff = if let Some(model_str) = model.as_deref() {
             let provider_str = provider.as_deref().unwrap_or("");
@@ -412,7 +420,13 @@ pub fn recompute_messages(
             ingested
         };
 
-        if (new_eff - current_eff).abs() > 1e-9 {
+        let needs_update = match current_eff {
+            Some(c) => (new_eff - c).abs() > 1e-9,
+            // NULL → row predates the dual-cost migration backfill;
+            // always rewrite so the column becomes a real number.
+            None => true,
+        };
+        if needs_update {
             updates.push((id, new_eff));
         }
     }
@@ -621,6 +635,37 @@ mod tests {
             .unwrap();
         // 1M input × $2.91/MTok + 1M output × $14.55/MTok = $17.46 = 1746 cents.
         assert!((eff - 1746.0).abs() < 1e-6, "got {eff}");
+    }
+
+    // #746: pre-#730 history can carry NULL `_effective` rows if the DB
+    // shipped past the rename before the backfill landed. The recompute
+    // loop used to read the column as `f64` and crash with "Invalid column
+    // type Null"; assert it now (a) survives the read, and (b) repairs
+    // the NULL into a real number.
+    #[test]
+    fn recompute_repairs_null_effective_rows() {
+        let conn = crate::analytics::open_db_with_migration(std::path::Path::new(":memory:"))
+            .expect("open db");
+        conn.execute(
+            "INSERT INTO messages (id, role, timestamp, model, provider,
+                                   input_tokens, output_tokens,
+                                   cost_cents_ingested, cost_cents_effective)
+             VALUES ('legacy','assistant','2026-05-11T00:00:00Z','claude-sonnet-4-5-x','claude_code',
+                     0, 100, 7.0, NULL)",
+            [],
+        )
+        .expect("seed legacy NULL row");
+
+        let summary = recompute_messages(&conn, None).expect("recompute survives NULL");
+        assert_eq!(summary.rows_changed, 1, "NULL row must be rewritten");
+        let eff: Option<f64> = conn
+            .query_row(
+                "SELECT cost_cents_effective FROM messages WHERE id='legacy'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(eff, Some(7.0), "NULL should be repaired to _ingested");
     }
 
     #[test]
