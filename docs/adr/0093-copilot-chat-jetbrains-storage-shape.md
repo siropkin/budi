@@ -149,3 +149,38 @@ Nitrite writes its collection class names verbatim into the MVStore catalog. The
 ### What this amendment does not promise
 
 The parser still does not extract token counts from Nitrite — §5's conclusion stands. The byte-scan is a "this session is non-empty" signal, not a full MVStore + Java-serialization decoder. Full per-turn extraction (parsing the BSON-like document bodies into `role` / `content` / `tokens` / `model`) remains parser-ticket scope and pairs naturally with the open question on `NtAgentTurn` above. The amendment closes the regression where Nitrite-only sessions emitted no rows at all; deeper extraction is a future ADR amendment.
+
+## Amendment 2026-05-12 — #778: Phase 2 workspace-path byte-walker for agent-only Nitrite sessions
+
+Phase 1 of the JetBrains repo-attribution work (#766, v8.4.7 / v8.4.8) shipped a byte-walker for the Xodus log's `XdChatSession.projectName` property. On the 8.4.8 smoke-test machine that path resolved 3 of 23 `surface=jetbrains` sessions to a `repo_id`. The remaining 20 are agent sessions whose data lives **only** in `copilot-agent-sessions-nitrite.db` with no `.xd` (or with a `.xd` that carries no `projectName` property), so Phase 1 cannot reach them.
+
+Phase 2 (#778) extends the byte-walker into the Nitrite store to recover whatever `file://` URIs the plugin happened to persist. The recovered URIs feed a longest-common-prefix → `.git`-walk → `resolve_repo_id` chain that lights up additional sessions without requiring a real MVStore + Java-serialization decoder.
+
+### What the Phase 2 byte-walker matches
+
+Across 98 real Nitrite DBs surveyed on 2026-05-12, **only 3 carried any `file://` token at all**. Where present, the URIs live inside an escape-encoded JSON blob in `NtAgentTurn.stringContent` — specifically the `currentFileUri` key of the per-turn model-state snapshot:
+
+```
+currentFileUri\\\":\\\"file:///Users/me/_projects/Verkada-Web/src/x.tsx\\\",
+```
+
+The byte-walker scans for the literal `file://` token, reads bytes until the next non-path-safe character (backslash, quote, brace, control byte, etc.), percent-decodes the result, and dedupes. The output feeds `resolve_workspace_from_paths` which:
+
+1. Computes the longest common directory prefix across all recovered URIs (filename components are dropped).
+2. Walks the prefix upward until a `.git` directory is found.
+3. Resolves the checkout via `crate::repo_id::resolve_repo_id` and reads the current branch from `.git/HEAD`.
+
+### What this amendment does not promise
+
+The Phase 2 byte-walker only fires on sessions that happen to carry a `currentFileUri` model-state snapshot. The ticket's original assumption — that `NtAgentWorkingSetItem` documents would carry per-file URIs in a top-level `stringContent` TC_STRING — does not hold up on real fixtures. Inspecting the working-set markers in 8.4.8 captures shows each `NtAgentWorkingSetItem` instance only persists `created_at` / `uuid` / `last_modified_at` plus an opaque `_revision` cursor; the actual file-reference payload (presumably the `fileUrl` index field referenced by the Nitrite catalog) lives in a separate MVStore segment that the byte walker cannot reach.
+
+**Deferred to a future ADR amendment:**
+
+- Full MVStore page-segment + Java-`ObjectInputStream` decoder for `NtAgentWorkingSetItem` documents, which would let the resolver light up every agent session that has ever opened a file, not just those that captured a `currentFileUri` model-state snapshot.
+- LZF-decompression support for MVStore pages, should a future plugin version begin writing compressed pages. The current heuristic looks for `format:3` (uncompressed default) and proceeds; pages outside that format will not yield URIs.
+
+### Realistic acceptance bar on the 8.4.8 smoke-test machine
+
+The #778 ticket asked for "≥ 12 of 23" sessions resolved post-Phase-2. The honest delivered bar against this data shape is **+1 session** beyond Phase 1 — the one additional agent session that happens to carry a `currentFileUri` snapshot for a repo not already covered by Phase 1. The data simply does not contain enough `file://` tokens to reach the speculative bar. Sessions that do not write a `currentFileUri` cleanly fall through to the Phase 1 `projectName` heuristic (where present) or remain with `repo_id = NULL` (the honest "we don't know" signal — the dashboard renders `Repo: (unknown)` rather than guessing).
+
+Fixture: `crates/budi-core/src/providers/copilot_chat/fixtures/jetbrains_nitrite_working_set_phase2/` (size-preserving redacted from a real session, see the matching `.shape.md`).
