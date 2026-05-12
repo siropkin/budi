@@ -181,3 +181,38 @@ pub async fn pricing_refresh() -> Result<Json<Value>, (StatusCode, Json<Value>)>
         )),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// #745: the CLI used to send `?force=0|1`, but serde's strict bool
+    /// deserializer only accepts the literal strings `true` / `false`.
+    /// Pin the wire contract on the daemon side so a future CLI bump
+    /// can't silently regress it again.
+    #[test]
+    fn recompute_query_accepts_true_false_literals() {
+        let true_q: RecomputeQuery =
+            serde_urlencoded::from_str("force=true").expect("force=true must parse");
+        assert!(true_q.force);
+
+        let false_q: RecomputeQuery =
+            serde_urlencoded::from_str("force=false").expect("force=false must parse");
+        assert!(!false_q.force);
+
+        let missing_q: RecomputeQuery =
+            serde_urlencoded::from_str("").expect("missing force must default");
+        assert!(!missing_q.force);
+    }
+
+    /// Numeric `0` / `1` are explicitly *not* part of the wire shape — the
+    /// CLI shipped a regression in v8.4.3 doing exactly that and produced a
+    /// 400 the user couldn't recover from. Keep this test failing-loud so
+    /// the bad shape can't be re-introduced without an opt-in custom
+    /// deserializer.
+    #[test]
+    fn recompute_query_rejects_numeric_bool_literals() {
+        assert!(serde_urlencoded::from_str::<RecomputeQuery>("force=1").is_err());
+        assert!(serde_urlencoded::from_str::<RecomputeQuery>("force=0").is_err());
+    }
+}
