@@ -117,3 +117,35 @@ The "placeholder" framing in the existing classifier comments is retained until 
 2. What's the `xd.lck` concurrency contract — does Copilot for JetBrains release the Xodus lock when idle, allowing read-only opens while the IDE is running, or must the daemon defer reads until IDE shutdown?
 3. Confirm Windows path (`%APPDATA%` vs `%LOCALAPPDATA%`) once a Windows capture is feasible.
 4. Confirm the IDE-slug discovery pattern (directory-listing under `~/.config/github-copilot/` excluding `intellij/` and known top-level files) is forward-compatible with new JetBrains products as the plugin ships to them.
+
+## Amendment 2026-05-11 — #757: dual-store probe accepts either `.xd` or `.nitrite.db` as the existence marker
+
+Post-acceptance smoke testing in v8.4.4 surfaced a behavioral fact §4 did not anticipate: recent versions of the GitHub Copilot for JetBrains plugin **skip the Xodus log entirely** on new sessions and persist conversation state to the Nitrite store only. A real-world `chat-sessions/<session-id>/` captured on 2026-05-11 carried `copilot-chat-nitrite.db` (mtime matched the most recent prompt) and no `00000000000.xd` at all. The original parser shape — which bailed when `.xd` was missing — therefore emitted zero rows for every post-migration JetBrains session, leaving the `surface=jetbrains` rollup at $0.00 even when reconciliation rows existed upstream.
+
+### Decision
+
+The parser's existence-check accepts **either** of the two stores. Probe order:
+
+1. `00000000000.xd` — legacy shape; if present and populated, use it (this preserves the pre-#757 behavior for old sessions verbatim).
+2. `copilot-chat-nitrite.db`, `copilot-agent-sessions-nitrite.db`, `copilot-chat-edit-sessions-nitrite.db` — current shape; first hit wins.
+
+Either path supplies the same one-row-per-populated-session signal: a single `assistant`-role `ParsedMessage` with `surface=jetbrains`, zero token counts (cost reconciles via the GitHub Billing API per §5 above), and a deterministic UUID derived from the session-id + path.
+
+### Populated-entity markers on the Nitrite side
+
+Nitrite writes its collection class names verbatim into the MVStore catalog. The byte-scan looks for these suffixes (the FQCN prefix is the same for every entry — only the class-name tail is matched so the scan stays robust to future Java-package renames):
+
+| Marker | Meaning |
+|---|---|
+| `NtChatSession` | Chat session record (chat-sessions/) |
+| `NtAgentSession` | Agent session record (chat-agent-sessions/) |
+| `NtEditSession` | Edit session record (chat-edit-sessions/) |
+| `NtTurn` | Per-turn record under a chat session |
+| `NtAgentTurn` | Per-turn record under an agent session |
+| `NtEditTurn` | Per-turn record under an edit session |
+
+`NtSelectedModel` is **not** in this set: it is the per-session model preference Nitrite writes the moment the user opens a chat pane, before any prompt has been sent. Treating it as a populated marker would synthesize fake assistant turns for every empty chat tab.
+
+### What this amendment does not promise
+
+The parser still does not extract token counts from Nitrite — §5's conclusion stands. The byte-scan is a "this session is non-empty" signal, not a full MVStore + Java-serialization decoder. Full per-turn extraction (parsing the BSON-like document bodies into `role` / `content` / `tokens` / `model`) remains parser-ticket scope and pairs naturally with the open question on `NtAgentTurn` above. The amendment closes the regression where Nitrite-only sessions emitted no rows at all; deeper extraction is a future ADR amendment.
