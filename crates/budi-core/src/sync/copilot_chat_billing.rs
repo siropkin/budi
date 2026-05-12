@@ -422,24 +422,61 @@ fn apply_buckets(conn: &mut Connection, rows: &[BillingRow]) -> Result<usize> {
 
     for row in rows {
         // Existing-bucket sum drives the scale factor. We compute it
-        // first so a zero-sum bucket (no local-tail rows yet) skips
-        // cleanly without a divide-by-zero.
-        let existing_sum_cents: Option<f64> = tx
+        // alongside a row count so a zero-sum bucket carrying placeholder
+        // rows (e.g. JetBrains' one-row-per-session, zero-token shape from
+        // #722 / #757) can still receive the billing-API dollars via the
+        // #765 even-distribution fallback below.
+        let bucket_stats: Option<(f64, i64)> = tx
             .query_row(
-                "SELECT SUM(COALESCE(cost_cents_effective, 0.0))
+                "SELECT COALESCE(SUM(COALESCE(cost_cents_effective, 0.0)), 0.0), COUNT(*)
                  FROM messages
                  WHERE provider = ?1
                    AND model = ?2
                    AND DATE(timestamp) = ?3",
                 params![PROVIDER_NAME, row.model, row.date],
-                |r| r.get(0),
+                |r| Ok((r.get::<_, f64>(0)?, r.get::<_, i64>(1)?)),
             )
-            .ok()
-            .flatten();
-        let Some(existing_sum_cents) = existing_sum_cents else {
+            .ok();
+        let Some((existing_sum_cents, row_count)) = bucket_stats else {
             continue;
         };
+        if row_count <= 0 {
+            // No placeholder rows yet; next tick can pick this up once
+            // tokens (or zero-token placeholders) have landed.
+            continue;
+        }
+
         if existing_sum_cents.abs() < MIN_SCALE_DENOMINATOR_CENTS {
+            // #765: a zero-sum bucket with placeholder rows (the common
+            // case for JetBrains right now — `parse_session_dir` emits
+            // one zero-token row per session, so the sum is 0 even
+            // though row_count > 0). Without this fallback the billing
+            // dollars stay frozen on the cloud and `cost_30d` for
+            // `surface=jetbrains` reads $0. Distribute evenly across the
+            // placeholder rows and tag them `estimated` /
+            // `billing_api:copilot_chat` so the read surface knows the
+            // attribution is bucket-level, not per-row exact.
+            if row.amount_in_cents <= 0.0 {
+                continue;
+            }
+            let per_row = row.amount_in_cents / row_count as f64;
+            let updated = tx.execute(
+                "UPDATE messages
+                    SET cost_cents_effective = ?1,
+                        cost_confidence = 'estimated',
+                        pricing_source = ?2
+                  WHERE provider = ?3
+                    AND model = ?4
+                    AND DATE(timestamp) = ?5",
+                params![
+                    per_row,
+                    COLUMN_VALUE_BILLING_API,
+                    PROVIDER_NAME,
+                    row.model,
+                    row.date
+                ],
+            )?;
+            total_updated += updated;
             continue;
         }
 
@@ -728,11 +765,73 @@ mod tests {
         assert_eq!(src3, "manifest:v1");
     }
 
+    /// #765: zero-token JetBrains placeholder rows must still receive the
+    /// billing API's dollar truth, distributed evenly across the bucket's
+    /// rows. Pre-#765 the worker short-circuited on zero `existing_sum`,
+    /// leaving `cost_30d` for `surface=jetbrains` permanently at $0 even
+    /// after a successful reconciliation tick.
     #[test]
-    fn bucket_with_zero_existing_sum_is_skipped() {
+    fn bucket_with_zero_existing_sum_distributes_evenly_across_placeholders() {
         let mut conn = fresh_conn();
-        // No local-tail rows for this bucket — Billing API row should be
-        // skipped (no rows to scale; next tick handles it once tokens land).
+        // Three zero-cost placeholder rows (the JetBrains `parse_session_dir`
+        // shape from #722 / #757) in the same (date, model) bucket. Billing
+        // API truth = 300c. Distribution: each row gets 100c.
+        insert_local_tail_message(&conn, "j-1", "2026-05-04T10:00:00Z", "gpt-4.1", 0.0);
+        insert_local_tail_message(&conn, "j-2", "2026-05-04T11:00:00Z", "gpt-4.1", 0.0);
+        insert_local_tail_message(&conn, "j-3", "2026-05-04T12:00:00Z", "gpt-4.1", 0.0);
+        // Different-day row stays untouched.
+        insert_local_tail_message(&conn, "j-4", "2026-05-05T10:00:00Z", "gpt-4.1", 0.0);
+
+        let response = BillingResponse {
+            billing_cycle_start: Utc.with_ymd_and_hms(2026, 5, 1, 0, 0, 0).unwrap(),
+            billing_cycle_end: Utc.with_ymd_and_hms(2026, 5, 31, 23, 59, 59).unwrap(),
+            rows: vec![BillingRow {
+                date: "2026-05-04".to_string(),
+                model: "gpt-4.1".to_string(),
+                amount_in_cents: 300.0,
+            }],
+        };
+        apply_response(&mut conn, &response).unwrap();
+
+        let load = |id: &str| -> (f64, String, String) {
+            conn.query_row(
+                "SELECT cost_cents_effective, cost_confidence, pricing_source FROM messages WHERE id = ?1",
+                params![id],
+                |r| Ok((r.get::<_, f64>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?)),
+            )
+            .unwrap()
+        };
+
+        for id in ["j-1", "j-2", "j-3"] {
+            let (cost, conf, src) = load(id);
+            assert!(
+                (cost - 100.0).abs() < 0.001,
+                "{id} should receive 100c (300c / 3 placeholders), got {cost}"
+            );
+            // The attribution is bucket-level, not per-row exact — make
+            // sure the read surface knows it.
+            assert_eq!(conf, "estimated", "{id} confidence stays estimated");
+            assert_eq!(src, COLUMN_VALUE_BILLING_API, "{id} provenance updated");
+        }
+        let (other_cost, other_conf, _) = load("j-4");
+        assert!(
+            (other_cost - 0.0).abs() < 0.001,
+            "different-day row untouched"
+        );
+        assert_eq!(other_conf, "estimated");
+
+        // Watermark still advances on the successful fetch.
+        let stored = analytics::get_sync_offset(&conn, BILLING_API_WATERMARK_KEY).unwrap();
+        assert!(stored > 0);
+    }
+
+    /// #765 defense-in-depth: a bucket with zero placeholder rows must
+    /// still be skipped cleanly (no divide-by-zero, no spurious update).
+    /// Lets the next tick pick it up once the parser has landed
+    /// something.
+    #[test]
+    fn bucket_with_no_rows_is_skipped() {
+        let mut conn = fresh_conn();
         let response = BillingResponse {
             billing_cycle_start: Utc.with_ymd_and_hms(2026, 5, 1, 0, 0, 0).unwrap(),
             billing_cycle_end: Utc.with_ymd_and_hms(2026, 5, 31, 23, 59, 59).unwrap(),
@@ -743,9 +842,59 @@ mod tests {
             }],
         };
         apply_response(&mut conn, &response).unwrap();
-        // Watermark still advances (we did successfully fetch).
+        // Watermark advances; the bucket itself produced no updates
+        // because the COUNT was zero.
         let stored = analytics::get_sync_offset(&conn, BILLING_API_WATERMARK_KEY).unwrap();
         assert!(stored > 0);
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM messages", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 0);
+    }
+
+    /// #765 defense-in-depth: the non-zero-sum scale path is the
+    /// primary code path and must keep working. Mirrors
+    /// `nonempty_bucket_scales_existing_rows_and_bumps_confidence` but
+    /// expressed as a separate test so the #765 fallback path can never
+    /// silently subsume the scale path without tripping at least one
+    /// targeted assertion.
+    #[test]
+    fn nonzero_existing_sum_still_scales_proportionally() {
+        let mut conn = fresh_conn();
+        insert_local_tail_message(&conn, "s-1", "2026-05-04T10:00:00Z", "gpt-4.1", 75.0);
+        insert_local_tail_message(&conn, "s-2", "2026-05-04T11:00:00Z", "gpt-4.1", 25.0);
+
+        let response = BillingResponse {
+            billing_cycle_start: Utc.with_ymd_and_hms(2026, 5, 1, 0, 0, 0).unwrap(),
+            billing_cycle_end: Utc.with_ymd_and_hms(2026, 5, 31, 23, 59, 59).unwrap(),
+            rows: vec![BillingRow {
+                date: "2026-05-04".to_string(),
+                model: "gpt-4.1".to_string(),
+                amount_in_cents: 400.0,
+            }],
+        };
+        apply_response(&mut conn, &response).unwrap();
+
+        let (c1, conf1, src1): (f64, String, String) = conn
+            .query_row(
+                "SELECT cost_cents_effective, cost_confidence, pricing_source FROM messages WHERE id = 's-1'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        let (c2, conf2, _): (f64, String, String) = conn
+            .query_row(
+                "SELECT cost_cents_effective, cost_confidence, pricing_source FROM messages WHERE id = 's-2'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        // scale = 400/100 = 4. Rows: 75*4=300, 25*4=100.
+        assert!((c1 - 300.0).abs() < 0.001);
+        assert!((c2 - 100.0).abs() < 0.001);
+        assert_eq!(conf1, "exact");
+        assert_eq!(conf2, "exact");
+        assert_eq!(src1, COLUMN_VALUE_BILLING_API);
     }
 
     #[test]
