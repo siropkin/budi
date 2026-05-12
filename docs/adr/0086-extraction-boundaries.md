@@ -155,9 +155,9 @@ Release workflow (`.github/workflows/release.yml`) also builds the extension bef
 #### 3.4 Session Tracking File
 
 **Current state:**
-- `~/.local/share/budi/cursor-sessions.json` is written by hook events (daemon side) and watched by the Cursor extension (file watch) to track the active session.
+- `~/.local/share/budi/cursor-sessions.json` is written by the host-aware extension and consumed by `budi` (the daemon reads it as an optional UX hints file in `doctor`, not as a workspace-resolution oracle). Workspace / repo / branch attribution is per-message and is set by the parsers at ingest time (`repo_id` is resolved by `crate::repo_id::resolve_repo_id`); the file is purely a UX signal layer.
 
-**Untangling impact:** This is a well-defined file contract. The daemon writes it; the extension reads it. No code sharing involved. The contract is:
+**Wire contract — v1:**
 
 ```json
 {
@@ -166,7 +166,31 @@ Release workflow (`.github/workflows/release.yml`) also builds the extension bef
 }
 ```
 
-This file format must be documented and stable before extraction. Changes to the format require a version bump.
+**Wire contract — v1.1 (2026-05-12, [#780](https://github.com/siropkin/budi/issues/780), companion to [siropkin/budi-cursor#64](https://github.com/siropkin/budi-cursor/issues/64)):**
+
+The same extension binary may run inside **Cursor** *or* **VS Code** when installed via the VS Code Marketplace / Open VSX. The host is determined by the extension at runtime (`vscode.env.appName`). To keep one canonical wire file for the host-aware extension, **the file path stays `cursor-sessions.json` regardless of host** and grows an optional `surface` field carrying the host id:
+
+```json
+{
+  "active_session_id": "uuid-string",
+  "updated_at": "ISO-8601",
+  "surface": "vscode",
+  "installed_extensions": {
+    "copilot_chat": ["github.copilot-chat"]
+  }
+}
+```
+
+Rules:
+
+1. **Filename stays `cursor-sessions.json`.** The name is a historical artifact; it does not imply the host. Decision rationale: option (A) of #780 ("keep one file, key on content") was picked over (B) "two filenames" because the daemon's per-message workspace resolver already keys on file *content* (`messages.surface`, `repo_id`, `git_branch` columns), not on this file's name. A second filename would have required no daemon work either way — but it would have forced two file watches in the extension and split the doctor permissive-merge logic for no gain.
+2. **`surface` is optional.** Allowed values: `cursor`, `vscode`. Unknown / missing values are treated as `cursor` for backward compatibility with budi-cursor 1.x writers. Future hosts add new values.
+3. **The daemon is permissive.** `budi doctor`'s loader (`read_session_hint_file` / `merge_hint_extensions` in `crates/budi-cli/src/commands/doctor.rs`) ignores any field it does not recognise. For backward compatibility a second filename `vscode-sessions.json` is *also* read at the same path; the contents of both are merged. This is a compatibility carve-out — the host-aware extension should write only `cursor-sessions.json` going forward.
+4. **No version bump needed.** The schema is purely additive — `surface` is optional, ignored when absent, and does not invalidate v1 writers. Both v1 and v1.1 documents coexist on the same path.
+
+**Acceptance signal:** `GET /analytics/statusline?surface=vscode` returns the per-VS-Code rollup based on the `messages.surface` column populated at ingest time (covered by tests in `crates/budi-core/src/analytics/tests.rs` for surface-filter scoping). The wire-contract file itself is consumed only for installed-extension hints in `budi doctor` — its `surface` field is informational, not load-bearing on the analytics path.
+
+This file format must be documented and stable before extraction. Future breaking changes (rename, removal of `active_session_id`, schema bump) require a version bump and an ADR amendment.
 
 #### 3.5 Config File Ownership
 

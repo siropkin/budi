@@ -130,6 +130,10 @@ Classification should improve through **simple, explainable, local-first methods
 - **Onboarding (#228):** Scope is strictly local: install / init / doctor / first-run success. The cross-surface local→cloud linking UX is **not** part of #228 — it is owned by #235 in R3. This split is intentional: keep R2 about "does Budi feel good on one machine?" and keep R3 about "does Budi feel good across machine and cloud?".
 - **Statusline (#224):** See §4. Default stays quiet, provider-scoped, `1d` / `7d` / `30d`.
 
+**`cursor-onboarding.json` (forward-looking, [#780](https://github.com/siropkin/budi/issues/780)):**
+
+The host-aware extension may emit a sibling `~/.local/share/budi/cursor-onboarding.json` containing local-counter state (e.g. install timestamps, first-run flags, per-host onboarding progress) that `budi doctor` reads to render a sharper onboarding check. Path naming mirrors the `cursor-sessions.json` story (ADR-0086 §3.4): the filename stays `cursor-onboarding.json` regardless of host; an optional `surface` field inside the JSON tags the host (`cursor` | `vscode` | future). Daemon-side readers stay permissive (silently ignore unknown fields) and treat absent `surface` as `cursor` for backward compatibility. No daemon reader exists yet — this is forward-looking; the contract is reserved here so the extension can land it without further ADR churn. A future ADR will pin the field list when the doctor check is implemented.
+
 ### 7. Surface alignment rules for R3 (amended for 8.4)
 
 **Host-scoped vs. provider-scoped surfaces.** Every user-visible surface in 8.x is one of:
