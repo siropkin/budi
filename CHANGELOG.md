@@ -1,5 +1,17 @@
 # Changelog
 
+## 8.4.8 — 2026-05-12
+
+8.4.8 is the second same-day hotfix on top of v8.4.6 / v8.4.7. The v8.4.7 fix combined the Xodus `projectName` extraction with Nitrite per-turn extraction, but the populated-entity probe still skipped session-dirs whose `.xd` carried only the `projectName` property (no `Xd*Session` marker) and whose Nitrite store used the older `copilot-edit-sessions-nitrite.db` filename — without the `chat-` prefix `NITRITE_DB_FILES` was looking for. Result: one of the three resolvable-on-disk JetBrains sessions (Verkada-Backend) stayed at `repo_id = NULL` even after the v8.4.7 dual-store fix. `api_version` stays at `3`.
+
+### Fixed
+
+- **JetBrains Copilot: recognize `copilot-edit-sessions-nitrite.db` (no `chat-` prefix)** (#766) — older plugin builds wrote the edit-session Nitrite store under the shorter filename. The post-release smoke test on v8.4.7 caught this when session `32REEy.../ic/chat-edit-sessions/` (Verkada-Backend) emitted zero rows even though its `.xd` carried `projectName=Verkada-Backend`. Added the legacy filename to `NITRITE_DB_FILES` so the populated-entity probe accepts it.
+
+### Cross-repo lockstep
+
+- No cross-repo changes required.
+
 ## 8.4.7 — 2026-05-12
 
 8.4.7 is a same-day hotfix for the v8.4.6 JetBrains parser. The 8.4.6 implementation treated the Xodus `.xd` log and the Nitrite `.db` store as mutually exclusive — the parser ran `extract_xodus_project_name` only when the populated-entity probe returned `.xd`, and `extract_nitrite_turn_ids` only when it returned a Nitrite file. Real dual-store session-dirs (the common shape post-migration) put `projectName` in `.xd` and `Nt*Turn` documents in `.nitrite.db`; the 8.4.6 code picked one and dropped the other, so every `surface=jetbrains` row landed with `repo_id = NULL` even when the .xd carried a clean `Verkada-Web`-style name. The post-release smoke test on a real DB caught this within minutes — 0 of 23 sessions populated `repo_id`. The parser now reads `00000000000.xd` and every `*.nitrite.db` in the session-dir independently and merges the results: per-turn UUIDs from Nitrite + `repo_id` / `git_branch` / `session_title` from Xodus land on the same `ParsedMessage`. `api_version` stays at `3`.
