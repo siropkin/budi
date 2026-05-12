@@ -3419,6 +3419,30 @@ pub struct StatuslineParams {
     /// the comma-list form. See ADR-0088 §7 (post-#648).
     #[serde(default, deserialize_with = "deserialize_provider_filter")]
     pub provider: Vec<String>,
+    /// Host environment filter — `vscode`, `cursor`, `jetbrains`, `terminal`,
+    /// `unknown`. Comma-separated, same shape as `provider`. Added in #748
+    /// after `/analytics/statusline` was missed by the original #702 surface
+    /// rollout — the JetBrains widget was reading the global rollup instead
+    /// of `surface=jetbrains` rows. Empty filter is unscoped (all surfaces).
+    #[serde(default, deserialize_with = "deserialize_surface_filter")]
+    pub surface: Vec<String>,
+}
+
+fn deserialize_surface_filter<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::Deserialize;
+    let raw: Option<String> = Option::deserialize(deserializer)?;
+    let parsed: Vec<String> = raw
+        .as_deref()
+        .unwrap_or_default()
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+        .collect();
+    Ok(normalize_surfaces(&parsed))
 }
 
 fn deserialize_provider_filter<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
@@ -3453,6 +3477,7 @@ fn assistant_cost_since_from_rollups(
     conn: &Connection,
     since: &str,
     providers: &[String],
+    surfaces: &[String],
 ) -> Option<f64> {
     if !rollups_available(conn) {
         return None;
@@ -3465,6 +3490,15 @@ fn assistant_cost_since_from_rollups(
         let placeholders = vec!["?"; providers.len()].join(", ");
         conditions.push(format!("provider IN ({placeholders})"));
         params.extend(providers.iter().cloned());
+    }
+    if !surfaces.is_empty() {
+        let placeholders = vec!["?"; surfaces.len()].join(", ");
+        // Mirror the COALESCE/lowercase normalization the rest of the
+        // analytics layer uses (see `normalized_surface_expr`) so a row
+        // with `surface = NULL` or `''` still matches `?surface=unknown`.
+        let expr = normalized_surface_expr("surface");
+        conditions.push(format!("{expr} IN ({placeholders})"));
+        params.extend(surfaces.iter().cloned());
     }
     let sql = format!(
         "SELECT COALESCE(SUM(cost_cents_effective), 0.0)
@@ -3494,6 +3528,7 @@ pub fn statusline_stats(
     params: &StatuslineParams,
 ) -> Result<StatuslineStats> {
     let provider_filter: &[String] = &params.provider;
+    let surface_filter: &[String] = &params.surface;
 
     // Helper: append `provider IN (?, ?, ...)` to `sql` and the matching
     // bindings, using whatever placeholder syntax the caller is already using.
@@ -3507,21 +3542,37 @@ pub fn statusline_stats(
         bindings.extend(provider_filter.iter().cloned());
     };
 
+    // #748: surface filter mirrors the provider filter. The COALESCE-
+    // normalized expression matches `?surface=unknown` against NULL / empty
+    // rows, consistent with the rest of the analytics layer.
+    let push_surface_in = |sql: &mut String, bindings: &mut Vec<String>| {
+        if surface_filter.is_empty() {
+            return;
+        }
+        let placeholders = vec!["?"; surface_filter.len()].join(", ");
+        let expr = normalized_surface_expr("surface");
+        sql.push_str(&format!(" AND {expr} IN ({placeholders})"));
+        bindings.extend(surface_filter.iter().cloned());
+    };
+
     let cost_since = |since: &str| -> f64 {
-        assistant_cost_since_from_rollups(conn, since, provider_filter).unwrap_or_else(|| {
-            let mut sql = String::from(
-                "SELECT COALESCE(SUM(cost_cents_effective), 0.0) FROM messages \
+        assistant_cost_since_from_rollups(conn, since, provider_filter, surface_filter)
+            .unwrap_or_else(|| {
+                let mut sql = String::from(
+                    "SELECT COALESCE(SUM(cost_cents_effective), 0.0) FROM messages \
                      WHERE timestamp >= ? AND role = 'assistant'",
-            );
-            let mut bindings: Vec<String> = vec![since.to_string()];
-            push_provider_in(&mut sql, &mut bindings);
-            let refs: Vec<&dyn rusqlite::types::ToSql> = bindings
-                .iter()
-                .map(|s| s as &dyn rusqlite::types::ToSql)
-                .collect();
-            conn.query_row(&sql, refs.as_slice(), |r| r.get::<_, f64>(0))
-                .unwrap_or(0.0)
-        }) / 100.0
+                );
+                let mut bindings: Vec<String> = vec![since.to_string()];
+                push_provider_in(&mut sql, &mut bindings);
+                push_surface_in(&mut sql, &mut bindings);
+                let refs: Vec<&dyn rusqlite::types::ToSql> = bindings
+                    .iter()
+                    .map(|s| s as &dyn rusqlite::types::ToSql)
+                    .collect();
+                conn.query_row(&sql, refs.as_slice(), |r| r.get::<_, f64>(0))
+                    .unwrap_or(0.0)
+            })
+            / 100.0
     };
 
     let cost_1d = cost_since(since_1d);
@@ -3540,6 +3591,7 @@ pub fn statusline_stats(
         );
         let mut bindings: Vec<String> = vec![sid.clone()];
         push_provider_in(&mut sql, &mut bindings);
+        push_surface_in(&mut sql, &mut bindings);
         let refs: Vec<&dyn rusqlite::types::ToSql> = bindings
             .iter()
             .map(|s| s as &dyn rusqlite::types::ToSql)
@@ -3566,6 +3618,7 @@ pub fn statusline_stats(
             bindings.push(repo.to_string());
         }
         push_provider_in(&mut sql, &mut bindings);
+        push_surface_in(&mut sql, &mut bindings);
         let refs: Vec<&dyn rusqlite::types::ToSql> = bindings
             .iter()
             .map(|s| s as &dyn rusqlite::types::ToSql)
@@ -3583,6 +3636,7 @@ pub fn statusline_stats(
         );
         let mut bindings: Vec<String> = vec![dir.clone()];
         push_provider_in(&mut sql, &mut bindings);
+        push_surface_in(&mut sql, &mut bindings);
         let refs: Vec<&dyn rusqlite::types::ToSql> = bindings
             .iter()
             .map(|s| s as &dyn rusqlite::types::ToSql)
@@ -3595,11 +3649,14 @@ pub fn statusline_stats(
     // Active provider: most recent provider seen in the 1d window, after the
     // provider filter is applied. Under multi-provider this is the provider
     // with the most recent traffic — host-scoped click-through routes to its
-    // dashboard (ADR-0088 §7 post-#648).
+    // dashboard (ADR-0088 §7 post-#648). #748: also honor surface filter so
+    // a JetBrains-scoped statusline doesn't surface a Claude Code CLI as
+    // "active" when the JetBrains rollup is empty.
     let active_provider: Option<String> = {
         let mut sql = String::from("SELECT provider FROM messages WHERE timestamp >= ?");
         let mut bindings: Vec<String> = vec![since_1d.to_string()];
         push_provider_in(&mut sql, &mut bindings);
+        push_surface_in(&mut sql, &mut bindings);
         sql.push_str(" ORDER BY timestamp DESC LIMIT 1");
         let refs: Vec<&dyn rusqlite::types::ToSql> = bindings
             .iter()
