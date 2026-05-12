@@ -1596,6 +1596,174 @@ fn statusline_stats_aggregates_across_multiple_providers() {
     );
 }
 
+/// #748: `/analytics/statusline?surface=<name>` must honor the filter the
+/// same way `/analytics/messages` does (added in #702). The original v8.4.3
+/// rollout missed this endpoint, so the JetBrains widget showed the global
+/// rollup (typically dominated by Claude Code CLI usage) instead of
+/// `surface=jetbrains` rows. Pin the wire contract on every numeric field
+/// plus `active_provider`.
+#[test]
+fn statusline_stats_with_surface_filter_scopes_every_field() {
+    let mut conn = test_db();
+
+    let mk =
+        |uuid: &str, session: &str, surface: &str, provider: &str, cost_cents: f64, ts: &str| {
+            ParsedMessage {
+                uuid: uuid.to_string(),
+                session_id: Some(session.to_string()),
+                timestamp: ts.parse().unwrap(),
+                cwd: Some("/proj/a".to_string()),
+                role: "assistant".to_string(),
+                model: Some("m".to_string()),
+                input_tokens: 100,
+                output_tokens: 50,
+                cache_creation_tokens: 0,
+                cache_read_tokens: 0,
+                git_branch: Some("main".to_string()),
+                repo_id: Some("repo-1".to_string()),
+                provider: provider.to_string(),
+                cost_cents: Some(cost_cents),
+                session_title: None,
+                parent_uuid: None,
+                user_name: None,
+                machine_name: None,
+                cost_confidence: "exact".to_string(),
+                pricing_source: None,
+                request_id: None,
+                speed: None,
+                cache_creation_1h_tokens: 0,
+                web_search_requests: 0,
+                prompt_category: None,
+                prompt_category_source: None,
+                prompt_category_confidence: None,
+                tool_names: Vec::new(),
+                tool_use_ids: Vec::new(),
+                tool_files: Vec::new(),
+                tool_outcomes: Vec::new(),
+                cwd_source: None,
+                surface: Some(surface.to_string()),
+            }
+        };
+
+    let msgs = vec![
+        mk(
+            "cc-term",
+            "cc-sess",
+            "terminal",
+            "claude_code",
+            900.0,
+            "2026-04-15T10:00:00Z",
+        ),
+        mk(
+            "cop-jb",
+            "jb-sess",
+            "jetbrains",
+            "copilot_chat",
+            300.0,
+            "2026-04-15T11:00:00Z",
+        ),
+        mk(
+            "cop-vsc",
+            "vsc-sess",
+            "vscode",
+            "copilot_chat",
+            500.0,
+            "2026-04-15T11:30:00Z",
+        ),
+    ];
+    ingest_messages(&mut conn, &msgs, None).unwrap();
+
+    let since_1d = "2026-04-15T00:00:00Z";
+    let since_7d = "2026-04-10T00:00:00Z";
+    let since_30d = "2026-03-20T00:00:00Z";
+
+    // No filter: blended global rollup. Pre-fix daemon returned exactly this
+    // value regardless of `?surface=`.
+    let global = statusline_stats(
+        &conn,
+        since_1d,
+        since_7d,
+        since_30d,
+        &StatuslineParams::default(),
+    )
+    .unwrap();
+    assert_eq!(global.cost_1d, 17.0);
+
+    // `?surface=jetbrains` → only the JetBrains row contributes; the global
+    // 17.0 must not bleed through.
+    let jb = statusline_stats(
+        &conn,
+        since_1d,
+        since_7d,
+        since_30d,
+        &StatuslineParams {
+            surface: vec!["jetbrains".to_string()],
+            session_id: Some("jb-sess".to_string()),
+            branch: Some("main".to_string()),
+            project_dir: Some("/proj/a".to_string()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(jb.cost_1d, 3.0);
+    assert_eq!(jb.cost_7d, 3.0);
+    assert_eq!(jb.cost_30d, 3.0);
+    assert_eq!(jb.session_cost, Some(3.0));
+    assert_eq!(jb.branch_cost, Some(3.0));
+    assert_eq!(jb.project_cost, Some(3.0));
+    assert_eq!(jb.active_provider.as_deref(), Some("copilot_chat"));
+
+    // `?surface=vscode` returns the vscode row only — copilot_chat shows
+    // through as the active provider but cost_30d does not blend with
+    // jetbrains' copilot_chat row.
+    let vsc = statusline_stats(
+        &conn,
+        since_1d,
+        since_7d,
+        since_30d,
+        &StatuslineParams {
+            surface: vec!["vscode".to_string()],
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(vsc.cost_1d, 5.0);
+    assert_eq!(vsc.active_provider.as_deref(), Some("copilot_chat"));
+
+    // Unknown surface name → zero rows, no error. Matches `?provider=mars`.
+    let unknown = statusline_stats(
+        &conn,
+        since_1d,
+        since_7d,
+        since_30d,
+        &StatuslineParams {
+            surface: vec!["mars".to_string()],
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(unknown.cost_1d, 0.0);
+    assert_eq!(unknown.cost_30d, 0.0);
+    assert!(unknown.active_provider.is_none());
+
+    // Composing surface with provider: the intersection wins. `surface=vscode`
+    // ∩ `provider=claude_code` → no rows.
+    let intersected = statusline_stats(
+        &conn,
+        since_1d,
+        since_7d,
+        since_30d,
+        &StatuslineParams {
+            surface: vec!["vscode".to_string()],
+            provider: vec!["claude_code".to_string()],
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(intersected.cost_1d, 0.0);
+    assert!(intersected.active_provider.is_none());
+}
+
 /// R1.3 (#650): comma-list parsing for the statusline `?provider=` query
 /// param. `?provider=cursor` keeps the 8.1 single-provider behavior;
 /// `?provider=cursor,copilot_chat` is the host-scoped form. Empty / absent
