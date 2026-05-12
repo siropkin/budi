@@ -513,6 +513,15 @@ Key points:
 - `crates/budi-cli/src/commands/pricing.rs` — `budi pricing` / `budi pricing status` (read-only) + `budi pricing sync` (network refresh; mirrors `cloud sync`). Both accept `--format json`.
 <!-- budi-cursor and budi-cloud live in their own repos: siropkin/budi-cursor, siropkin/budi-cloud -->
 
+## Release flow
+
+Tags drive the entire pipeline; `Cargo.toml` is the source of truth for the workspace version.
+
+- **Stable releases**: tag `vX.Y.Z`. `.github/workflows/release.yml` builds tarballs for all five platforms, publishes a GitHub release with `prerelease: false`, and auto-bumps `siropkin/homebrew-budi/Formula/budi.rb`. `brew upgrade siropkin/budi/budi` picks the new version up within a few minutes.
+- **Prereleases (rc / beta)**: tag `vX.Y.Z-rc.N` (any tag with a `-` suffix counts). Same workflow, but the GitHub release is marked `prerelease: true` *and* the Homebrew tap bump is skipped — `brew upgrade` users stay on the last stable. Use this for "local smoke before promoting to public" loops: cut `v8.4.8-rc.1`, `-rc.2`, … from the same branch, swap the binary in by hand (`curl` the prerelease tarball and replace `/opt/homebrew/Cellar/budi/<stable>/bin/budi-daemon`), and only tag the clean `vX.Y.Z` once the candidate passes the real-DB smoke. `Cargo.toml` stays at the *target* stable (`X.Y.Z`) across the entire prerelease cycle — `verify_tag_version` strips the `-suffix` before comparing.
+- **One commit, two tags**: promoting an rc is a tag-only operation — re-tag the same SHA as `vX.Y.Z` and the workflow republishes with the stable-release gate (prerelease: false, tap bump on).
+- **Inspecting which tag did what**: every release-workflow run logs `is_prerelease=…` in the `verify_tag_version` step output. Cross-reference with `gh release view vX.Y.Z[-rc.N] --json prerelease,assets` to confirm the GitHub release was published with the right flag.
+
 ## Dev notes
 
 - **Before committing**, always run `cargo fmt --all` and `cargo clippy` to catch formatting and lint issues. CI enforces `cargo fmt --all -- --check` and will reject unformatted code.

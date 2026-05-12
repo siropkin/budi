@@ -3,11 +3,16 @@ name: Release
 on:
   push:
     tags:
+      # Matches `vMAJOR.MINOR.PATCH` and `vMAJOR.MINOR.PATCH-SUFFIX` (prereleases).
+      # Stable tags trigger the full pipeline; prerelease tags (anything with a
+      # `-` in the version, e.g. `v8.4.8-rc.1`) publish artifacts as a
+      # GitHub "Pre-release" and *skip* the Homebrew tap auto-bump so
+      # `brew install siropkin/budi/budi` keeps pointing at the latest stable.
       - "v[0-9]*"
   workflow_dispatch:
     inputs:
       tag:
-        description: "Release tag to publish (example: v2.0.0)"
+        description: "Release tag to publish (example: v2.0.0 or v2.0.0-rc.1)"
         required: true
         type: string
 
@@ -18,6 +23,10 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag || github.ref_name }}
+  # `true` for prerelease tags (vX.Y.Z-rc.N, vX.Y.Z-beta.N, …). Drives both
+  # the GitHub release's `prerelease` flag and the gate on the Homebrew tap
+  # update so users on `brew upgrade` never get pulled onto an rc.
+  IS_PRERELEASE: ${{ contains((github.event_name == 'workflow_dispatch' && github.event.inputs.tag || github.ref_name), '-') }}
 
 jobs:
   ci-check:
@@ -59,7 +68,14 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          # Strip the `vX.Y.Z` prefix; for prereleases (`vX.Y.Z-rc.N`) also
+          # strip the suffix so we only compare the semver base against
+          # Cargo.toml. The workspace stays pinned to the *target* stable
+          # version across an entire prerelease cycle — bump it once when
+          # cutting the first rc, then promote the same SHA to the stable
+          # tag at the end.
           expected_version="${RELEASE_TAG#v}"
+          expected_base="${expected_version%%-*}"
           actual_version="$(awk -F'\"' '/^version = \"[0-9]+\.[0-9]+\.[0-9]+\"$/ {print $2; exit}' Cargo.toml)"
           if [[ -z "${actual_version}" ]]; then
             echo "::error::Unable to read workspace version from Cargo.toml"
@@ -67,8 +83,10 @@ jobs:
           fi
           echo "release_tag=${RELEASE_TAG}"
           echo "workspace_version=${actual_version}"
-          if [[ "${actual_version}" != "${expected_version}" ]]; then
-            echo "::error::Tag ${RELEASE_TAG} does not match Cargo version ${actual_version}. Expected tag v${actual_version}."
+          echo "expected_base=${expected_base}"
+          echo "is_prerelease=${IS_PRERELEASE}"
+          if [[ "${actual_version}" != "${expected_base}" ]]; then
+            echo "::error::Tag ${RELEASE_TAG} (base ${expected_base}) does not match Cargo version ${actual_version}. Expected tag v${actual_version} or v${actual_version}-<suffix>."
             exit 1
           fi
 
@@ -222,6 +240,11 @@ jobs:
         with:
           tag_name: ${{ env.RELEASE_TAG }}
           generate_release_notes: true
+          # Tags containing a `-` (rc/beta/alpha suffix) publish as a
+          # GitHub "Pre-release" — they keep the "Latest" badge on the
+          # most recent stable tag and are excluded from the auto-update
+          # discovery path the CLI uses.
+          prerelease: ${{ env.IS_PRERELEASE == 'true' }}
           files: |
             dist/*.tar.gz
             dist/*.zip
@@ -231,6 +254,10 @@ jobs:
     name: Update Homebrew tap
     runs-on: ubuntu-latest
     needs: publish-release
+    # Prerelease tags don't bump the tap — `brew upgrade siropkin/budi/budi`
+    # users stay on the last stable. Promote an rc to a stable tag from the
+    # same SHA when it passes smoke and this job will fire then.
+    if: ${{ env.IS_PRERELEASE != 'true' }}
     steps:
       - name: Checkout budi repo
         uses: actions/checkout@v5
