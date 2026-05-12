@@ -258,58 +258,89 @@ pub(super) fn parse_session_dir(session_dir: &Path) -> Vec<ParsedMessage> {
         .map(|s| s.to_string());
 
     let path_str = session_dir.to_string_lossy().to_string();
-    let id = deterministic_uuid(session_id.as_deref().unwrap_or(""), &path_str);
+    let session_label = session_type
+        .as_deref()
+        .map(|s| s.trim_end_matches("-sessions").to_string());
 
-    let mut msg = ParsedMessage {
-        uuid: id.clone(),
-        session_id: session_id.clone(),
-        timestamp,
-        role: "assistant".to_string(),
-        provider: super::PROVIDER_ID.to_string(),
-        cost_confidence: "estimated".to_string(),
-        request_id: Some(id),
-        surface: Some(crate::surface::JETBRAINS.to_string()),
-        ..ParsedMessage::default()
-    };
-    // Surface the session-type as a human-readable session title so
-    // dashboards can distinguish chat vs. agent vs. edit sessions without
-    // needing a separate column. Stripped to plain "chat"/"agent"/"edit"/"bg-agent"
-    // to match the rest of the system's terminology.
-    msg.session_title = session_type.map(|s| s.trim_end_matches("-sessions").to_string());
-
-    // #766: best-effort `repo_id` / `git_branch` enrichment from the Xodus
-    // log's `projectName` property. The Nitrite store carries the same
-    // signal in `NtAgentWorkingSetItem.stringContent`, but that decoder is
-    // deferred to #764's Phase 2. Phase 1 only covers the `.xd` byte path
-    // — sessions that are Nitrite-only fall through to `repo_id = None`.
-    if store_path
+    // #766: pull the IntelliJ project name + resolved repo/branch out of
+    // the Xodus log. The result is shared across every row this session
+    // emits (one row per turn for Nitrite, one row per session for the
+    // legacy .xd path). Nitrite-only sessions fall through to
+    // `repo_id = None` until Phase 2 lands the `NtAgentWorkingSetItem`
+    // decoder.
+    let (project_name, repo_resolution) = if store_path
         .file_name()
         .and_then(|s| s.to_str())
         .is_some_and(|name| name == "00000000000.xd")
         && let Ok(bytes) = std::fs::read(&store_path)
         && let Some(project_name) = extract_xodus_project_name(&bytes)
     {
-        if let Some((repo_id, branch)) = resolve_project_workspace(&project_name) {
-            msg.repo_id = Some(repo_id);
-            if branch.is_some() {
-                msg.git_branch = branch;
+        let resolution = resolve_project_workspace(&project_name);
+        (Some(project_name), resolution)
+    } else {
+        (None, None)
+    };
+
+    // #764: Phase 1 per-turn extraction for Nitrite stores. Walk the
+    // serialized `Nt(Agent|Edit)?Turn` documents for their `uuid` field
+    // and emit one assistant `ParsedMessage` per turn. Tokens stay zero;
+    // cost reconciliation flows through `crate::sync::copilot_chat_billing`
+    // (#765's even-distribution path is what dollarizes these rows).
+    let nitrite_turns = if store_path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .is_some_and(|n| NITRITE_DB_FILES.contains(&n))
+        && let Ok(bytes) = std::fs::read(&store_path)
+    {
+        extract_nitrite_turn_ids(&bytes)
+    } else {
+        Vec::new()
+    };
+
+    let build_msg = |uuid: String, request_id: Option<String>| -> ParsedMessage {
+        let mut msg = ParsedMessage {
+            uuid,
+            session_id: session_id.clone(),
+            timestamp,
+            role: "assistant".to_string(),
+            provider: super::PROVIDER_ID.to_string(),
+            cost_confidence: "estimated".to_string(),
+            request_id,
+            surface: Some(crate::surface::JETBRAINS.to_string()),
+            ..ParsedMessage::default()
+        };
+        // Prefer the IntelliJ project name when we have it — matches what
+        // the user sees in the IDE. Falls back to "chat"/"agent"/"edit"
+        // so the dashboard still distinguishes session types.
+        msg.session_title = project_name.clone().or_else(|| session_label.clone());
+        if let Some((repo_id, branch)) = repo_resolution.as_ref() {
+            msg.repo_id = Some(repo_id.clone());
+            if let Some(b) = branch {
+                msg.git_branch = Some(b.clone());
             }
-            // Keep the project name in `session_title` too — when the
-            // dashboard groups sessions by repo, the per-session detail
-            // still wants the IDE's human name on it, especially for the
-            // multiple-checkout case where `<host>/<owner>/<repo>` is
-            // less recognizable than `Verkada-Web`.
-            msg.session_title = Some(project_name);
-        } else {
-            // Repo didn't resolve, but at least show *something* so the
-            // dashboard Repo column for `surface=jetbrains` rows isn't a
-            // sea of `(unknown)`. Per the ticket's acceptance:
-            // "the `session_title` column on rows where `repo_id`
-            // resolution failed carries the raw `projectName`".
-            msg.session_title = Some(project_name);
         }
+        msg
+    };
+
+    if !nitrite_turns.is_empty() {
+        let mut messages = Vec::with_capacity(nitrite_turns.len());
+        for turn_id in nitrite_turns {
+            let uuid = deterministic_uuid_from_nitrite(&turn_id, &path_str);
+            messages.push(build_msg(uuid, Some(turn_id)));
+        }
+        return messages;
     }
 
+    // Fallback: legacy .xd path (and the documented #757 placeholder for
+    // any Nitrite store that contains a populated-entity marker but no
+    // recoverable turn UUIDs — e.g. an empty agent session, or a future
+    // plugin version with an unfamiliar `uuid` field name). One row per
+    // session, keyed on the directory name, matches pre-#764 behavior.
+    let session_uuid = deterministic_uuid(session_id.as_deref().unwrap_or(""), &path_str);
+    let mut msg = build_msg(session_uuid.clone(), Some(session_uuid));
+    if project_name.is_none() {
+        msg.session_title = session_label;
+    }
     vec![msg]
 }
 
@@ -497,6 +528,137 @@ fn byte_contains(haystack: &[u8], needle: &[u8]) -> bool {
     haystack
         .windows(needle.len())
         .any(|window| window == needle)
+}
+
+/// #764: Phase 1 per-turn extraction from the JetBrains Copilot Nitrite
+/// store. Walks the on-disk MVStore bytes for `Nt(Agent|Edit)?Turn`
+/// markers and, for each, returns the first `uuid` field's value that
+/// appears within an 8 KB window forward of the marker (real-world
+/// captured agent sessions show every turn document writing
+/// `t\x00\x04uuidt\x00\x24<36-byte-string>` inside its serialized form,
+/// within a few hundred bytes of the class marker).
+///
+/// UUIDs are deduplicated — Nitrite's MVStore writes class metadata and
+/// each instance multiple times across the catalog + B-tree leaves, so
+/// the same turn document surfaces under several markers. Order is the
+/// first-seen offset so the returned list is stable across rebuilds of
+/// the same store.
+///
+/// Phase 1 deliberately does **not** decode the full Java serialization
+/// graph: pulling out per-turn `createdAt`, `modelName`, `stringContent`
+/// requires a real Nitrite/MVStore decoder and is deferred to Phase 2 /
+/// the next ADR amendment. The Phase 1 contract is "give every turn a
+/// stable UUID so new prompts materialize as new rows" — enough to fix
+/// #764's primary symptom and give #765's billing-API reconciler
+/// non-zero-token rows to distribute dollars across.
+fn extract_nitrite_turn_ids(bytes: &[u8]) -> Vec<String> {
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut ordered: Vec<String> = Vec::new();
+
+    // Pre-scan the file for every `uuid` field value (length-36 UTF-8
+    // string immediately following the `t\x00\x04uuid` token).
+    let mut uuid_hits: Vec<(usize, String)> = Vec::new();
+    let needle = b"t\x00\x04uuidt\x00\x24"; // `t` <2-byte len=4> `uuid` `t` <2-byte len=36>
+    let mut idx = 0;
+    while let Some(rel) = byte_find(&bytes[idx..], needle) {
+        let pos = idx + rel;
+        let val_start = pos + needle.len();
+        let val_end = val_start + 36;
+        if val_end > bytes.len() {
+            break;
+        }
+        if let Ok(s) = std::str::from_utf8(&bytes[val_start..val_end])
+            && looks_like_uuid(s)
+        {
+            uuid_hits.push((pos, s.to_string()));
+        }
+        idx = val_start.max(pos + 1);
+    }
+
+    if uuid_hits.is_empty() {
+        return ordered;
+    }
+
+    // Match each turn marker to the first uuid hit within an 8 KB window
+    // forward. 8 KB comfortably exceeds the largest serialized turn
+    // documents observed in real fixtures while staying small enough
+    // that we don't accidentally cross from one turn into its neighbour.
+    let mut marker_pos = 0usize;
+    for marker in NITRITE_TURN_MARKERS {
+        let mut from = 0usize;
+        while let Some(rel) = byte_find(&bytes[from..], marker) {
+            let pos = from + rel;
+            for (uuid_pos, uuid) in uuid_hits.iter() {
+                if *uuid_pos < pos {
+                    continue;
+                }
+                if *uuid_pos - pos > 8192 {
+                    break;
+                }
+                if seen.insert(uuid.clone()) {
+                    ordered.push(uuid.clone());
+                }
+                break;
+            }
+            from = pos + marker.len();
+            marker_pos = marker_pos.max(pos);
+        }
+    }
+    let _ = marker_pos;
+    ordered
+}
+
+/// Nitrite class markers that designate per-turn documents. Mirrors
+/// [`POPULATED_ENTITY_MARKERS`]'s turn subset; lifted into its own slice
+/// because the existence-marker scan in [`has_populated_entity_marker`]
+/// also accepts session-level markers like `NtChatSession` that we
+/// explicitly do not want to treat as turn boundaries here.
+const NITRITE_TURN_MARKERS: &[&[u8]] = &[b"NtTurn", b"NtAgentTurn", b"NtEditTurn"];
+
+/// True iff the candidate looks like a canonical hyphenated UUID
+/// (8-4-4-4-12 hex). Used by the byte-scan to reject the occasional
+/// non-UUID length-36 string that happens to land next to a `uuid`
+/// token in noise.
+fn looks_like_uuid(s: &str) -> bool {
+    if s.len() != 36 {
+        return false;
+    }
+    let bytes = s.as_bytes();
+    let expected_dashes = [8usize, 13, 18, 23];
+    for (i, &b) in bytes.iter().enumerate() {
+        if expected_dashes.contains(&i) {
+            if b != b'-' {
+                return false;
+            }
+        } else if !b.is_ascii_hexdigit() {
+            return false;
+        }
+    }
+    true
+}
+
+/// #764: per-turn variant of [`deterministic_uuid`]. Keyed on the
+/// Nitrite document's own UUID + the session directory path so the
+/// emitted `ParsedMessage.uuid` stays stable across re-ingests but a
+/// new turn (new Nitrite uuid) always lands as a new row.
+fn deterministic_uuid_from_nitrite(turn_id: &str, path: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(UUID_NAMESPACE);
+    hasher.update(b"nitrite-turn:");
+    hasher.update(turn_id.as_bytes());
+    hasher.update(b"|");
+    hasher.update(path.as_bytes());
+    let hash = hasher.finalize();
+    format!(
+        "{:08x}-{:04x}-{:04x}-{:04x}-{:012x}",
+        u32::from_be_bytes([hash[0], hash[1], hash[2], hash[3]]),
+        u16::from_be_bytes([hash[4], hash[5]]),
+        u16::from_be_bytes([hash[6], hash[7]]),
+        u16::from_be_bytes([hash[8], hash[9]]),
+        u64::from_be_bytes([
+            0, 0, hash[10], hash[11], hash[12], hash[13], hash[14], hash[15],
+        ])
+    )
 }
 
 fn deterministic_uuid(session_id: &str, path: &str) -> String {
@@ -924,6 +1086,143 @@ mod tests {
         std::fs::write(tmp.join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
         assert_eq!(read_git_head_branch(&tmp).as_deref(), Some("main"));
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// #764: build a synthetic Nitrite blob that mimics the on-disk
+    /// shape captured from real `copilot-agent-sessions-nitrite.db`
+    /// files (2026-05-11 inventory): an `NtAgentTurn` class marker
+    /// followed by a Java-serialized `LinkedHashMap` whose `uuid` field
+    /// carries a 36-char canonical UUID. Two turns produce two distinct
+    /// `ParsedMessage` UUIDs.
+    fn synth_nitrite_with_turns(uuids: &[&str]) -> Vec<u8> {
+        let mut out = Vec::new();
+        // MVStore header so the file looks plausibly real.
+        out.extend_from_slice(b"H:2,blockSize:1000,format:3,version:f\n");
+        out.extend_from_slice(&[0u8; 64]);
+        for uuid in uuids {
+            assert_eq!(uuid.len(), 36, "synth helper expects canonical uuids");
+            out.extend_from_slice(b"NtAgentTurn");
+            out.extend_from_slice(b"\xac\xed\x00\x05");
+            // `t\x00\x04uuid` + `t\x00\x24<36-byte uuid>` — the exact
+            // pattern the real Nitrite serializer writes for the field.
+            out.extend_from_slice(b"t\x00\x04uuid");
+            out.extend_from_slice(b"t\x00\x24");
+            out.extend_from_slice(uuid.as_bytes());
+            out.extend_from_slice(b"\x00trailer\x00");
+        }
+        out
+    }
+
+    #[test]
+    fn nitrite_session_emits_one_row_per_turn() {
+        let uuids = [
+            "bfe8768a-b11e-469a-852b-fc22c7dd9f23",
+            "382642f7-6bf3-4e9b-b2ed-970bb3474edb",
+            "550b00cd-4ad2-479a-8d8a-300a55478450",
+        ];
+        let bytes = synth_nitrite_with_turns(&uuids);
+
+        let extracted = extract_nitrite_turn_ids(&bytes);
+        assert_eq!(extracted.len(), 3);
+        for u in &uuids {
+            assert!(extracted.iter().any(|s| s == u), "missing {u}");
+        }
+
+        let tmp = std::env::temp_dir().join("budi-jetbrains-nitrite-turns");
+        let _ = std::fs::remove_dir_all(&tmp);
+        let session_dir = tmp.join("iu/chat-agent-sessions/sess-many-turns");
+        std::fs::create_dir_all(&session_dir).unwrap();
+        std::fs::write(
+            session_dir.join("copilot-agent-sessions-nitrite.db"),
+            &bytes,
+        )
+        .unwrap();
+
+        let parsed = parse_session_dir(&session_dir);
+        assert_eq!(parsed.len(), 3, "one row per turn, got {parsed:?}");
+        // The deterministic UUID must change per turn so `INSERT OR IGNORE`
+        // accepts each new turn as a fresh row — the entire point of #764.
+        let mut seen = std::collections::HashSet::new();
+        for m in &parsed {
+            assert!(seen.insert(m.uuid.clone()), "duplicate uuid {}", m.uuid);
+            assert_eq!(m.surface.as_deref(), Some(crate::surface::JETBRAINS));
+            assert_eq!(m.provider, super::super::PROVIDER_ID);
+        }
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// #764: turn UUIDs that appear duplicated across the file
+    /// (Nitrite's MVStore writes class metadata + B-tree leaf entries
+    /// for the same document) must collapse to one emitted row per
+    /// distinct turn — not one per byte-pattern match.
+    #[test]
+    fn nitrite_duplicate_turn_uuid_emits_single_row() {
+        let mut bytes = synth_nitrite_with_turns(&["bfe8768a-b11e-469a-852b-fc22c7dd9f23"]);
+        // Duplicate the same turn block — same uuid, two markers.
+        let dup = synth_nitrite_with_turns(&["bfe8768a-b11e-469a-852b-fc22c7dd9f23"]);
+        bytes.extend_from_slice(&dup[64..]); // skip the synthetic header on the dup
+
+        let extracted = extract_nitrite_turn_ids(&bytes);
+        assert_eq!(
+            extracted.len(),
+            1,
+            "duplicate uuids must collapse, got {extracted:?}"
+        );
+    }
+
+    /// #764: sessions whose only Nitrite documents are sessions (not
+    /// turns) — e.g. an `NtAgentSession` row with no `NtAgentTurn` yet
+    /// — fall back to the one-row-per-session placeholder so the
+    /// session still shows up in `surface=jetbrains` lists. Matches the
+    /// pre-#764 behavior of #757's existence-marker path.
+    #[test]
+    fn nitrite_session_without_turn_falls_back_to_single_placeholder() {
+        let tmp = std::env::temp_dir().join("budi-jetbrains-nitrite-session-only");
+        let _ = std::fs::remove_dir_all(&tmp);
+        let session_dir = tmp.join("iu/chat-agent-sessions/sess-no-turns");
+        std::fs::create_dir_all(&session_dir).unwrap();
+        // A session marker is enough to clear the populated-entity gate
+        // shipped in #757, but no `NtAgentTurn` documents are present.
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"H:2,blockSize:1000,format:3,version:f\n");
+        bytes.extend_from_slice(&[0u8; 64]);
+        bytes.extend_from_slice(b"NtAgentSession\x00");
+        std::fs::write(
+            session_dir.join("copilot-agent-sessions-nitrite.db"),
+            &bytes,
+        )
+        .unwrap();
+
+        let parsed = parse_session_dir(&session_dir);
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].session_title.as_deref(), Some("chat-agent"));
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn looks_like_uuid_accepts_canonical_and_rejects_garbage() {
+        assert!(looks_like_uuid("bfe8768a-b11e-469a-852b-fc22c7dd9f23"));
+        assert!(looks_like_uuid("00000000-0000-0000-0000-000000000000"));
+        // Wrong length.
+        assert!(!looks_like_uuid("not-a-uuid"));
+        // Dashes in wrong positions.
+        assert!(!looks_like_uuid("bfe8768ab-11e-469a-852b-fc22c7dd9f23"));
+        // Non-hex characters.
+        assert!(!looks_like_uuid("bfe8768z-b11e-469a-852b-fc22c7dd9f23"));
+    }
+
+    #[test]
+    fn deterministic_uuid_from_nitrite_is_stable_and_distinct_per_turn() {
+        let a = deterministic_uuid_from_nitrite("bfe8768a-b11e-469a-852b-fc22c7dd9f23", "/tmp/x");
+        let b = deterministic_uuid_from_nitrite("bfe8768a-b11e-469a-852b-fc22c7dd9f23", "/tmp/x");
+        assert_eq!(a, b);
+        let c = deterministic_uuid_from_nitrite("382642f7-6bf3-4e9b-b2ed-970bb3474edb", "/tmp/x");
+        assert_ne!(a, c);
+        // Distinct namespace prefix vs the session-keyed `deterministic_uuid`.
+        let session_keyed = deterministic_uuid("bfe8768a-b11e-469a-852b-fc22c7dd9f23", "/tmp/x");
+        assert_ne!(a, session_keyed);
     }
 
     #[test]
