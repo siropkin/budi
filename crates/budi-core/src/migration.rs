@@ -163,6 +163,16 @@ fn detect_drift(conn: &Connection) -> Result<(Vec<String>, Vec<String>, Vec<Stri
     if table_exists(conn, "sessions")? && !has_column(conn, "sessions", "surface")? {
         added_columns.push("sessions.surface".to_string());
     }
+    // #767: per-row wire-shape version on the two tables that participate in
+    // cloud sync. Missing on any DB that predates 8.4.6.
+    if table_exists(conn, "sessions")? && !has_column(conn, "sessions", "wire_shape_version")? {
+        added_columns.push("sessions.wire_shape_version".to_string());
+    }
+    if table_exists(conn, "message_rollups_daily")?
+        && !has_column(conn, "message_rollups_daily", "wire_shape_version")?
+    {
+        added_columns.push("message_rollups_daily.wire_shape_version".to_string());
+    }
     if table_exists(conn, "proxy_events")? {
         removed_tables.push("proxy_events".to_string());
     }
@@ -373,23 +383,24 @@ fn create_sessions(conn: &Connection) -> Result<()> {
     conn.execute_batch(
         "
         CREATE TABLE IF NOT EXISTS sessions (
-            id                 TEXT PRIMARY KEY,
-            provider           TEXT NOT NULL DEFAULT 'claude_code',
-            started_at         TEXT,
-            ended_at           TEXT,
-            duration_ms        INTEGER,
-            composer_mode      TEXT,
-            permission_mode    TEXT,
-            user_email         TEXT,
-            workspace_root     TEXT,
-            end_reason         TEXT,
-            prompt_category    TEXT,
-            model              TEXT,
-            raw_json           TEXT,
-            repo_id            TEXT,
-            git_branch         TEXT,
-            title              TEXT,
-            surface            TEXT NOT NULL DEFAULT 'unknown'
+            id                  TEXT PRIMARY KEY,
+            provider            TEXT NOT NULL DEFAULT 'claude_code',
+            started_at          TEXT,
+            ended_at            TEXT,
+            duration_ms         INTEGER,
+            composer_mode       TEXT,
+            permission_mode     TEXT,
+            user_email          TEXT,
+            workspace_root      TEXT,
+            end_reason          TEXT,
+            prompt_category     TEXT,
+            model               TEXT,
+            raw_json            TEXT,
+            repo_id             TEXT,
+            git_branch          TEXT,
+            title               TEXT,
+            surface             TEXT NOT NULL DEFAULT 'unknown',
+            wire_shape_version  INTEGER NOT NULL DEFAULT 1
         );
         ",
     )?;
@@ -441,6 +452,7 @@ fn create_rollup_tables(conn: &Connection) -> Result<()> {
             cache_read_tokens      INTEGER NOT NULL DEFAULT 0,
             cost_cents_ingested    REAL NOT NULL DEFAULT 0,
             cost_cents_effective   REAL NOT NULL DEFAULT 0,
+            wire_shape_version     INTEGER NOT NULL DEFAULT 1,
             PRIMARY KEY(bucket_day, role, provider, model, repo_id, git_branch, surface)
         );
         ",
@@ -1221,7 +1233,7 @@ fn create_indexes(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
-fn table_exists(conn: &Connection, table: &str) -> Result<bool> {
+pub(crate) fn table_exists(conn: &Connection, table: &str) -> Result<bool> {
     let count: i64 = conn.query_row(
         "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name = ?1",
         [table],
@@ -1230,7 +1242,7 @@ fn table_exists(conn: &Connection, table: &str) -> Result<bool> {
     Ok(count > 0)
 }
 
-fn has_column(conn: &Connection, table: &str, column: &str) -> Result<bool> {
+pub(crate) fn has_column(conn: &Connection, table: &str, column: &str) -> Result<bool> {
     let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
     let cols = stmt.query_map([], |row| row.get::<_, String>(1))?;
     Ok(cols.filter_map(|c| c.ok()).any(|c| c == column))
@@ -1569,6 +1581,27 @@ fn reconcile_schema(conn: &Connection) -> Result<SchemaReconcileReport> {
     )? {
         added_columns.push("sessions.surface".to_string());
         surface_column_added = true;
+    }
+
+    // #767: additive wire-shape-version columns. Default 1 maps existing
+    // history to the pre-surface (v1) shape so the boot-time
+    // `cloud_sync::reset_stale_shape_watermarks` check fires once after the
+    // 8.4.6 upgrade and re-emits everything under the v2 wire shape.
+    if ensure_column(
+        conn,
+        "sessions",
+        "wire_shape_version",
+        "wire_shape_version INTEGER NOT NULL DEFAULT 1",
+    )? {
+        added_columns.push("sessions.wire_shape_version".to_string());
+    }
+    if ensure_column(
+        conn,
+        "message_rollups_daily",
+        "wire_shape_version",
+        "wire_shape_version INTEGER NOT NULL DEFAULT 1",
+    )? {
+        added_columns.push("message_rollups_daily.wire_shape_version".to_string());
     }
 
     // #730 / ADR-0094 §1: migrate `cost_cents` to the dual
