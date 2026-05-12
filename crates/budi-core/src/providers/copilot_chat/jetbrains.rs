@@ -1793,6 +1793,12 @@ mod tests {
     /// #788: when no `.git` checkout sits along the path chain, resolution
     /// returns `None` repo *and* the still-useful longest common prefix,
     /// tagged with `no_git_along_chain` for the diagnostic log line.
+    ///
+    /// Unix-only: `longest_common_path_prefix` requires `/`-anchored
+    /// absolute paths. The Windows temp dir (`C:\...`) is rejected before
+    /// the resolver runs, which is covered by
+    /// `longest_common_path_prefix_drops_to_root_dir_when_no_shared_subdir`.
+    #[cfg(unix)]
     #[test]
     fn resolve_phase2_workspace_returns_prefix_and_reason_when_no_git_along_chain() {
         let tmp = std::env::temp_dir().join("budi-jetbrains-phase2-no-git");
@@ -1825,6 +1831,9 @@ mod tests {
     /// described in the Terraform smoke-test ticket), the resolver
     /// surfaces a distinct `repo_id_resolver_returned_none` reason rather
     /// than collapsing into the catch-all `no_git_along_chain`.
+    ///
+    /// Unix-only — see note on the prior `no_git_along_chain` test.
+    #[cfg(unix)]
     #[test]
     fn resolve_phase2_workspace_distinguishes_resolver_returned_none() {
         let tmp = std::env::temp_dir().join("budi-jetbrains-phase2-no-remote");
@@ -1901,6 +1910,10 @@ mod tests {
     /// as a `cwd` hint with the `copilot_chat:jetbrains_phase2_prefix`
     /// `cwd_source` marker. Gives the dashboard / messages.cwd something
     /// to render even when `repo_id` is null.
+    ///
+    /// Unix-only — relies on `/`-anchored temp paths flowing through the
+    /// extractor's URI decoder.
+    #[cfg(unix)]
     #[test]
     fn phase2_with_uris_but_no_git_emits_cwd_hint_with_phase2_prefix_source() {
         let tmp = std::env::temp_dir().join("budi-jetbrains-phase2-cwd-hint");
