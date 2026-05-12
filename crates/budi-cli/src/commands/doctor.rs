@@ -2784,6 +2784,29 @@ mod tests {
     }
 
     #[test]
+    fn merge_hint_extensions_accepts_v1_1_surface_field_for_vscode_host() {
+        // ADR-0086 §3.4 v1.1 schema (#780): the host-aware extension writes
+        // the same `cursor-sessions.json` regardless of host and tags the
+        // host via an optional `surface` field. The daemon-side loader is
+        // permissive — `surface` is purely informational on this path and
+        // must not interfere with `installed_extensions` merging.
+        let mut hints = HostExtensionHints::default();
+        let doc = serde_json::json!({
+            "active_session_id": "abc",
+            "updated_at": "2026-05-06T20:00:00Z",
+            "surface": "vscode",
+            "installed_extensions": {
+                "copilot_chat": ["github.copilot-chat"]
+            }
+        });
+        merge_hint_extensions(&mut hints, doc);
+        assert_eq!(
+            hints.extensions_for("copilot_chat"),
+            Some(&vec!["github.copilot-chat".to_string()])
+        );
+    }
+
+    #[test]
     fn read_session_hint_file_returns_none_for_missing_or_invalid() {
         // Missing file.
         assert!(
