@@ -110,6 +110,19 @@ pub fn infer_copilot_chat_surface(path: &Path) -> &'static str {
         return JETBRAINS;
     }
 
+    // #758: the JetBrains Copilot plugin writes under
+    // `~/.config/github-copilot/<ide-slug>/...` (mac/linux) or
+    // `AppData/Local/github-copilot/...` (windows). The CLI provider keeps
+    // its state under `~/.copilot/` and the VS Code extension under
+    // `Code/User/...`, so a `github-copilot` *segment* is JetBrains-
+    // exclusive in practice. Match the segment literally rather than
+    // hard-coding the IDE slugs (`iu`, `ic`, `ws`, `pc`, `go`, …) — new
+    // JetBrains IDEs would otherwise keep leaking into `surface=unknown`
+    // every time JetBrains shipped a new product code.
+    if path_segment_matches(path, |s| s == "github-copilot") {
+        return JETBRAINS;
+    }
+
     UNKNOWN
 }
 
@@ -171,6 +184,48 @@ mod tests {
         let p = PathBuf::from(
             "/Users/ivan/Library/Application Support/JetBrains/IdeaIC2026.1/copilot/sessions/x.json",
         );
+        assert_eq!(infer_copilot_chat_surface(&p), JETBRAINS);
+    }
+
+    /// #758: `~/.config/github-copilot/<ide-slug>/<session-type>/` is the
+    /// JetBrains-side Copilot config root on Mac/Linux. The session-type
+    /// dirs (`chat-sessions`, `chat-edit-sessions`, `chat-agent-sessions`,
+    /// `bg-agent-sessions`) are what `health_sources` reports, and the
+    /// IDE slugs (`iu`, `ic`, `ws`, `pc`, `go`, etc.) are open-ended.
+    /// Match on the `github-copilot` segment so new IDE slugs don't keep
+    /// leaking into `surface=unknown`.
+    #[test]
+    fn github_copilot_config_root_maps_to_jetbrains() {
+        for slug in ["iu", "ic", "ws", "pc", "go", "rr"] {
+            for session_type in [
+                "chat-sessions",
+                "chat-edit-sessions",
+                "chat-agent-sessions",
+                "bg-agent-sessions",
+            ] {
+                let p = PathBuf::from(format!(
+                    "/Users/ivan/.config/github-copilot/{slug}/{session_type}"
+                ));
+                assert_eq!(
+                    infer_copilot_chat_surface(&p),
+                    JETBRAINS,
+                    "expected JETBRAINS for {}/{}",
+                    slug,
+                    session_type
+                );
+            }
+        }
+    }
+
+    /// #758: Windows JetBrains Copilot writes under
+    /// `AppData/Local/github-copilot/...`. The `github-copilot` segment
+    /// rule must carry across platforms. `PathBuf::from` only parses
+    /// backslashes as separators on Windows, so the assertion is gated
+    /// to that target.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn github_copilot_windows_root_maps_to_jetbrains() {
+        let p = PathBuf::from(r"C:\Users\ivan\AppData\Local\github-copilot\iu\chat-sessions");
         assert_eq!(infer_copilot_chat_surface(&p), JETBRAINS);
     }
 
