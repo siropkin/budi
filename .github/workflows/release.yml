@@ -257,7 +257,12 @@ jobs:
     # Prerelease tags don't bump the tap — `brew upgrade siropkin/budi/budi`
     # users stay on the last stable. Promote an rc to a stable tag from the
     # same SHA when it passes smoke and this job will fire then.
-    if: ${{ env.IS_PRERELEASE != 'true' }}
+    #
+    # NB: the `env:` context isn't available in job-level `if:` expressions
+    # (only `github.*`, `needs.*`, `inputs.*`, `vars.*`), so we recompute
+    # the same `contains(..., '-')` check inline rather than referencing
+    # `env.IS_PRERELEASE`.
+    if: ${{ !contains((github.event_name == 'workflow_dispatch' && github.event.inputs.tag || github.ref_name), '-') }}
     steps:
       - name: Checkout budi repo
         uses: actions/checkout@v5
