@@ -7600,3 +7600,85 @@ fn session_prompt_category_tracks_latest_value() {
         "session should track the latest prompt_category"
     );
 }
+
+/// #755: ADR-0094 §1 declares `cost_cents_effective` is never legitimately
+/// NULL. Before the fix, the ingest path bound the raw `Option<f64>` to the
+/// column, so any row without a cost (every `role=user` prompt) wrote a
+/// NULL into `_effective`. Regression: a user row with `cost_cents=None`
+/// must round-trip as `_effective = 0.0`, and the schema's NOT NULL
+/// constraint must reject any attempt to write NULL directly.
+#[test]
+fn ingest_user_row_writes_zero_not_null_into_effective() {
+    let mut conn = test_db();
+    let msg = ParsedMessage {
+        uuid: "user-no-cost".to_string(),
+        session_id: Some("s-755".to_string()),
+        timestamp: "2026-05-12T01:54:25Z".parse().unwrap(),
+        cwd: Some("/tmp/proj".to_string()),
+        role: "user".to_string(),
+        model: None,
+        input_tokens: 0,
+        output_tokens: 0,
+        cache_creation_tokens: 0,
+        cache_read_tokens: 0,
+        git_branch: None,
+        repo_id: None,
+        provider: "claude_code".to_string(),
+        cost_cents: None,
+        session_title: None,
+        parent_uuid: None,
+        user_name: None,
+        machine_name: None,
+        cost_confidence: "estimated".to_string(),
+        pricing_source: None,
+        request_id: None,
+        speed: None,
+        cache_creation_1h_tokens: 0,
+        web_search_requests: 0,
+        prompt_category: None,
+        prompt_category_source: None,
+        prompt_category_confidence: None,
+        tool_names: Vec::new(),
+        tool_use_ids: Vec::new(),
+        tool_files: Vec::new(),
+        tool_outcomes: Vec::new(),
+        cwd_source: None,
+        surface: None,
+    };
+    ingest_messages(&mut conn, &[msg], None).unwrap();
+
+    let (ingested, effective): (f64, f64) = conn
+        .query_row(
+            "SELECT cost_cents_ingested, cost_cents_effective
+               FROM messages WHERE id = 'user-no-cost'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(ingested, 0.0);
+    assert_eq!(effective, 0.0);
+
+    let null_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM messages WHERE cost_cents_effective IS NULL",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(null_count, 0);
+
+    // Schema invariant: direct NULL writes must be rejected.
+    let err = conn.execute(
+        "INSERT INTO messages (id, role, timestamp, provider,
+                               input_tokens, output_tokens,
+                               cache_creation_tokens, cache_read_tokens,
+                               cost_cents_ingested, cost_cents_effective)
+         VALUES ('null-write', 'user', '2026-05-12T01:55:00Z', 'claude_code',
+                 0, 0, 0, 0, 0, NULL)",
+        [],
+    );
+    assert!(
+        err.is_err(),
+        "schema must reject NULL cost_cents_effective writes"
+    );
+}
