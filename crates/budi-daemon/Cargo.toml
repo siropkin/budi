@@ -26,5 +26,6 @@ ureq.workspace = true
 
 [dev-dependencies]
 http-body-util = "0.1"
+serde_urlencoded = "0.7"
 tempfile = "3"
 tower = { version = "0.5", features = ["util"] }

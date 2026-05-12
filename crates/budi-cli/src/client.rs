@@ -501,12 +501,15 @@ impl DaemonClient {
     /// when `list_version` is unchanged (the worker would otherwise
     /// short-circuit). #732.
     pub fn pricing_recompute(&self, force: bool) -> Result<Value> {
+        // #745: the daemon route uses serde's strict bool deserializer, which
+        // only accepts the literal strings "true" / "false". A numeric
+        // 0 / 1 (the older convention) trips 400 Bad Request.
         let resp = self
             .client
             .post(format!(
                 "{}/pricing/recompute?force={}",
                 self.base_url,
-                if force { "1" } else { "0" }
+                if force { "true" } else { "false" }
             ))
             .timeout(std::time::Duration::from_secs(120))
             .send()
