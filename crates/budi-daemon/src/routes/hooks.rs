@@ -752,6 +752,34 @@ mod tests {
         assert_eq!(surface_for_path("copilot_chat", jetbrains), "jetbrains");
     }
 
+    /// #758: the JetBrains-side Copilot watch roots live under
+    /// `~/.config/github-copilot/<ide-slug>/<session-type>/`. Before the
+    /// fix the aggregator routed them to `surface=unknown`, leaving the
+    /// JetBrains widget's `?surface=jetbrains` query empty even when the
+    /// parser would have emitted rows.
+    #[test]
+    fn surface_for_path_routes_github_copilot_to_jetbrains() {
+        for slug in ["iu", "ic", "ws"] {
+            for session_type in [
+                "chat-sessions",
+                "chat-agent-sessions",
+                "chat-edit-sessions",
+                "bg-agent-sessions",
+            ] {
+                let p = std::path::PathBuf::from(format!(
+                    "/Users/u/.config/github-copilot/{slug}/{session_type}"
+                ));
+                assert_eq!(
+                    surface_for_path("copilot_chat", &p),
+                    "jetbrains",
+                    "expected jetbrains surface for {}/{}",
+                    slug,
+                    session_type
+                );
+            }
+        }
+    }
+
     #[test]
     fn collect_health_sources_filtered_returns_only_matching_surface() {
         let filtered = super::collect_health_sources(Some("jetbrains".to_string()));
