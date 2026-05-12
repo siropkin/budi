@@ -592,12 +592,16 @@ fn cleanup_legacy_auto_tags(conn: &mut Connection) -> usize {
 /// Sources:
 /// - Claude Code: first user prompt from the JSONL transcript file.
 /// - Cursor: composer name from state.vscdb `allComposers`.
-/// - Copilot Chat (`jetbrains`): most-frequent `session_title` tag across
-///   the session's messages. The parser already emits this tag for every
-///   row (#766 sets it to the resolved `projectName`; #757 falls back to
-///   the session-type label `chat` / `chat-agent` / `chat-edit` /
-///   `bg-agent`). Pure DB-side backfill — no file reads, no 30-day
-///   recency window, so historical sessions also get a title.
+/// - Copilot Chat (`jetbrains`): `ParsedMessage.session_title` from the
+///   JetBrains parser — re-derived by walking the session dirs on disk.
+///   The title is either the resolved IntelliJ `projectName` (#766 Phase
+///   1, #778 Phase 2) or the session-type fallback (`chat`, `chat-agent`,
+///   `chat-edit`, `bg-agent`). Runs across every historical row (no
+///   30-day recency cap) so the dashboard's historical sessions also
+///   light up. The parser's `session_title` field never reached the
+///   tags table on its own — the constant in `tag_keys.rs::SESSION_TITLE`
+///   exists but no enricher emits it — so the backfill re-runs the parser
+///   to derive the title from the source of truth (the session dirs).
 fn backfill_session_titles(conn: &mut Connection) -> usize {
     let rows: Vec<(String, String)> = {
         let mut stmt = match conn.prepare(
@@ -636,54 +640,31 @@ fn backfill_session_titles(conn: &mut Connection) -> usize {
         titles.extend(collect_cursor_titles(&cursor_ids));
     }
 
+    // #779: JetBrains Copilot title backfill. Always-on across every row
+    // that needs a title — no `started_at` window because the parser is
+    // cheap (one byte-scan per session dir) and historical jetbrains
+    // sessions remain visible in the dashboard. Gated by the
+    // `title IS NULL OR title = ''` predicate in the UPDATE below so
+    // idempotent calls are no-ops after the first pass.
+    let jetbrains_titles =
+        crate::providers::copilot_chat::jetbrains::collect_jetbrains_session_titles();
+
     let tx = match conn.transaction() {
         Ok(t) => t,
         Err(_) => return 0,
     };
     let mut count = 0usize;
-    for (sid, title) in &titles {
+    for (sid, title) in titles.iter().chain(jetbrains_titles.iter()) {
         if tx
             .execute(
                 "UPDATE sessions SET title = ?2 WHERE id = ?1 AND (title IS NULL OR title = '')",
                 rusqlite::params![sid, title],
             )
-            .is_ok()
+            .map(|n| n > 0)
+            .unwrap_or(false)
         {
             count += 1;
         }
-    }
-    // #779: JetBrains Copilot title backfill. Pure SQL — pulls the
-    // most-frequent `session_title` tag across the session's messages
-    // into `sessions.title`. Idempotent (the `title IS NULL OR title = ''`
-    // predicate becomes empty after the first pass). Runs across every
-    // historical jetbrains row, not just the last 30 days, because the
-    // dashboard renders historical sessions and the parser-emitted tag
-    // is already on every row.
-    if let Ok(updated) = tx.execute(
-        "UPDATE sessions
-            SET title = (
-                SELECT t.value FROM tags t
-                JOIN messages m ON m.id = t.message_id
-                WHERE m.session_id = sessions.id
-                  AND t.key = 'session_title'
-                  AND t.value <> ''
-                GROUP BY t.value
-                ORDER BY COUNT(*) DESC, t.value ASC
-                LIMIT 1
-            )
-          WHERE provider = 'copilot_chat'
-            AND surface = 'jetbrains'
-            AND (title IS NULL OR title = '')
-            AND EXISTS (
-                SELECT 1 FROM tags t2
-                JOIN messages m2 ON m2.id = t2.message_id
-                WHERE m2.session_id = sessions.id
-                  AND t2.key = 'session_title'
-                  AND t2.value <> ''
-            )",
-        [],
-    ) {
-        count += updated;
     }
     if tx.commit().is_err() {
         return 0;
@@ -1096,107 +1077,45 @@ mod tests {
         assert_eq!(count, 0, "should not backfill when session has no category");
     }
 
-    // #779: backfill `sessions.title` for `surface=jetbrains` rows from
-    // the parser-emitted `session_title` tag. The parser already writes
-    // this tag on every message (`projectName` when #766/#778 resolves
-    // one, falling back to `chat`/`chat-agent`/`chat-edit`/`bg-agent` per
-    // session type) — the gap was purely promotion to the column.
+    // #779: backfill `sessions.title` for `surface=jetbrains` rows by
+    // re-deriving the title from the JetBrains parser's `session_title`
+    // field via `collect_jetbrains_session_titles`. The parser emits
+    // either the resolved IntelliJ `projectName` (#766 Phase 1, #778
+    // Phase 2) or the session-type fallback (`chat`, `chat-agent`, etc.)
+    // — but it never reached the DB on its own (the `SESSION_TITLE`
+    // tag-keys constant exists but no enricher writes it). The backfill
+    // re-runs the parser to derive the title from the source of truth.
+    //
+    // This in-process unit test cannot stand up real JetBrains session
+    // dirs (the helper walks `~/.config/github-copilot/`), so the
+    // coverage here is limited to the no-op-on-already-titled guard.
+    // The end-to-end behaviour is verified by the smoke-test step of the
+    // release flow against a real DB on the smoke-test machine.
     #[test]
-    fn backfill_jetbrains_session_titles_promotes_most_frequent_tag() {
-        let mut conn = rusqlite::Connection::open_in_memory().expect("in-memory db");
-        crate::migration::migrate(&conn).expect("migrate");
-
-        // Three sessions: one resolved to `Verkada-Web`, one to the
-        // `chat-agent` fallback, one already has a title (must not change).
-        conn.execute_batch(
-            "INSERT INTO sessions (id, provider, surface, title) VALUES
-                ('s-resolved', 'copilot_chat', 'jetbrains', NULL),
-                ('s-fallback', 'copilot_chat', 'jetbrains', ''),
-                ('s-already',  'copilot_chat', 'jetbrains', 'do not touch');",
-        )
-        .expect("insert sessions");
-
-        // Per-turn rows for each session, all with `session_title` tags.
-        let assistant_row = |id: &str, sess: &str| {
-            format!(
-                "INSERT INTO messages
-                 (id, session_id, role, timestamp, model, provider,
-                  input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
-                  cost_cents_ingested, cost_cents_effective, cost_confidence, surface)
-                 VALUES
-                 ('{id}', '{sess}', 'assistant', datetime('now'), 'gpt-4o', 'copilot_chat',
-                  0, 0, 0, 0, 0.0, 0.0, 'estimated', 'jetbrains');"
-            )
-        };
-        conn.execute_batch(&format!(
-            "{}{}{}{}{}",
-            assistant_row("m-resolved-1", "s-resolved"),
-            assistant_row("m-resolved-2", "s-resolved"),
-            assistant_row("m-fallback-1", "s-fallback"),
-            assistant_row("m-already-1", "s-already"),
-            "INSERT INTO tags (message_id, key, value) VALUES
-                ('m-resolved-1', 'session_title', 'Verkada-Web'),
-                ('m-resolved-2', 'session_title', 'Verkada-Web'),
-                ('m-fallback-1', 'session_title', 'chat-agent'),
-                ('m-already-1',  'session_title', 'chat');"
-        ))
-        .expect("insert messages + tags");
-
-        let updated = backfill_session_titles(&mut conn);
-        assert!(
-            updated >= 2,
-            "expected at least the two empty-title rows to flip, got {updated}"
-        );
-
-        let title = |id: &str| -> Option<String> {
-            conn.query_row(
-                "SELECT title FROM sessions WHERE id = ?1",
-                rusqlite::params![id],
-                |r| r.get(0),
-            )
-            .ok()
-        };
-        assert_eq!(title("s-resolved").as_deref(), Some("Verkada-Web"));
-        assert_eq!(title("s-fallback").as_deref(), Some("chat-agent"));
-        // Pre-existing title is preserved — the WHERE predicate excludes it.
-        assert_eq!(title("s-already").as_deref(), Some("do not touch"));
-
-        // Idempotency: a second backfill pass updates nothing.
-        let second = backfill_session_titles(&mut conn);
-        assert_eq!(second, 0, "second pass should be a no-op");
-    }
-
-    /// A `surface=jetbrains` session whose messages carry no
-    /// `session_title` tag at all (theoretical — the parser always emits
-    /// one — but exercises the `EXISTS` guard) must not be set to NULL.
-    #[test]
-    fn backfill_jetbrains_session_titles_skips_sessions_without_tags() {
+    fn backfill_session_titles_preserves_existing_title() {
         let mut conn = rusqlite::Connection::open_in_memory().expect("in-memory db");
         crate::migration::migrate(&conn).expect("migrate");
 
         conn.execute(
-            "INSERT INTO sessions (id, provider, surface) VALUES ('s-empty', 'copilot_chat', 'jetbrains')",
+            "INSERT INTO sessions (id, provider, surface, title)
+                VALUES ('s-untouched', 'copilot_chat', 'jetbrains', 'do not touch')",
             [],
         )
         .expect("insert session");
-        conn.execute(
-            "INSERT INTO messages
-             (id, session_id, role, timestamp, model, provider,
-              input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
-              cost_cents_ingested, cost_cents_effective, cost_confidence, surface)
-             VALUES
-             ('m-empty', 's-empty', 'assistant', datetime('now'), 'gpt-4o', 'copilot_chat',
-              0, 0, 0, 0, 0.0, 0.0, 'estimated', 'jetbrains')",
-            [],
-        )
-        .expect("insert message without session_title tag");
 
         let _ = backfill_session_titles(&mut conn);
-        let title: Option<String> = conn
-            .query_row("SELECT title FROM sessions WHERE id = 's-empty'", [], |r| {
-                r.get(0)
-            })
-            .unwrap_or(None);
-        assert!(title.is_none(), "title should remain NULL");
+
+        let preserved: Option<String> = conn
+            .query_row(
+                "SELECT title FROM sessions WHERE id = 's-untouched'",
+                [],
+                |r| r.get(0),
+            )
+            .ok();
+        assert_eq!(
+            preserved.as_deref(),
+            Some("do not touch"),
+            "pre-existing title must be preserved by the WHERE predicate"
+        );
     }
 }

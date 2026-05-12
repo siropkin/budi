@@ -912,6 +912,38 @@ fn deterministic_uuid(session_id: &str, path: &str) -> String {
     )
 }
 
+/// #779: walk every JetBrains-side session dir under the active config
+/// roots and return a `(session_id, title)` map suitable for backfilling
+/// `sessions.title`. The title is the parser's `ParsedMessage.session_title`
+/// — either the resolved IntelliJ `projectName` (Phase 1 #766 or Phase 2
+/// #778) or the session-type label fallback (`chat`, `chat-agent`,
+/// `chat-edit`, `bg-agent`). Cheap (one byte-scan per session dir);
+/// idempotent — callers should still gate on `title IS NULL OR title = ''`
+/// at write time so a manual-rename in the cloud isn't overwritten.
+///
+/// Returns an empty map when no JetBrains config root exists on this host.
+pub fn collect_jetbrains_session_titles() -> std::collections::HashMap<String, String> {
+    let session_dirs = discover_session_dirs(&jetbrains_config_roots());
+    let mut out = std::collections::HashMap::new();
+    for dir in session_dirs {
+        let Some(sid) = dir.file_name().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        let parsed = parse_session_dir(&dir);
+        let Some(first) = parsed.into_iter().next() else {
+            continue;
+        };
+        let Some(title) = first.session_title else {
+            continue;
+        };
+        if title.is_empty() {
+            continue;
+        }
+        out.insert(sid.to_string(), title);
+    }
+    out
+}
+
 /// Discover JetBrains-side sessions, parse each, run the resulting messages
 /// through the pipeline, and ingest them. Side-effect path called from
 /// `CopilotChatProvider::sync_direct` so the JetBrains rows land in the
