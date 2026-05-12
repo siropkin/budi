@@ -343,12 +343,19 @@ fn sync_with_max_age<F: FnMut(&SyncProgress)>(
             Ok(_) => {}
             Err(e) => tracing::warn!("Session timestamp backfill failed: {e}"),
         }
+    }
 
-        // Backfill session titles from provider-specific sources.
-        let titles_backfilled = backfill_session_titles(conn);
-        if titles_backfilled > 0 {
-            tracing::info!("Backfilled session titles on {titles_backfilled} sessions");
-        }
+    // #779 (post-rc.1 followup): session-title backfill runs on every
+    // sync tick, not just when new messages landed. Existing sessions
+    // that pre-date a parser update (#766 Phase 1, #778 Phase 2) need
+    // their `sessions.title` re-derived from the parser even when no
+    // new messages were ingested — otherwise a daemon upgrade leaves
+    // the dashboard's Title column empty until the user happens to use
+    // their IDE again. The function is idempotent — the `title IS NULL
+    // OR title = ''` predicate makes follow-up calls free.
+    let titles_backfilled = backfill_session_titles(conn);
+    if titles_backfilled > 0 {
+        tracing::info!("Backfilled session titles on {titles_backfilled} sessions");
     }
 
     if let Err(e) = crate::privacy::enforce_retention(conn) {
