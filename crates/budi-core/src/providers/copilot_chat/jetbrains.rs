@@ -276,7 +276,177 @@ pub(super) fn parse_session_dir(session_dir: &Path) -> Vec<ParsedMessage> {
     // needing a separate column. Stripped to plain "chat"/"agent"/"edit"/"bg-agent"
     // to match the rest of the system's terminology.
     msg.session_title = session_type.map(|s| s.trim_end_matches("-sessions").to_string());
+
+    // #766: best-effort `repo_id` / `git_branch` enrichment from the Xodus
+    // log's `projectName` property. The Nitrite store carries the same
+    // signal in `NtAgentWorkingSetItem.stringContent`, but that decoder is
+    // deferred to #764's Phase 2. Phase 1 only covers the `.xd` byte path
+    // — sessions that are Nitrite-only fall through to `repo_id = None`.
+    if store_path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .is_some_and(|name| name == "00000000000.xd")
+        && let Ok(bytes) = std::fs::read(&store_path)
+        && let Some(project_name) = extract_xodus_project_name(&bytes)
+    {
+        if let Some((repo_id, branch)) = resolve_project_workspace(&project_name) {
+            msg.repo_id = Some(repo_id);
+            if branch.is_some() {
+                msg.git_branch = branch;
+            }
+            // Keep the project name in `session_title` too — when the
+            // dashboard groups sessions by repo, the per-session detail
+            // still wants the IDE's human name on it, especially for the
+            // multiple-checkout case where `<host>/<owner>/<repo>` is
+            // less recognizable than `Verkada-Web`.
+            msg.session_title = Some(project_name);
+        } else {
+            // Repo didn't resolve, but at least show *something* so the
+            // dashboard Repo column for `surface=jetbrains` rows isn't a
+            // sea of `(unknown)`. Per the ticket's acceptance:
+            // "the `session_title` column on rows where `repo_id`
+            // resolution failed carries the raw `projectName`".
+            msg.session_title = Some(project_name);
+        }
+    }
+
     vec![msg]
+}
+
+/// #766: pull the JetBrains project name out of the Xodus log's
+/// `XdChatSession.projectName` property by byte-scanning.
+///
+/// The Xodus log writes a schema header near the start of the file that
+/// declares each property name once with a 1-byte property ID
+/// (`projectName\x00<id>`). Property values are written later as
+/// `\x82\x00<id>\x82<utf8-bytes>\x00` inside per-entity records. There
+/// is no Xodus log decoder in this crate — recent plugin versions skip
+/// the file entirely (#757) so it isn't worth carrying a real parser
+/// for it — but the literal `projectName` token plus its property ID is
+/// reliable enough to harvest the value with a couple of byte-finds.
+///
+/// Returns the first plausible candidate string, or `None` when the file
+/// doesn't carry the property or no candidate looks like a real project
+/// name. "Plausible" means: printable UTF-8, 1..=128 chars, no path
+/// separators or extension dots (`.tsx`, `manifest.json` etc. are
+/// rejected — those are working-set file names bleeding through the
+/// same `\x82\x00<id>\x82` framing because some other entity type
+/// happens to assign the same property ID to a path field).
+fn extract_xodus_project_name(bytes: &[u8]) -> Option<String> {
+    let marker = b"projectName";
+    let schema_pos = byte_find(bytes, marker)?;
+    let id_pos = schema_pos.checked_add(marker.len() + 1)?; // skip the `\x00` terminator
+    let property_id = *bytes.get(id_pos)?;
+
+    let value_marker = [0x82u8, 0x00, property_id, 0x82];
+    let mut search_from = 0usize;
+    while let Some(idx) = byte_find(&bytes[search_from..], &value_marker) {
+        let start = search_from + idx + value_marker.len();
+        // Bound the scan so a corrupted log doesn't make us crawl the
+        // whole file looking for a null byte that isn't there.
+        let scan_end = (start + 256).min(bytes.len());
+        let end = bytes[start..scan_end]
+            .iter()
+            .position(|b| *b == 0)
+            .map(|n| start + n)?;
+        let raw = &bytes[start..end];
+        if let Ok(s) = std::str::from_utf8(raw)
+            && looks_like_project_name(s)
+        {
+            return Some(s.to_string());
+        }
+        search_from = start.max(search_from + 1);
+        if search_from >= bytes.len() {
+            break;
+        }
+    }
+    None
+}
+
+/// True iff the candidate string is short, printable, contains no path
+/// separators, and is not obviously a file name. Used to filter the byte
+/// scan's matches so a stray working-set entry like `manifest.json` or
+/// `src/foo/bar.tsx` does not get mistaken for the IntelliJ project name.
+fn looks_like_project_name(s: &str) -> bool {
+    if s.is_empty() || s.len() > 128 {
+        return false;
+    }
+    if !s.chars().all(|c| c.is_ascii_graphic() || c == ' ') {
+        return false;
+    }
+    if s.contains('/') || s.contains('\\') || s.contains(':') {
+        return false;
+    }
+    // Common working-set file extensions that have flown through the
+    // same `\x82\x00<id>\x82` pattern in the survey of real .xd files:
+    // *.json, *.md, *.tsx, *.ts, *.js, *.py, *.rs, *.go, *.toml.
+    // Reject any string whose last `.` is followed by a 1..=5-char
+    // alpha-only suffix — the IntelliJ project name `Verkada-Web` has
+    // no dot, while file names always do.
+    if let Some(idx) = s.rfind('.')
+        && idx + 1 < s.len()
+    {
+        let ext = &s[idx + 1..];
+        if (1..=5).contains(&ext.len()) && ext.chars().all(|c| c.is_ascii_alphabetic()) {
+            return false;
+        }
+    }
+    true
+}
+
+/// #766: given an IntelliJ project name (e.g. `Verkada-Web`), try to
+/// locate it on the filesystem as a git checkout. Probes
+/// `~/_projects/<name>`, `~/projects/<name>`, and `~/<name>` — covering
+/// the two most common layouts on macOS/Linux developer machines without
+/// shelling out to find. Returns `(repo_id, branch)` from
+/// [`crate::repo_id::resolve_repo_id`] + a `HEAD` read; `None` when no
+/// candidate directory contains `.git`.
+fn resolve_project_workspace(project_name: &str) -> Option<(String, Option<String>)> {
+    let home = crate::config::home_dir().ok()?;
+    let candidates = [
+        home.join("_projects").join(project_name),
+        home.join("projects").join(project_name),
+        home.join(project_name),
+    ];
+    for candidate in candidates {
+        if !candidate.join(".git").exists() {
+            continue;
+        }
+        let Some(repo_id) = crate::repo_id::resolve_repo_id(&candidate) else {
+            continue;
+        };
+        let branch = read_git_head_branch(&candidate);
+        return Some((repo_id, branch));
+    }
+    None
+}
+
+/// Best-effort: read the current branch from `<repo>/.git/HEAD`. Returns
+/// `None` for detached HEADs or unreadable refs — the caller treats a
+/// missing branch the same as a missing `repo_id` (omit, fall back to
+/// whatever the JSONL/Xodus path emitted).
+fn read_git_head_branch(repo_root: &Path) -> Option<String> {
+    let head = std::fs::read_to_string(repo_root.join(".git/HEAD")).ok()?;
+    let trimmed = head.trim();
+    let suffix = trimmed.strip_prefix("ref: refs/heads/")?;
+    if suffix.is_empty() {
+        None
+    } else {
+        Some(suffix.to_string())
+    }
+}
+
+/// Linear byte search. Kept private to this module so the entity-type
+/// scan in [`byte_contains`] and the property scan above share one
+/// implementation; the standard library's `slice::windows` is hot
+/// enough on the 10–30 KB store files the JetBrains plugin produces.
+fn byte_find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    if needle.is_empty() || needle.len() > haystack.len() {
+        return None;
+    }
+    haystack
+        .windows(needle.len())
+        .position(|window| window == needle)
 }
 
 /// #757: locate the store file in `session_dir` that the parser should
@@ -671,5 +841,102 @@ mod tests {
         assert!(!byte_contains(b"hello", b"world"));
         assert!(!byte_contains(b"hi", b"hello"));
         assert!(!byte_contains(b"x", b""));
+    }
+
+    /// #766: synthesize an Xodus log fragment that mimics what the real
+    /// `00000000000.xd` files on disk carry — a schema header that
+    /// declares `projectName\x00\x04` followed later by a
+    /// `\x82\x00\x04\x82Verkada-Web\x00` value record. The byte-scan must
+    /// recover the literal project name without a full Xodus log
+    /// decoder. Survey of 13 real session files (2026-05-11) showed this
+    /// pattern is stable across the WS / IC / IU IDE slugs.
+    #[test]
+    fn extract_xodus_project_name_recovers_value_from_schema_id_pair() {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"XdChatSession");
+        bytes.extend_from_slice(b"\x86\x86\x8e\x8c");
+        bytes.extend_from_slice(b"projectName\x00\x04");
+        bytes.extend_from_slice(b"\x86\x86\x87\x85user\x00\x05");
+        bytes.extend_from_slice(b"\x86\x99\x90");
+        bytes.extend_from_slice(b"\x82\x00\x04\x82Verkada-Web\x00");
+        bytes.extend_from_slice(b"\x86\x99\x8d\x82\x00\x05\x82siropkin\x00");
+
+        let project = extract_xodus_project_name(&bytes);
+        assert_eq!(project.as_deref(), Some("Verkada-Web"));
+    }
+
+    /// #766: a session whose `.xd` file doesn't carry the property at
+    /// all (empty session, or a plugin version that skips the property)
+    /// must return `None` rather than picking some random other string
+    /// out of the log.
+    #[test]
+    fn extract_xodus_project_name_returns_none_when_property_absent() {
+        let bytes = b"XdChatSession\x00bunch of other stuff\x00\x00";
+        assert!(extract_xodus_project_name(bytes).is_none());
+    }
+
+    /// #766: working-set file names share the `\x82\x00<id>\x82` framing,
+    /// so the value-scan can land on strings like `manifest.json` or
+    /// `src/foo/bar.tsx`. `looks_like_project_name` must reject those
+    /// — otherwise `resolve_project_workspace` ends up looking for
+    /// `~/_projects/manifest.json` and falling through, with
+    /// `session_title` set to a misleading filename.
+    #[test]
+    fn extract_xodus_project_name_filters_file_name_false_positives() {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"projectName\x00\x04");
+        // First candidate is a file name (rejected); second is the real
+        // project name (accepted). The scan walks forward through every
+        // match so a real value still surfaces after a false positive.
+        bytes.extend_from_slice(b"\x82\x00\x04\x82manifest.json\x00");
+        bytes.extend_from_slice(b"\x82\x00\x04\x82verkadalizer\x00");
+
+        let project = extract_xodus_project_name(&bytes);
+        assert_eq!(project.as_deref(), Some("verkadalizer"));
+    }
+
+    #[test]
+    fn looks_like_project_name_accepts_real_names() {
+        for name in ["Verkada-Web", "budi", "getbudi-dev", "verkada_menu_v2"] {
+            assert!(looks_like_project_name(name), "should accept {name:?}");
+        }
+    }
+
+    #[test]
+    fn looks_like_project_name_rejects_file_paths_and_extensions() {
+        for name in [
+            "manifest.json",
+            "src/components/Foo.tsx",
+            "/Users/me/_projects/Verkada-Web",
+            "c:\\Users\\me\\code",
+            "",
+            "README.md",
+        ] {
+            assert!(!looks_like_project_name(name), "should reject {name:?}");
+        }
+    }
+
+    #[test]
+    fn read_git_head_branch_parses_symbolic_ref() {
+        let tmp = std::env::temp_dir().join("budi-jetbrains-head");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(tmp.join(".git")).unwrap();
+        std::fs::write(tmp.join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
+        assert_eq!(read_git_head_branch(&tmp).as_deref(), Some("main"));
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn read_git_head_branch_returns_none_for_detached_head() {
+        let tmp = std::env::temp_dir().join("budi-jetbrains-head-detached");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(tmp.join(".git")).unwrap();
+        std::fs::write(
+            tmp.join(".git/HEAD"),
+            "0123456789abcdef0123456789abcdef01234567\n",
+        )
+        .unwrap();
+        assert!(read_git_head_branch(&tmp).is_none());
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 }
