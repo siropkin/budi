@@ -1469,60 +1469,73 @@ fn ensure_dual_cost_columns(conn: &Connection) -> Result<Vec<String>> {
         let has_ingested = has_column(conn, table, "cost_cents_ingested")?;
         let has_legacy = has_column(conn, table, "cost_cents")?;
 
-        if has_effective && has_ingested {
-            continue;
+        let needs_migration = !has_effective || !has_ingested;
+
+        if needs_migration {
+            // Drop rollup triggers up-front: they reference `NEW.cost_cents`
+            // / `OLD.cost_cents`, and once we rename or drop the column the
+            // trigger bodies become invalid. The caller recreates them with
+            // the dual-column shape via `create_rollup_triggers`.
+            conn.execute_batch(
+                "DROP TRIGGER IF EXISTS trg_messages_rollup_insert;
+                 DROP TRIGGER IF EXISTS trg_messages_rollup_delete;
+                 DROP TRIGGER IF EXISTS trg_messages_rollup_update;",
+            )?;
+
+            if !has_ingested {
+                // Rollups: NOT NULL DEFAULT 0 matches the existing rollup
+                // column shape and the spec. messages.cost_cents was
+                // nullable, but the new `_ingested` column is always
+                // NOT NULL DEFAULT 0 per ADR-0094 §1 — incoming NULL legacy
+                // rows get the column DEFAULT before the copy below.
+                conn.execute_batch(&format!(
+                    "ALTER TABLE {table} ADD COLUMN cost_cents_ingested REAL NOT NULL DEFAULT 0;"
+                ))?;
+                added.push(format!("{table}.cost_cents_ingested"));
+            }
+
+            if has_legacy && !has_effective {
+                // Copy the legacy column's value (treating NULL as 0) into
+                // the new `_ingested` column so history is preserved
+                // verbatim. ADR-0091 §5 Rule D: `_ingested` is the
+                // ADR-0091-immutable column from this point forward.
+                conn.execute_batch(&format!(
+                    "UPDATE {table} SET cost_cents_ingested = COALESCE(cost_cents, 0);"
+                ))?;
+                // Rename the legacy column. SQLite ≥ 3.25 rewrites trigger
+                // bodies and index definitions transparently, so existing
+                // `idx_messages_*_cost` indexes now reference the renamed
+                // column with no further action.
+                conn.execute_batch(&format!(
+                    "ALTER TABLE {table} RENAME COLUMN cost_cents TO cost_cents_effective;"
+                ))?;
+                added.push(format!("{table}.cost_cents_effective"));
+            } else if !has_effective {
+                // No legacy column to rename (the table was created without
+                // any cost column — shouldn't happen in practice, but
+                // defensive): add it explicitly with the rollup-table
+                // semantics. Messages-table inserts always bind a value, so
+                // the NOT NULL default never gets exercised on the live
+                // path.
+                conn.execute_batch(&format!(
+                    "ALTER TABLE {table} ADD COLUMN cost_cents_effective REAL NOT NULL DEFAULT 0;"
+                ))?;
+                added.push(format!("{table}.cost_cents_effective"));
+            }
         }
 
-        // Drop rollup triggers up-front: they reference `NEW.cost_cents` /
-        // `OLD.cost_cents`, and once we rename or drop the column the
-        // trigger bodies become invalid. The caller recreates them with
-        // the dual-column shape via `create_rollup_triggers`.
-        conn.execute_batch(
-            "DROP TRIGGER IF EXISTS trg_messages_rollup_insert;
-             DROP TRIGGER IF EXISTS trg_messages_rollup_delete;
-             DROP TRIGGER IF EXISTS trg_messages_rollup_update;",
-        )?;
-
-        if !has_ingested {
-            // Rollups: NOT NULL DEFAULT 0 matches the existing rollup
-            // column shape and the spec. messages.cost_cents was
-            // nullable, but the new `_ingested` column is always
-            // NOT NULL DEFAULT 0 per ADR-0094 §1 — incoming NULL legacy
-            // rows get the column DEFAULT before the copy below.
-            conn.execute_batch(&format!(
-                "ALTER TABLE {table} ADD COLUMN cost_cents_ingested REAL NOT NULL DEFAULT 0;"
-            ))?;
-            added.push(format!("{table}.cost_cents_ingested"));
-        }
-
-        if has_legacy && !has_effective {
-            // Copy the legacy column's value (treating NULL as 0) into
-            // the new `_ingested` column so history is preserved
-            // verbatim. ADR-0091 §5 Rule D: `_ingested` is the
-            // ADR-0091-immutable column from this point forward.
-            conn.execute_batch(&format!(
-                "UPDATE {table} SET cost_cents_ingested = COALESCE(cost_cents, 0);"
-            ))?;
-            // Rename the legacy column. SQLite ≥ 3.25 rewrites trigger
-            // bodies and index definitions transparently, so existing
-            // `idx_messages_*_cost` indexes now reference the renamed
-            // column with no further action.
-            conn.execute_batch(&format!(
-                "ALTER TABLE {table} RENAME COLUMN cost_cents TO cost_cents_effective;"
-            ))?;
-            added.push(format!("{table}.cost_cents_effective"));
-        } else if !has_effective {
-            // No legacy column to rename (the table was created without
-            // any cost column — shouldn't happen in practice, but
-            // defensive): add it explicitly with the rollup-table
-            // semantics. Messages-table inserts always bind a value, so
-            // the NOT NULL default never gets exercised on the live
-            // path.
-            conn.execute_batch(&format!(
-                "ALTER TABLE {table} ADD COLUMN cost_cents_effective REAL NOT NULL DEFAULT 0;"
-            ))?;
-            added.push(format!("{table}.cost_cents_effective"));
-        }
+        // #746: the original rename above preserved the legacy NULLs into
+        // `cost_cents_effective`, which then crashes `recompute_messages`
+        // when it reads the column as a non-nullable f64. Backfill NULLs
+        // from `_ingested` per ADR-0094 §1 ("`_effective` is never
+        // legitimately NULL"). Idempotent — matches zero rows on
+        // subsequent runs, and also recovers users whose DBs already
+        // shipped past the broken migration without forcing a fresh
+        // install.
+        conn.execute_batch(&format!(
+            "UPDATE {table} SET cost_cents_effective = cost_cents_ingested \
+                WHERE cost_cents_effective IS NULL;"
+        ))?;
     }
 
     Ok(added)
@@ -2235,6 +2248,62 @@ mod tests {
                 .any(|c| c.contains("cost_cents_")),
             "second repair must not re-add dual cost columns; got {:?}",
             second.added_columns
+        );
+    }
+
+    /// #746: a user who shipped past the original #730 rename keeps the
+    /// pre-migration NULL rows in `cost_cents_effective` (the rename
+    /// preserves nulls). Running `repair` on that DB must backfill the
+    /// NULLs from `_ingested` so the recompute loop stops crashing.
+    /// Idempotent — a second pass touches zero rows.
+    #[test]
+    fn reconcile_backfills_null_effective_on_already_migrated_db() {
+        let conn = Connection::open_in_memory().unwrap();
+        migrate(&conn).unwrap();
+
+        // Insert a row in the post-migration shape but force `_effective`
+        // back to NULL, mimicking history that came through the broken
+        // rename without ever being recomputed.
+        conn.execute(
+            "INSERT INTO messages (id, role, timestamp, model, provider,
+                                   input_tokens, output_tokens,
+                                   cost_cents_ingested, cost_cents_effective)
+             VALUES ('legacy','assistant','2026-04-22T00:00:00Z','claude-opus-4-6','claude_code',
+                     0, 100, 9.75, NULL)",
+            [],
+        )
+        .unwrap();
+
+        let null_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM messages WHERE cost_cents_effective IS NULL",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(null_count, 1, "seed precondition");
+
+        repair(&conn).unwrap();
+
+        let null_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM messages WHERE cost_cents_effective IS NULL",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(null_count, 0, "repair must backfill NULL _effective rows");
+
+        let eff: f64 = conn
+            .query_row(
+                "SELECT cost_cents_effective FROM messages WHERE id='legacy'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(
+            (eff - 9.75).abs() < 1e-9,
+            "_effective must mirror _ingested after backfill; got {eff}"
         );
     }
 
