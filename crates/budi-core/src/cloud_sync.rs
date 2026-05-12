@@ -696,12 +696,117 @@ pub enum SyncResult {
     Success(IngestResponse),
     /// Auth failure (401) — should stop syncing and prompt re-auth.
     AuthFailure,
-    /// Schema mismatch (422) — log warning, don't retry until updated.
-    SchemaMismatch(String),
+    /// 422 — server rejected the envelope. #756: the body is captured
+    /// verbatim and classified so the daemon/CLI can show the right
+    /// recovery advice. The previous shape dropped the body and assumed
+    /// every 422 was a schema-version mismatch; the v8.4.4 smoke test
+    /// proved that wrong (the cloud's `validateIngestMetrics` rejected
+    /// the `cost_cents` rename with a non-version 422 and budi told the
+    /// user to "update budi" when the cloud was the lagging side).
+    SchemaMismatch(SchemaMismatch),
     /// Transient error (429/5xx/network) — should retry with backoff.
     TransientError(String),
     /// Nothing to sync (empty payload).
     EmptyPayload,
+}
+
+/// #756: structured 422 outcome. Wraps the server's exact response body
+/// plus a classification of *why* the cloud rejected it. The daemon
+/// renders the body verbatim and chooses the recovery advice from
+/// [`SchemaMismatchKind`] (so a "cloud is lagging" 422 stops telling the
+/// user to update budi when budi isn't the problem).
+#[derive(Debug, Clone)]
+pub struct SchemaMismatch {
+    pub body: String,
+    pub kind: SchemaMismatchKind,
+}
+
+/// #756: classification of a 422 from the cloud ingest endpoint.
+///
+/// The cloud's `validateIngestMetrics` produces two distinct shapes of
+/// 422 — one that names `schema_version` directly, and a catch-all for
+/// per-field validation (`cost_cents must be a finite, non-negative
+/// number`, `device_id must be a UUID`, etc.). Only the first kind
+/// implies "the client is older than the cloud and needs to update", so
+/// the daemon needs to know which it is before printing recovery advice.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SchemaMismatchKind {
+    /// Body matched `Unsupported schema_version: <c>. Expected one of:
+    /// [<min>, …, <max>]` and the client version is below the minimum
+    /// accepted version. The user should update budi.
+    ClientTooOld { client: u32, expected_min: u32 },
+    /// Body matched the same pattern, but the client version is above
+    /// the maximum the cloud accepts. The cloud is the lagging side;
+    /// no amount of `brew upgrade budi` will help. Telling the user to
+    /// update budi here was the exact failure flagged in #749's body.
+    CloudTooOld { client: u32, expected_max: u32 },
+    /// Body did not match the schema_version pattern at all — usually a
+    /// per-field validation error from the cloud's envelope validator.
+    /// Surface the body verbatim and do not pretend it is a version
+    /// issue.
+    NotSchemaRelated,
+}
+
+/// #756: parse the cloud's 422 response body for a schema_version
+/// mismatch and classify it against the client's current schema_version.
+/// Returns [`SchemaMismatchKind::NotSchemaRelated`] when the body
+/// doesn't match the expected pattern.
+///
+/// The cloud emits the pattern `Unsupported schema_version: <c>.
+/// Expected one of: [<v1>, <v2>, …]` (see siropkin/budi-cloud
+/// `validateEnvelope`). We pull out the integer client version and the
+/// list to decide whether the client is below or above the accepted
+/// set.
+pub fn classify_schema_mismatch(body: &str, client_schema_version: u32) -> SchemaMismatchKind {
+    let Some(prefix) = body.find("Unsupported schema_version:") else {
+        return SchemaMismatchKind::NotSchemaRelated;
+    };
+    let tail = &body[prefix + "Unsupported schema_version:".len()..];
+    let Some(dot) = tail.find('.') else {
+        return SchemaMismatchKind::NotSchemaRelated;
+    };
+    let client_str = tail[..dot].trim();
+    let Ok(_client_from_body) = client_str.parse::<u32>() else {
+        return SchemaMismatchKind::NotSchemaRelated;
+    };
+    // We trust the *client's* known version over whatever the cloud echoed
+    // back (the wire could carry a typo, future cloud format change, etc.).
+    let client = client_schema_version;
+
+    let after_dot = &tail[dot + 1..];
+    let Some(open) = after_dot.find('[') else {
+        return SchemaMismatchKind::NotSchemaRelated;
+    };
+    let Some(close) = after_dot[open..].find(']') else {
+        return SchemaMismatchKind::NotSchemaRelated;
+    };
+    let list_str = &after_dot[open + 1..open + close];
+    let expected: Vec<u32> = list_str
+        .split(',')
+        .filter_map(|s| s.trim().parse::<u32>().ok())
+        .collect();
+    if expected.is_empty() {
+        return SchemaMismatchKind::NotSchemaRelated;
+    }
+    let min = *expected.iter().min().unwrap();
+    let max = *expected.iter().max().unwrap();
+    if client < min {
+        SchemaMismatchKind::ClientTooOld {
+            client,
+            expected_min: min,
+        }
+    } else if client > max {
+        SchemaMismatchKind::CloudTooOld {
+            client,
+            expected_max: max,
+        }
+    } else {
+        // The body claims the client's schema_version is unsupported
+        // but the parsed expected set contains it. The daemon shouldn't
+        // be hitting this arm at all; treat as a generic rejection so
+        // the body is at least surfaced verbatim.
+        SchemaMismatchKind::NotSchemaRelated
+    }
 }
 
 /// Validate that the endpoint is HTTPS. ADR-0083 §4: "The daemon refuses to sync
@@ -801,8 +906,15 @@ pub fn send_sync_envelope(endpoint: &str, api_key: &str, envelope: &SyncEnvelope
 
     let url = format!("{endpoint}/v1/ingest");
 
+    // #756: ureq's default classifies any 4xx/5xx as
+    // `Err(Error::StatusCode(n))` and drops the response body, which is
+    // exactly what we need to read to surface the cloud's real rejection
+    // message. Disable the auto-error so the response always reaches us
+    // and we can branch on `status()` while still owning the body.
+    // Mirrors the post-#751 pattern in `workers/team_pricing.rs`.
     let agent: ureq::Agent = ureq::Agent::config_builder()
         .timeout_global(Some(Duration::from_secs(30)))
+        .http_status_as_error(false)
         .build()
         .into();
 
@@ -812,19 +924,35 @@ pub fn send_sync_envelope(endpoint: &str, api_key: &str, envelope: &SyncEnvelope
         .send_json(envelope);
 
     match result {
-        Ok(mut response) => match response.body_mut().read_json::<IngestResponse>() {
-            Ok(resp) => SyncResult::Success(resp),
-            Err(e) => SyncResult::TransientError(format!("Failed to parse response: {e}")),
-        },
-        Err(ureq::Error::StatusCode(401)) => SyncResult::AuthFailure,
-        Err(ureq::Error::StatusCode(422)) => {
-            SyncResult::SchemaMismatch("Server returned 422".to_string())
-        }
-        Err(ureq::Error::StatusCode(status)) if status == 429 || status >= 500 => {
-            SyncResult::TransientError(format!("Server returned {status}"))
-        }
-        Err(ureq::Error::StatusCode(status)) => {
-            SyncResult::TransientError(format!("Server returned {status}"))
+        Ok(mut response) => {
+            let status = response.status().as_u16();
+            if (200..300).contains(&status) {
+                match response.body_mut().read_json::<IngestResponse>() {
+                    Ok(resp) => SyncResult::Success(resp),
+                    Err(e) => SyncResult::TransientError(format!("Failed to parse response: {e}")),
+                }
+            } else if status == 401 {
+                SyncResult::AuthFailure
+            } else if status == 422 {
+                let body = response
+                    .body_mut()
+                    .read_to_string()
+                    .unwrap_or_else(|_| String::new());
+                let kind = classify_schema_mismatch(&body, envelope.schema_version);
+                SyncResult::SchemaMismatch(SchemaMismatch { body, kind })
+            } else if status == 429 || status >= 500 {
+                SyncResult::TransientError(format!("Server returned {status}"))
+            } else {
+                let body = response
+                    .body_mut()
+                    .read_to_string()
+                    .unwrap_or_else(|_| String::new());
+                if body.is_empty() {
+                    SyncResult::TransientError(format!("Server returned {status}"))
+                } else {
+                    SyncResult::TransientError(format!("Server returned {status}: {body}"))
+                }
+            }
         }
         Err(e) => SyncResult::TransientError(format!("Network error: {e}")),
     }
@@ -1025,6 +1153,64 @@ pub fn backoff_delay(attempt: u32, retry_max_seconds: u64) -> Duration {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #756: schema_version mismatch where the client is below the cloud's
+    /// accepted set should classify as ClientTooOld — the only path where
+    /// "update budi" advice is correct.
+    #[test]
+    fn classify_schema_mismatch_client_too_old() {
+        let body = "Unsupported schema_version: 1. Expected one of: [2, 3]. Update your client.";
+        let kind = classify_schema_mismatch(body, 1);
+        assert_eq!(
+            kind,
+            SchemaMismatchKind::ClientTooOld {
+                client: 1,
+                expected_min: 2,
+            }
+        );
+    }
+
+    /// #756: when the client is *above* the cloud's accepted set (the
+    /// failure mode flagged in #749's body — a fresh release shipped a
+    /// schema bump faster than the cloud deployed), the daemon must call
+    /// out the cloud as the lagging side instead of telling the user to
+    /// update budi.
+    #[test]
+    fn classify_schema_mismatch_cloud_too_old() {
+        let body = "Unsupported schema_version: 3. Expected one of: [1, 2]";
+        let kind = classify_schema_mismatch(body, 3);
+        assert_eq!(
+            kind,
+            SchemaMismatchKind::CloudTooOld {
+                client: 3,
+                expected_max: 2,
+            }
+        );
+    }
+
+    /// #756: a 422 body that doesn't mention `schema_version` is per-field
+    /// validation (the exact failure mode from the v8.4.4 smoke test —
+    /// `daily_rollups[0].cost_cents must be a finite, non-negative
+    /// number`). Classifier returns NotSchemaRelated; the daemon
+    /// surfaces the body verbatim and skips the "update budi" advice.
+    #[test]
+    fn classify_schema_mismatch_non_schema_body() {
+        let body = "daily_rollups[0].cost_cents must be a finite, non-negative number; got null";
+        let kind = classify_schema_mismatch(body, 2);
+        assert_eq!(kind, SchemaMismatchKind::NotSchemaRelated);
+    }
+
+    /// #756: a malformed schema_version error (missing `Expected one of`
+    /// list, garbled integer, etc.) falls back to NotSchemaRelated so the
+    /// daemon doesn't crash on cloud format drift — the body is still
+    /// surfaced verbatim.
+    #[test]
+    fn classify_schema_mismatch_malformed_falls_back() {
+        let kind = classify_schema_mismatch("Unsupported schema_version: oops.", 2);
+        assert_eq!(kind, SchemaMismatchKind::NotSchemaRelated);
+        let kind = classify_schema_mismatch("Unsupported schema_version: 2.", 2);
+        assert_eq!(kind, SchemaMismatchKind::NotSchemaRelated);
+    }
 
     #[test]
     fn extract_ticket_basic() {
