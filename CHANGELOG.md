@@ -1,5 +1,17 @@
 # Changelog
 
+## 8.4.7 — 2026-05-12
+
+8.4.7 is a same-day hotfix for the v8.4.6 JetBrains parser. The 8.4.6 implementation treated the Xodus `.xd` log and the Nitrite `.db` store as mutually exclusive — the parser ran `extract_xodus_project_name` only when the populated-entity probe returned `.xd`, and `extract_nitrite_turn_ids` only when it returned a Nitrite file. Real dual-store session-dirs (the common shape post-migration) put `projectName` in `.xd` and `Nt*Turn` documents in `.nitrite.db`; the 8.4.6 code picked one and dropped the other, so every `surface=jetbrains` row landed with `repo_id = NULL` even when the .xd carried a clean `Verkada-Web`-style name. The post-release smoke test on a real DB caught this within minutes — 0 of 23 sessions populated `repo_id`. The parser now reads `00000000000.xd` and every `*.nitrite.db` in the session-dir independently and merges the results: per-turn UUIDs from Nitrite + `repo_id` / `git_branch` / `session_title` from Xodus land on the same `ParsedMessage`. `api_version` stays at `3`.
+
+### Fixed
+
+- **JetBrains Copilot: combine Xodus projectName and Nitrite per-turn extraction on dual-store session-dirs** (#766, #764) — `parse_session_dir` previously ran `populated_store_in` and then used its single return value to decide between the two extraction paths. The result was that every dual-store agent-session (Xodus carrying the populated-entity marker, Nitrite carrying the per-turn documents) emitted either a one-row placeholder with repo enrichment *or* a per-turn batch without it, never both. Now the parser reads each store unconditionally — `.xd` for `projectName`, each `*.nitrite.db` for `Nt(Agent|Edit)?Turn` UUIDs — and merges the results onto every emitted row. New regression test `dual_store_session_combines_xodus_repo_with_nitrite_turns` covers the wire shape.
+
+### Cross-repo lockstep
+
+- No cross-repo changes required.
+
 ## 8.4.6 — 2026-05-11
 
 8.4.6 is the patch that closes the JetBrains-as-first-class-host story for real. v8.4.3 said JetBrains was a first-class surface; v8.4.5 fixed the parser bail-out that left every Nitrite-only session emitting zero rows. The v8.4.5 post-release smoke test then surfaced the remaining four cuts — and this release lands all four. The headline fix is **per-turn rows on JetBrains**: the Nitrite parser previously emitted one assistant-role placeholder per session, so fresh prompts inside an existing session never materialized as new rows; the parser now byte-walks `Nt(Agent|Edit)?Turn` document boundaries and emits one row per turn UUID. Sibling fixes light the rest of the dashboard up: the Billing API reconciler now dollarizes zero-token JetBrains placeholders evenly across the bucket's rows (pre-#765 it short-circuited on zero existing-sum and left `cost_30d` for `surface=jetbrains` permanently at \$0); the dashboard's Repo column finally renders real project names for JetBrains sessions thanks to a Xodus-log `projectName` byte-scan; and on every upgrade across a wire-shape change boundary, the daemon now resets its cloud-sync watermark automatically so historical rows re-upload under the new shape — no more `POST /cloud/reset` as undocumented institutional knowledge. `api_version` stays at `3`.
