@@ -227,10 +227,7 @@ fn generate_launchd_plist(daemon_bin: &Path, host: &str, port: u16, log_path: &P
     <key>RunAtLoad</key>
     <true/>
     <key>KeepAlive</key>
-    <dict>
-        <key>SuccessfulExit</key>
-        <false/>
-    </dict>
+    <true/>
     <key>ThrottleInterval</key>
     <integer>10</integer>
     <key>StandardOutPath</key>
@@ -532,8 +529,13 @@ mod tests {
         assert!(plist.contains("<string>127.0.0.1</string>"));
         assert!(plist.contains("<string>7878</string>"));
         assert!(plist.contains("<key>RunAtLoad</key>"));
-        assert!(plist.contains("<key>KeepAlive</key>"));
+        // #790: KeepAlive must be plain <true/> so launchd respawns on ANY
+        // exit (including clean SIGTERM), not the SuccessfulExit=false dict
+        // form which only restarts on non-zero exits.
+        assert!(plist.contains("<key>KeepAlive</key>\n    <true/>"));
+        assert!(!plist.contains("<key>SuccessfulExit</key>"));
         assert!(plist.contains("<key>ThrottleInterval</key>"));
+        assert!(plist.contains("<integer>10</integer>"));
         assert!(plist.contains("<string>/Users/test/Library/Logs/budi-daemon.log</string>"));
     }
 
