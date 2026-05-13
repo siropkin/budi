@@ -266,10 +266,10 @@ fn launchctl_kickstart_target() -> String {
 /// #611: when a launchd LaunchAgent is registered, route the post-update
 /// restart through `launchctl kickstart -k gui/$UID/dev.getbudi.budi-daemon`
 /// so the fresh daemon is reparented to launchd. Without this, the macOS
-/// branch falls into the raw-spawn fallback and the LaunchAgent stays in
-/// `state = not running` after a clean exit (KeepAlive.SuccessfulExit=false),
-/// silently orphaning the supervisor and producing ingestion gaps until
-/// the next login. Sibling to `try_systemd_user_restart` for Linux (#582).
+/// branch falls into the raw-spawn fallback, orphaning the supervisor
+/// until launchd's KeepAlive eventually respawns the daemon (#790 made
+/// that respawn reliable for clean exits; this kickstart avoids the
+/// throttle wait). Sibling to `try_systemd_user_restart` for Linux (#582).
 #[cfg(target_os = "macos")]
 fn try_launchctl_kickstart() -> bool {
     if matches!(
