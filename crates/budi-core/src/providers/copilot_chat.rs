@@ -64,7 +64,33 @@ pub const PROVIDER_ID: &str = "copilot_chat";
 /// emit-keyed by `requestId` so a future patch on the same request never
 /// produces a duplicate row. Paired with an ADR-0092 §2.3 amendment that
 /// documents the reducer as the authoritative envelope shape.
-pub const MIN_API_VERSION: u32 = 4;
+///
+/// v5 (8.5.1, #791): no parser logic change — this bump pins the
+/// reducer against two newly-validated upstream behaviors that v4 already
+/// handled correctly but never had a fixture for:
+///
+/// 1. `inputState.attachments` mutations on VS Code 1.119+ — large
+///    DOM-like UI introspection blobs (per-attachment shape
+///    `["ancestors","attributes","computedStyles","dimensions",
+///    "fullName","icon","id","innerText","kind","modelDescription",
+///    "name","value"]`) persisted any time the user drags a non-source
+///    surface (Settings UI, Outline, file tree) into the chat input.
+///    These dominate the byte stream — a single attachments mutation
+///    is routinely tens to hundreds of kilobytes — but carry no
+///    request data. They correctly land under `state.inputState` and
+///    never trigger `state.requests` re-scan, so the reducer keeps
+///    flowing without spurious unknown-shape warnings or row emits.
+///    The new `vscode_chat_0_47_0_v5.jsonl` fixture pins this contract.
+/// 2. `<workspaceStorage>/<hash>/GitHub.copilot-chat/debug-logs/<uuid>/
+///    main.jsonl` was being mis-classified as a session file by
+///    `collect_session_files`. It is OpenTelemetry span output (shape
+///    `["attrs","dur","name","sid","spanId","status","ts","type","v"]`),
+///    not chat data — every line warned `copilot_chat_unknown_record_shape`
+///    while contributing exactly zero rows. Discovery now skips the
+///    whole `debug-logs/` subtree so the daemon log stays quiet and
+///    `budi doctor`'s `tailer rows / Copilot Chat` heuristic stops
+///    flagging the noise as a parser regression.
+pub const MIN_API_VERSION: u32 = 5;
 
 /// VS Code-family directory names. Casing is preserved for the macOS
 /// "Application Support" path, where the disk layout is case-sensitive on
@@ -308,7 +334,14 @@ fn collect_session_files(user_root: &Path, out: &mut Vec<PathBuf>) {
             push_session_files_recursive(&hash_dir.join("chatSessions"), out, 0);
             for pub_dir in publisher_subdirs(&hash_dir) {
                 push_session_files_recursive(&pub_dir.join("chatSessions"), out, 0);
-                push_session_files_recursive(&pub_dir.join("debug-logs"), out, 0);
+                // `debug-logs/<requestId>/main.jsonl` is OpenTelemetry span
+                // output (shape: `["attrs","dur","name","sid","spanId",
+                // "status","ts","type","v"]`), not chat content — every
+                // line is a span event with no `promptTokens`/`outputTokens`/
+                // `completionTokens` anywhere, so the parser flags each as
+                // `copilot_chat_unknown_record_shape`. Skip the whole
+                // directory so the daemon log stays quiet (#791,
+                // ADR-0092 §2.2).
             }
         }
     }
@@ -2905,6 +2938,39 @@ mod tests {
     }
 
     #[test]
+    fn collect_session_files_skips_workspace_debug_logs() {
+        // #791: `<hash>/GitHub.copilot-chat/debug-logs/<requestId>/main.jsonl`
+        // is OpenTelemetry span output (shape: `["attrs","dur","name","sid",
+        // "spanId","status","ts","type","v"]`), not chat data. Discovery
+        // must skip the whole `debug-logs/` subtree so the parser does not
+        // log `copilot_chat_unknown_record_shape` for every span line.
+        let tmp = std::env::temp_dir().join("budi-copilot-chat-skip-debug-logs");
+        let _ = std::fs::remove_dir_all(&tmp);
+        let hash_dir = tmp.join("workspaceStorage/abc1234");
+        let chat = hash_dir.join("GitHub.copilot-chat/chatSessions");
+        let dbg = hash_dir.join("GitHub.copilot-chat/debug-logs/req-123");
+        std::fs::create_dir_all(&chat).unwrap();
+        std::fs::create_dir_all(&dbg).unwrap();
+        // Real chat session — must be collected.
+        std::fs::write(chat.join("a.jsonl"), b"{}\n").unwrap();
+        // OpenTelemetry span output — must NOT be collected.
+        std::fs::write(dbg.join("main.jsonl"), br#"{"v":1,"ts":1,"type":"span"}"#).unwrap();
+        std::fs::write(dbg.join("models.json"), br#"{}"#).unwrap();
+
+        let mut out = Vec::new();
+        collect_session_files(&tmp, &mut out);
+        assert_eq!(
+            out.len(),
+            1,
+            "only the chatSessions file is collected; debug-logs/main.jsonl \
+             and models.json are skipped, got {out:?}",
+        );
+        assert!(out[0].ends_with("a.jsonl"));
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
     fn collect_session_files_recurses_into_global_publisher_dir() {
         let tmp = std::env::temp_dir().join("budi-copilot-chat-recurse");
         let _ = std::fs::remove_dir_all(&tmp);
@@ -3638,6 +3704,62 @@ mod tests {
                 .filter(|m| m.role == "assistant")
                 .all(|m| m.output_tokens > 0)
         );
+    }
+
+    /// v5 (8.5.1, #791): real-shape regression for sessions where the user
+    /// attaches a non-source surface (Settings UI, Outline, file tree) to
+    /// the chat input. The extension persists those attachments as
+    /// `kind:1 k=["inputState","attachments"] v=[{ ... DOM-like UI
+    /// introspection record ... }]` mutations, each kilobytes-to-tens-of-
+    /// kilobytes in size. The reducer MUST:
+    ///
+    /// 1. Apply the mutations to `state.inputState.attachments` without
+    ///    emitting `copilot_chat_unknown_record_shape` warnings (the
+    ///    records are UI state, not request data — they correctly land
+    ///    under `inputState` and never end up under `state.requests`).
+    /// 2. Still emit exactly the two rows the one real `kind:2` request
+    ///    yields — one user row from the synthetic `message.text` and
+    ///    one assistant row keyed off `result.metadata.{promptTokens,
+    ///    outputTokens}` (Feb-2026 shape, §2.3 #4) with
+    ///    `model = "claude-haiku-4-5-20251001"` resolved through
+    ///    `result.metadata.resolvedModel` (§2.4 #1).
+    ///
+    /// Drives #791: in the wild the attachments mutations dominate the
+    /// byte stream (29 MB/30 min in the reporter's repro), making `budi
+    /// doctor` flag "tailer advanced but no rows landed" as a false-
+    /// positive shape regression. This fixture pins the contract so the
+    /// signal/noise ratio doesn't drift again.
+    #[test]
+    fn parse_real_vscode_0_47_0_fixture_v5_attachments() {
+        let content = include_str!("copilot_chat/fixtures/vscode_chat_0_47_0_v5.jsonl");
+        let path = Path::new("/tmp/budi-fixtures-r1-2/vscode_chat_0_47_0_v5.jsonl");
+        let (msgs, _) = parse_copilot_chat(path, content, 0);
+
+        let user_count = msgs.iter().filter(|m| m.role == "user").count();
+        let assistant_count = msgs.iter().filter(|m| m.role == "assistant").count();
+        assert_eq!(
+            (user_count, assistant_count),
+            (1, 1),
+            "exactly one user row (from synthetic message.text) and one \
+             assistant row (from the real result.metadata token pair); the \
+             two large inputState.attachments kind:1 mutations carry no \
+             tokens and must NOT emit",
+        );
+        let asst = msgs.iter().find(|m| m.role == "assistant").unwrap();
+        assert_eq!(asst.input_tokens, 26412);
+        assert_eq!(asst.output_tokens, 191);
+        assert_eq!(
+            asst.model.as_deref(),
+            Some("claude-haiku-4-5-20251001"),
+            "model resolves through result.metadata.resolvedModel — the \
+             modelId=\"copilot/claude-haiku-4.5\" alias on the request is \
+             outranked by the manifest-known resolved form (§2.4 #1)",
+        );
+        assert_eq!(asst.provider, "copilot_chat");
+        // User row pairs back to assistant via parent_uuid (§2.3 v4
+        // user-row emit contract).
+        let user = msgs.iter().find(|m| m.role == "user").unwrap();
+        assert_eq!(asst.parent_uuid.as_deref(), Some(user.uuid.as_str()));
     }
 
     // ---- #681: workspace.json cwd enrichment --------------------------
