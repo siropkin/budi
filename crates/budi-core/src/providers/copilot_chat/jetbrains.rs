@@ -278,7 +278,11 @@ pub(super) fn parse_session_dir(session_dir: &Path) -> Vec<ParsedMessage> {
 
     // #766: pull the IntelliJ project name + resolved repo/branch from
     // the Xodus log regardless of which store the populated-entity probe
-    // picked. Dual-store sessions on disk write `XdChatSession.projectName`
+    // picked. retire-with: #789 — this Phase 1 byte-walker block goes
+    // away when the Phase 3 MVStore/Xodus decoder lands. See #807,
+    // ADR-0093 §"Amendment 2026-05-14".
+    //
+    // Dual-store sessions on disk write `XdChatSession.projectName`
     // into `00000000000.xd` *and* `Nt*Turn` documents into the matching
     // `*.nitrite.db` — the two stores are complementary, not alternative
     // shapes of the same data. The original 8.4.6 implementation treated
@@ -298,7 +302,12 @@ pub(super) fn parse_session_dir(session_dir: &Path) -> Vec<ParsedMessage> {
     };
 
     // #778: Phase 2 fallback for agent-only Nitrite sessions whose `.xd` log
-    // is absent or carries no `projectName`. Sweeps every Nitrite store in
+    // is absent or carries no `projectName`. retire-with: #789 — Phase 2
+    // resolved 0 additional sessions on real data; the Phase 3 MVStore
+    // decoder is expected to subsume this entire block. See #807,
+    // ADR-0093 §"Amendment 2026-05-14".
+    //
+    // Sweeps every Nitrite store in
     // the session dir for `file://` URIs (today written into the
     // `currentFileUri` JSON blob inside `NtAgentTurn.stringContent` by
     // recent Copilot Chat plugin builds), computes their longest common
@@ -429,6 +438,12 @@ pub(super) fn parse_session_dir(session_dir: &Path) -> Vec<ParsedMessage> {
 
 /// #766: pull the JetBrains project name out of the Xodus log's
 /// `XdChatSession.projectName` property by byte-scanning.
+///
+/// retire-with: #789 — this byte-walker is a low-cost fast-path that
+/// resolved 3 of 23 sessions on the 8.4.8 smoke-test machine. It survives
+/// only until the Phase 3 MVStore + Java-serialization decoder lands and
+/// proves it can subsume the heuristic. Disposition decision recorded in
+/// #807 and ADR-0093 §"Amendment 2026-05-14".
 ///
 /// The Xodus log writes a schema header near the start of the file that
 /// declares each property name once with a 1-byte property ID
@@ -701,6 +716,13 @@ const NITRITE_TURN_MARKERS: &[&[u8]] = &[b"NtTurn", b"NtAgentTurn", b"NtEditTurn
 /// #778: Phase 2 workspace-path extractor for the JetBrains Copilot Nitrite
 /// store.
 ///
+/// retire-with: #789 — Phase 2 added zero additional resolutions on the
+/// 8.4.8 smoke-test machine (95 of 98 surveyed Nitrite DBs carried no
+/// `file://` token at all). It is kept here only to avoid a regression-
+/// risking delete in a pre-Phase-3 release; the Phase 3 MVStore decoder
+/// is expected to subsume this path entirely. Disposition decision
+/// recorded in #807 and ADR-0093 §"Amendment 2026-05-14".
+///
 /// The original Phase 1 ticket assumed `NtAgentWorkingSetItem` documents
 /// would carry literal `file://...` URIs in a top-level `stringContent`
 /// TC_STRING. A survey of 98 real Nitrite DBs from the 8.4.8 smoke-test
@@ -840,6 +862,10 @@ struct Phase2WorkspaceResolution {
 /// Always returns a [`Phase2WorkspaceResolution`]: when resolution fails,
 /// the struct still carries the recovered `common_prefix` (when one
 /// existed) and a `failure_reason` for the caller to log. See #788.
+///
+/// retire-with: #789 — companion to `extract_nitrite_workspace_paths`;
+/// retires alongside the Phase 2 byte-walker once the Phase 3 decoder
+/// can supply richer per-turn workspace evidence.
 fn resolve_phase2_workspace(paths: &[String]) -> Phase2WorkspaceResolution {
     if paths.is_empty() {
         return Phase2WorkspaceResolution {

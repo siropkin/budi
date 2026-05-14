@@ -184,3 +184,43 @@ The Phase 2 byte-walker only fires on sessions that happen to carry a `currentFi
 The #778 ticket asked for "≥ 12 of 23" sessions resolved post-Phase-2. The honest delivered bar against this data shape is **+1 session** beyond Phase 1 — the one additional agent session that happens to carry a `currentFileUri` snapshot for a repo not already covered by Phase 1. The data simply does not contain enough `file://` tokens to reach the speculative bar. Sessions that do not write a `currentFileUri` cleanly fall through to the Phase 1 `projectName` heuristic (where present) or remain with `repo_id = NULL` (the honest "we don't know" signal — the dashboard renders `Repo: (unknown)` rather than guessing).
 
 Fixture: `crates/budi-core/src/providers/copilot_chat/fixtures/jetbrains_nitrite_working_set_phase2/` (size-preserving redacted from a real session, see the matching `.shape.md`).
+
+## Amendment 2026-05-14 — #807: Phase 1 / Phase 2 byte-walker disposition
+
+The 8.5.2 polish release (umbrella #798) prompted a keep-vs-retire decision for the two byte-walker phases shipped in v8.4.x / v8.5.0, ahead of the Phase 3 MVStore + Java-serialization decoder planned for 8.6.0 (#789).
+
+The data the decision rests on (from the 8.4.8 smoke-test machine):
+
+- **Phase 1** (PR #766, Xodus `XdChatSession.projectName` byte-scan): resolved 3 of 23 `surface=jetbrains` sessions.
+- **Phase 2** (PR #778, Nitrite `currentFileUri` JSON-blob byte-scan): resolved 0 *additional* sessions over Phase 1 in the production capture (the §"Amendment 2026-05-12" "+1 session" figure was the honest hypothetical against the data shape — it was not observed end-to-end in the post-#778 smoke run).
+
+### Decision
+
+Both byte-walkers are **retired conditionally** — kept in tree, but every entry-point function, struct, and call-site block carries a `retire-with: #789` annotation so the Phase 3 implementor knows exactly what gets deleted when the real decoder lands. Rationale per phase:
+
+- **Phase 1**: real value (3-of-23) as a low-cost fast-path. Even after Phase 3 ships, it may remain useful if the decoder is heavier than the heuristic on cold caches; the call is deferred to whoever lands #789. Until then, do not delete.
+- **Phase 2**: marginal-to-zero value, but deleting it now without re-running the original smoke capture risks an unmeasured regression on the +1 hypothetical session (or on any future plugin version whose default-on `currentFileUri` snapshot shape we haven't seen yet). The Phase 3 decoder will subsume it; deletion belongs in that PR, not this one.
+
+### What the annotation contract is
+
+A `retire-with: #789` comment promises:
+
+1. The annotated function/block is **eligible** for deletion in the PR that closes #789.
+2. The Phase 3 implementor is **not obligated** to delete it — they may keep it as a fast-path if it earns its keep against the decoded baseline. The "retire-with" is a permission to delete, not a mandate.
+3. Removing an annotation without deleting the code requires a fresh ADR amendment explaining why the heuristic graduated from "retire-with" to "permanent".
+
+### Annotated surfaces (Phase 1)
+
+- `extract_xodus_project_name` (function-level rustdoc)
+- the `xd_candidate` block inside `parse_session_dir`
+
+### Annotated surfaces (Phase 2)
+
+- `extract_nitrite_workspace_paths` (function-level rustdoc)
+- `resolve_phase2_workspace` (function-level rustdoc — companion resolver)
+- the `phase2` block inside `parse_session_dir`
+
+### What this amendment does not promise
+
+- No smoke-test re-run was performed for this release. The resolution numbers are quoted from the 8.4.8 and #778 captures, not freshly measured against 8.5.1. Re-measurement happens as part of the Phase 3 PR, against the same fixture set, so the decoder's delta over the heuristics is honestly comparable.
+- Phase 1 and Phase 2 are not "frozen": small fixes (e.g. new path-safe terminator bytes, fixture additions) remain in scope. The retire-with annotation marks the *block*, not the *behavior* — bug-fixes inside an annotated block do not need a fresh ADR amendment.
