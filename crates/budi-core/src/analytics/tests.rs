@@ -1,3 +1,8 @@
+// keep-large: deferred to #805 (test-module reorganization). #800 scopes
+// production-code splits; carving this 7,684-line test module into per-target
+// sibling test files needs the #805-owned plan so test fixtures, helpers, and
+// `super::*` visibility stay coherent.
+
 use super::*;
 use rusqlite::{Connection, params};
 
