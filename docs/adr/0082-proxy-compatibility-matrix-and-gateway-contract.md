@@ -242,3 +242,7 @@ New env vars:
 - **R2.4** (fallback paths): Per ADR-0081, hook/OTEL/JSONL fallbacks are removed, not maintained. R2.4 should be re-scoped to "clean removal of legacy ingestion" rather than "keep fallbacks."
 - **R3.1** (CLI wrapper): `budi launch` remains available as an explicit alternative but is no longer the primary onboarding path. `budi init` injects env vars into the shell profile for selected CLI agents and patches config files for IDE agents (Cursor, Codex Desktop). `budi disable <agent>` reverses the changes. `BUDI_BYPASS=1` skips the proxy for a single session.
 - **R3.2** (Cursor bootstrap): `budi init` patches Cursor's settings.json directly when the user selects Cursor. No manual GUI configuration needed.
+
+---
+
+*Last verified against code on 2026-05-14.*

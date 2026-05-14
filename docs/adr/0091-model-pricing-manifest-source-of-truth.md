@@ -282,3 +282,7 @@ Until every bullet above is demonstrable, the status banner stays `Proposed`.
 - [#436](https://github.com/siropkin/budi/issues/436) — 8.3.0 epic
 - [#443](https://github.com/siropkin/budi/issues/443) — model display-name normalization (carry-along of #376; see §10 of the implementation ticket)
 - [BerriAI/litellm `model_prices_and_context_window.json`](https://github.com/BerriAI/litellm/blob/main/model_prices_and_context_window.json) — the upstream manifest
+
+---
+
+*Last verified against code on 2026-05-14.*

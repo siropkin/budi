@@ -224,3 +224,7 @@ A `retire-with: #789` comment promises:
 
 - No smoke-test re-run was performed for this release. The resolution numbers are quoted from the 8.4.8 and #778 captures, not freshly measured against 8.5.1. Re-measurement happens as part of the Phase 3 PR, against the same fixture set, so the decoder's delta over the heuristics is honestly comparable.
 - Phase 1 and Phase 2 are not "frozen": small fixes (e.g. new path-safe terminator bytes, fixture additions) remain in scope. The retire-with annotation marks the *block*, not the *behavior* — bug-fixes inside an annotated block do not need a fresh ADR amendment.
+
+---
+
+*Last verified against code on 2026-05-14.*

@@ -144,3 +144,7 @@ The `/api/dashboard/get-filtered-usage-events` path from §1 stays operational a
 **Supersede status** — not yet. The Usage API path, `extract_cursor_auth`, `CursorAuthIssue`, and the warn-once infrastructure all stay in place during the validation window. A later train removes them as a block once the bubbles path has been observed reliable on live data.
 
 Reference implementation: [`getagentseal/codeburn`](https://github.com/getagentseal/codeburn/blob/main/src/providers/cursor.ts) does the same `cursorDiskKV` parse in TypeScript. The SQL query shape and the Auto → Sonnet fallback are direct adaptations; everything else is Budi-native.
+
+---
+
+*Last verified against code on 2026-05-14.*

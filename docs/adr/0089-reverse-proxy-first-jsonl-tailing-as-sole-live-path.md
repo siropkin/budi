@@ -196,3 +196,7 @@ The 8.2 R2 proxy-removal work is unblocked once the R1 exit gate ([#362](https:/
 - [#317](https://github.com/siropkin/budi/issues/317) — this ADR's tracking issue
 - [#201](https://github.com/siropkin/budi/issues/201) — 8.1.0 epic (must ship before 8.2 work starts)
 - [#294](https://github.com/siropkin/budi/issues/294) — future AI coding tool coverage epic (built on the tailer)
+
+---
+
+*Last verified against code on 2026-05-14.*

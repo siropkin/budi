@@ -231,3 +231,7 @@ A merged ADR PR with no downstream ticket updates is not considered complete.
 - Internal data representation of file-level attribution and outcome signals — decided in #292 and #293, within the privacy rules above.
 - Cloud dashboard visual design or copy — decided in #235 and surfaced through #296.
 - Proxy protocol, cloud ingest identity, and repo extraction contracts — already governed by ADR-0082, ADR-0083, and ADR-0086 respectively. This ADR does not relax or override them.
+
+---
+
+*Last verified against code on 2026-05-14.*

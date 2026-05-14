@@ -271,3 +271,7 @@ When all prerequisites are met, the extraction is a mechanical process:
 - CI/CD tooling for the extracted repos (GitHub Actions vs. other) — decided during R4.4.
 - Whether the extension is published to VS Code Marketplace, Open VSX, or GitHub Releases only — decided during R3.2 or R4.4.
 - Cloud deployment infrastructure (Supabase hosting, CDN, etc.) — decided during R4.1–R4.3.
+
+---
+
+*Last verified against code on 2026-05-14.*
