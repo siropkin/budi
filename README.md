@@ -250,7 +250,14 @@ rm ~/.local/bin/budi ~/.local/bin/budi-daemon  # shell script install
 
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for local setup and PR workflow. Architecture and module boundaries are documented in [SOUL.md](SOUL.md). ADRs live in [`docs/adr/`](docs/adr/).
+Repository guidance is split across four top-level files so each has one audience:
+
+- [`README.md`](README.md) — end-user install, usage, and the daemon API surface (you are here).
+- [`CONTRIBUTING.md`](CONTRIBUTING.md) — local quality checks, supply-chain policy, PR workflow.
+- [`SOUL.md`](SOUL.md) — canonical architecture, data flow, attribution contract, release flow, and AI-agent guidance.
+- [`AGENTS.md`](AGENTS.md) / [`CLAUDE.md`](CLAUDE.md) — thin compatibility pointers that redirect AI tooling to `SOUL.md`.
+
+ADRs live in [`docs/adr/`](docs/adr/).
 
 ### Running CI checks locally
 

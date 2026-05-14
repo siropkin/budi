@@ -2,6 +2,17 @@
 
 Local-first cost analytics for AI coding agents (Claude Code, Codex CLI, Cursor, Copilot CLI). Tracks tokens, costs, and usage per message by tailing the JSONL transcript files those agents already write to disk (see [ADR-0089](docs/adr/0089-reverse-proxy-first-jsonl-tailing-as-sole-live-path.md)). Historical data from the same transcripts and the Cursor Usage API can be backfilled via `budi db import`. Optional cloud sync (disabled by default) pushes pre-aggregated daily rollups to a team dashboard — prompts, code, and responses never leave the machine (see [ADR-0083](docs/adr/0083-cloud-ingest-identity-and-privacy-contract.md)).
 
+This file is the **canonical AI-agent / architecture / product-identity reference**. [`AGENTS.md`](AGENTS.md) and [`CLAUDE.md`](CLAUDE.md) are thin compatibility pointers that redirect tools (OpenAI Codex / Claude Code / etc.) here. Contributor workflow lives in [`CONTRIBUTING.md`](CONTRIBUTING.md); end-user install/usage lives in [`README.md`](README.md).
+
+## Audience map
+
+| If you are… | Start here |
+|---|---|
+| An end user installing or using budi | [`README.md`](README.md) |
+| A contributor opening a PR | [`CONTRIBUTING.md`](CONTRIBUTING.md) — local quality checks, supply-chain policy, PR checklist |
+| An AI coding agent working in this repo | This file — [`AGENTS.md`](AGENTS.md) and [`CLAUDE.md`](CLAUDE.md) are pointer-only |
+| Looking for architecture, data flow, attribution contract, or release rationale | This file plus [`docs/adr/`](docs/adr/README.md) |
+
 Architecture highlights:
 
 - **JSONL tailing is the sole live ingestion path** ([ADR-0089](docs/adr/0089-reverse-proxy-first-jsonl-tailing-as-sole-live-path.md)). No proxy, no hooks, no OTEL. The 8.0/8.1 proxy was removed in 8.2; legacy `proxy_estimated` and `otel_exact` rows remain read-only in the DB for historical analytics.
