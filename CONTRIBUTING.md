@@ -1,6 +1,6 @@
 # Contributing to budi
 
-Thanks for helping improve budi.
+Thanks for helping improve budi. This file covers contributor workflow (local checks, supply-chain policy, PR expectations). For end-user install/usage see [`README.md`](README.md); for architecture, data flow, release flow, and the daemon contract see [`SOUL.md`](SOUL.md).
 
 ## Prerequisites
 
@@ -78,31 +78,7 @@ See [`siropkin/budi-cloud`](https://github.com/siropkin/budi-cloud).
 
 ## Install locally
 
-```bash
-./scripts/install.sh    # builds release + installs to ~/.local/bin/
-budi --version
-```
-
-If scripts are blocked (for example by anti-virus), install to Cargo bin (`~/.cargo/bin`):
-
-```bash
-cargo install --path crates/budi-cli --bin budi --force --locked
-cargo install --path crates/budi-daemon --bin budi-daemon --force --locked
-budi --version
-budi init
-```
-
-Or build and copy binaries manually:
-
-```bash
-cargo build --release --locked
-mkdir -p ~/.local/bin
-cp target/release/budi target/release/budi-daemon ~/.local/bin/
-chmod +x ~/.local/bin/budi ~/.local/bin/budi-daemon
-rehash
-pkill -f "budi-daemon serve"   # graceful stop (avoid -9 unless stuck)
-budi init               # restarts daemon + re-syncs data
-```
+See [`SOUL.md` § Build & Test](SOUL.md#build--test) for `./scripts/install.sh`, the Cargo-bin fallback, and the rule about keeping `budi` + `budi-daemon` on the same build path.
 
 ## Filing issues and feature requests
 
@@ -160,7 +136,7 @@ The same `Provider` implementation powers both live tailing and `budi db import`
 
 ## Releasing
 
-Release automation is tag-driven (`.github/workflows/release.yml`) and expects a clean `main` branch.
+Release flow (stable vs. prerelease tags, Homebrew auto-bump, prerelease-then-promote loop) is documented in [`SOUL.md` § Release flow](SOUL.md#release-flow). Mechanical contributor commands:
 
 ```bash
 ./scripts/release.sh 7.0.0        # bump version + update Cargo.lock (clean tree required)
@@ -169,7 +145,7 @@ git commit -am "chore: bump version to 7.0.0"
 git push origin main v7.0.0       # CI + release workflows build and publish assets
 ```
 
-Post-push release checks:
+Post-push verification:
 
 ```bash
 gh release view v7.0.0 --repo siropkin/budi
@@ -177,17 +153,4 @@ gh release download v7.0.0 --repo siropkin/budi --pattern SHA256SUMS -D /tmp/bud
 cat /tmp/budi-release-check/SHA256SUMS
 ```
 
-Expected release artifacts:
-
-- `budi-v<version>-x86_64-unknown-linux-gnu.tar.gz`
-- `budi-v<version>-aarch64-unknown-linux-gnu.tar.gz`
-- `budi-v<version>-x86_64-apple-darwin.tar.gz`
-- `budi-v<version>-aarch64-apple-darwin.tar.gz`
-- `budi-v<version>-x86_64-pc-windows-msvc.zip`
-- `SHA256SUMS`
-
-Homebrew auto-update notes:
-
-- The release workflow updates `siropkin/homebrew-budi` after publishing assets. The `update-homebrew` job in `.github/workflows/release.yml` renders `homebrew/budi.rb` against the release `SHA256SUMS` and pushes `Formula/budi.rb` to the tap; no additional scripts are involved.
-- `HOMEBREW_TAP_TOKEN` must be configured in `siropkin/budi` repo secrets.
-- If the workflow ever fails to push, diagnose via the workflow logs and rerun the `update-homebrew` job. The one-shot tap-bootstrap runbook (used once on 2026-03-26 to create `siropkin/homebrew-budi`) is archived as a comment on [#365](https://github.com/siropkin/budi/issues/365#issuecomment-4292484508) for recovery scenarios where the tap repo itself has to be rebuilt from scratch.
+Expected artifacts: one tarball per `{x86_64,aarch64}-{unknown-linux-gnu,apple-darwin}` plus `x86_64-pc-windows-msvc.zip` and `SHA256SUMS`. The Homebrew tap (`siropkin/homebrew-budi`) is updated by the `update-homebrew` job in `.github/workflows/release.yml`; `HOMEBREW_TAP_TOKEN` must be configured in repo secrets. The one-shot tap-bootstrap runbook is archived on [#365](https://github.com/siropkin/budi/issues/365#issuecomment-4292484508).
