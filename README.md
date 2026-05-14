@@ -252,7 +252,25 @@ rm ~/.local/bin/budi ~/.local/bin/budi-daemon  # shell script install
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for local setup and PR workflow. Architecture and module boundaries are documented in [SOUL.md](SOUL.md). ADRs live in [`docs/adr/`](docs/adr/).
 
-Quick validation: `cargo fmt --all && cargo clippy --workspace --all-targets --locked -- -D warnings && cargo test --workspace --locked`
+### Running CI checks locally
+
+The six checks CI runs on every PR (issue #808):
+
+```bash
+cargo fmt --all -- --check                                       # formatting
+cargo clippy --workspace --all-targets --locked -- -D warnings   # lints
+cargo test --workspace --locked                                  # tests
+cargo +nightly udeps --workspace --all-targets                   # unused deps (needs nightly)
+cargo machete                                                    # unused deps (secondary pass)
+cargo deny --all-features check                                  # supply-chain policy
+```
+
+One-time install of the supporting tools:
+
+```bash
+rustup toolchain install nightly                # for cargo-udeps
+cargo install cargo-udeps cargo-machete cargo-deny --locked
+```
 
 ## License
 

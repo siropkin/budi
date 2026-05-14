@@ -46,6 +46,11 @@ jobs:
           cargo install cargo-audit --quiet
           cargo audit
 
+      - name: Unused dependencies (cargo-machete)
+        run: |
+          cargo install cargo-machete --locked --quiet
+          cargo machete
+
       - name: Validate shell script syntax
         run: |
           set -euo pipefail
@@ -238,6 +243,30 @@ jobs:
 
       - name: Run cargo-deny
         run: cargo deny --all-features check
+
+  # Unused-dependency scan via `cargo udeps` (issue #808).
+  #
+  # Requires the nightly toolchain. Allowed to fail initially so nightly
+  # flakiness doesn't block PRs; the warning still shows up on the Checks
+  # tab. Promote to a required check once a few clean runs have landed.
+  udeps:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Install Rust nightly toolchain
+        uses: dtolnay/rust-toolchain@nightly
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+
+      - name: Install cargo-udeps
+        run: cargo install cargo-udeps --locked
+
+      - name: Run cargo-udeps
+        run: cargo +nightly udeps --workspace --all-targets
 
   ci-success:
     if: always()
