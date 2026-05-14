@@ -117,3 +117,7 @@ Issue #92 ([R2.4] "Keep hooks, OTEL, and historical importers as transition fall
 - Proxy protocol details → ADR-0082.
 - Cloud ingest, identity, and privacy → ADR-0083.
 - Specific config keys or CLI flags for proxy/budget → decided in their respective round issues.
+
+---
+
+*Last verified against code on 2026-05-14.*

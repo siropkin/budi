@@ -275,3 +275,7 @@ Until every bullet above is demonstrable, the status stays `Proposed`. [#733](ht
 - [#724](https://github.com/siropkin/budi/issues/724) — epic
 - [#725](https://github.com/siropkin/budi/issues/725) — this ADR
 - [#726](https://github.com/siropkin/budi/issues/726) – [#733](https://github.com/siropkin/budi/issues/733) — implementation tickets
+
+---
+
+*Last verified against code on 2026-05-14.*

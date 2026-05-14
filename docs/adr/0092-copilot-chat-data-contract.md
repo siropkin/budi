@@ -312,3 +312,7 @@ Both modules must reference this ADR at the top of the file. When upstream ships
 - [#651](https://github.com/siropkin/budi/issues/651) — R1.4, local-tail provider plugin (implements §2)
 - [#652](https://github.com/siropkin/budi/issues/652) — R1.5, `sync_direct` Billing API reconciliation (implements §3)
 - [#653](https://github.com/siropkin/budi/issues/653) — R1.6, `budi doctor` surfaces installed VS Code AI extensions and tailer health (consumes §2.6 `MIN_API_VERSION` + §3.4 org-managed signal + §3.3 unconfigured-PAT signal)
+
+---
+
+*Last verified against code on 2026-05-14.*

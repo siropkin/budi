@@ -438,3 +438,7 @@ New env vars:
 - **R4.3** (manager dashboard): Queries the Supabase tables defined here. Dashboard views are bounded by the data available in `daily_rollups` and `session_summaries`.
 - **R4.4** (repo extraction): The `cloud.toml` config and sync worker code are extracted to the budi-cloud repo.
 - **R5.1** (budget engine): Budget thresholds are evaluated locally using local rollup data. The cloud provides visibility but not enforcement.
+
+---
+
+*Last verified against code on 2026-05-14.*

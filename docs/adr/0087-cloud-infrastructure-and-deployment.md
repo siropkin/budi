@@ -238,3 +238,7 @@ Before R4 implementation can begin, the repository owner must complete these man
 - **#102 (R4.3)**: Dashboard deployed at `app.getbudi.dev`, uses Supabase Auth with GitHub + Google providers.
 - **#103 (R4.4)**: Extraction creates `budi-cursor` and `budi-cloud` repos with independent CI and publishing.
 - **#108 (R5.3)**: Release readiness includes daemon autostart across all platforms.
+
+---
+
+*Last verified against code on 2026-05-14.*
