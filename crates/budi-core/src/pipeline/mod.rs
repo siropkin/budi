@@ -902,7 +902,7 @@ mod tests {
         );
     }
 
-    pub fn test_msg() -> ParsedMessage {
+    pub(super) fn test_msg() -> ParsedMessage {
         ParsedMessage {
             uuid: "test".to_string(),
             session_id: None,

@@ -1,3 +1,8 @@
+// Binary crate has no public API surface, so `pub` on internal items
+// signals "visible to sibling modules", not "exported"; suppress the lint
+// crate-wide rather than annotating every helper with `pub(crate)`.
+#![allow(unreachable_pub)]
+
 use std::path::PathBuf;
 
 use anyhow::Result;

@@ -166,6 +166,8 @@ impl EnvContext {
     }
 }
 
+/// All variants are constructed by `current_platform()` under different
+/// `target_os` cfgs, so only one is reachable per build target.
 #[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PlatformFamily {

@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Internal — 8.5.2
+
+- **Dead-code sweep** (#806) — `cargo machete` and `cargo +nightly udeps --workspace --all-targets` both clean. `cargo clippy --workspace --all-targets -- -W dead_code -W unreachable_pub` clean: the `PlatformFamily` enum in `legacy_proxy.rs` kept its `#[allow(dead_code)]` but gained a one-line comment explaining the per-`target_os` construction; the JetBrains `parse_session_dir_for_tests` helper no longer needed the allow since it's reached from a sibling-module test; narrowed `test_msg` in `budi-core::pipeline::tests` from `pub` to `pub(super)`; added crate-level `#![allow(unreachable_pub)]` to both binary crates (`budi-cli` / `budi-daemon`) since `pub` on internal items in a binary is purely cosmetic. No `#[deprecated]` items in tree; no project-defined cargo features in tree.
+
 ## 8.5.1 — 2026-05-13
 
 8.5.1 is the v8.5.0 followup release that closes the four post-release smoke-test cuts surfaced on 2026-05-12: an autostart regression that left the macOS LaunchAgent in `not running` after any clean shutdown (statusline silently rendered `$0.00`), a Copilot Chat tailer noise source that made a healthy parser look like a shape regression in `budi doctor`, a JetBrains Phase 2 resolver gap where extracted `file://` URIs landed with `repo_id = NULL` and no diagnostic, and a longstanding pipeline gap where the `session_title` constant existed but no enricher emitted it — forcing the v8.5.0 backfill to re-walk session dirs on every sync tick. `api_version` stays at `3`.
