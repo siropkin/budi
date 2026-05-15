@@ -670,14 +670,14 @@ fn cli_parses_cloud_init_bare() {
                     force,
                     yes,
                     device_id,
-                    org_id,
+                    workspace_id,
                 },
         } => {
             assert!(api_key.is_none());
             assert!(!force);
             assert!(!yes);
             assert!(device_id.is_none());
-            assert!(org_id.is_none());
+            assert!(workspace_id.is_none());
         }
         _ => panic!("expected cloud init command"),
     }
@@ -703,14 +703,14 @@ fn cli_parses_cloud_init_with_flags() {
                     force,
                     yes,
                     device_id,
-                    org_id,
+                    workspace_id,
                 },
         } => {
             assert_eq!(api_key.as_deref(), Some("fake-test-key"));
             assert!(force);
             assert!(yes);
             assert!(device_id.is_none());
-            assert!(org_id.is_none());
+            assert!(workspace_id.is_none());
         }
         _ => panic!("expected cloud init command"),
     }
@@ -719,7 +719,7 @@ fn cli_parses_cloud_init_with_flags() {
 #[test]
 fn cli_parses_cloud_init_manual_ids() {
     // #541: the escape hatch for offline installs / self-hosted
-    // endpoints without /v1/whoami. `--device-id` / `--org-id`
+    // endpoints without /v1/whoami. `--device-id` / `--workspace-id`
     // bypass the whoami fetch and write the provided values
     // verbatim into the template.
     let cli = Cli::try_parse_from([
@@ -730,8 +730,8 @@ fn cli_parses_cloud_init_manual_ids() {
         "fake-test-key",
         "--device-id",
         "my-laptop",
-        "--org-id",
-        "org_selfhost",
+        "--workspace-id",
+        "ws_selfhost",
     ])
     .expect("budi cloud init with manual ids parses");
     match cli.command {
@@ -740,13 +740,40 @@ fn cli_parses_cloud_init_manual_ids() {
                 CloudAction::Init {
                     api_key,
                     device_id,
-                    org_id,
+                    workspace_id,
                     ..
                 },
         } => {
             assert_eq!(api_key.as_deref(), Some("fake-test-key"));
             assert_eq!(device_id.as_deref(), Some("my-laptop"));
-            assert_eq!(org_id.as_deref(), Some("org_selfhost"));
+            assert_eq!(workspace_id.as_deref(), Some("ws_selfhost"));
+        }
+        _ => panic!("expected cloud init command"),
+    }
+}
+
+#[test]
+fn cli_parses_cloud_init_legacy_org_id_alias() {
+    // #836: the legacy `--org-id` flag stays accepted as an alias for
+    // `--workspace-id` during the org→workspace rename deprecation
+    // window (ADR-0083 §2). Dropped once the cloud-side rename
+    // (siropkin/budi-cloud#321) lands and one release cycle of
+    // mixed-version operation has passed.
+    let cli = Cli::try_parse_from([
+        "budi",
+        "cloud",
+        "init",
+        "--api-key",
+        "fake-test-key",
+        "--org-id",
+        "org_selfhost",
+    ])
+    .expect("legacy --org-id alias parses");
+    match cli.command {
+        Commands::Cloud {
+            action: CloudAction::Init { workspace_id, .. },
+        } => {
+            assert_eq!(workspace_id.as_deref(), Some("org_selfhost"));
         }
         _ => panic!("expected cloud init command"),
     }

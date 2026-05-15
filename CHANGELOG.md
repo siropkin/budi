@@ -4,13 +4,17 @@
 
 8.5.2 is the polish-release umbrella tracked by #798. No user-visible behaviour changes. `api_version` stays at `3`.
 
+### Changed — 8.5.2
+
+- **`org` → `workspace` rename across daemon, CLI, and ingest envelope** (#836) — mirrors the cloud-dashboard rename shipped in siropkin/budi-cloud#315 / #320. Local code identifiers, the `--workspace-id` CLI flag, the canonical `workspace_id` TOML key in `~/.config/budi/cloud.toml`, and the ingest wire format (`POST /v1/ingest`, `GET /v1/whoami`, `GET /v1/pricing/active`, `budi cloud reset --format json`) all standardize on `workspace_id`. The legacy `org_id` key, `--org-id` flag, and `org` JSON output keys remain accepted via dual-emit / dual-accept aliases during the deprecation window described in ADR-0083 §2 (Amended 2026-05-15). The legacy aliases are removed in a follow-up once siropkin/budi-cloud#321 ships and one release cycle of mixed-version operation has passed.
+
 ### Internal — 8.5.2
 
 - **Dead code sweep: `cargo-udeps`, `cargo-machete`, `clippy -W unreachable_pub -W dead_code`** (#806) — workspace-wide hygiene pass for the 8.5.2 release. `cargo machete` and `cargo +nightly udeps --workspace --all-targets` both report clean. `cargo clippy --workspace --all-targets -- -W dead_code -W unreachable_pub` reported 255 `unreachable_pub` items across the binary crates (`budi-cli`, `budi-daemon`) and the workspace-private `budi-core` library; all were mechanically narrowed to `pub(crate)` via `clippy --fix`, since neither crate has external API consumers. The surviving `#[allow(dead_code)]` annotations now carry one-line explanations (added one for `PlatformFamily` in `crates/budi-core/src/legacy_proxy.rs`, whose variants are constructed via cfg-gated branches that look dead per-target but are required for cross-platform tests). One redundant `#[allow(dead_code)]` was dropped from `parse_session_dir_for_tests` in `crates/budi-core/src/providers/copilot_chat/jetbrains.rs` since it is exercised by the sibling test module. No `#[deprecated]` items, no `#[cfg(feature = "...")]` gates, and no unused workspace dependencies were found.
 
 ### Cross-repo lockstep
 
-- No cross-repo changes required.
+- **siropkin/budi-cloud#321** — paired cloud-side rename. The cloud must accept both `workspace_id` and the legacy `org_id` keys on `POST /v1/ingest`, return both on `GET /v1/whoami` / `GET /v1/pricing/active`, and migrate its local schema. Coordinated cutover plan documented in #836; the legacy keys stay in place on both sides until ≥ 30 days of mixed-version operation have been observed in ingest logs.
 
 ## 8.5.1 — 2026-05-13
 

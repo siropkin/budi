@@ -74,7 +74,7 @@ pub(crate) async fn cloud_sync(
         // #521: spell out which field is missing and where to find its
         // value so a fresh user can complete the flow without reading
         // the ADR. Pre-fix the operator saw a generic "ensure api_key,
-        // device_id, and org_id are set" line that listed every
+        // device_id, and workspace_id are set" line that listed every
         // possible gap.
         let missing = missing_fields_message(&cfg);
         return Ok(Json(not_ready_body(RESULT_NOT_CONFIGURED, &cfg, &missing)));
@@ -169,7 +169,10 @@ pub(crate) async fn cloud_reset(
         "ok": true,
         "result": "reset",
         "endpoint": cfg.effective_endpoint(),
-        "org_id": cfg.org_id,
+        "workspace_id": cfg.workspace_id,
+        // #836: dual-emit the legacy `org_id` key during the rename
+        // deprecation window. ADR-0083 §2.
+        "org_id": cfg.workspace_id,
         "removed": removed,
         "message": "Cloud sync watermarks reset. Run `budi cloud sync` to push everything now, or wait for the next interval tick.",
     })))
@@ -213,9 +216,9 @@ fn missing_fields_message(cfg: &CloudConfig) -> String {
                 .to_string(),
         );
     }
-    if cfg.org_id.is_none() {
+    if cfg.workspace_id.is_none() {
         problems.push(
-            "`org_id` — copy from the Organization panel at https://app.getbudi.dev/dashboard/settings"
+            "`workspace_id` — copy from the Workspace panel at https://app.getbudi.dev/dashboard/settings"
                 .to_string(),
         );
     }

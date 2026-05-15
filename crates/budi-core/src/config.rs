@@ -652,7 +652,15 @@ pub struct CloudConfig {
     pub enabled: bool,
     pub api_key: Option<String>,
     pub device_id: Option<String>,
-    pub org_id: Option<String>,
+    /// Workspace identifier on the cloud dashboard (#836).
+    ///
+    /// Renamed from `org_id` in v8.5.2; the legacy `org_id` TOML key is
+    /// still accepted via `serde(alias)` during the deprecation window
+    /// described in ADR-0083 §2. The legacy alias is dropped once the
+    /// cloud-side rename (siropkin/budi-cloud#321) ships and one release
+    /// cycle of mixed-version operation has passed.
+    #[serde(alias = "org_id")]
+    pub workspace_id: Option<String>,
     pub endpoint: String,
     pub sync: CloudSyncConfig,
     /// Human-friendly device label included in every ingest envelope.
@@ -679,7 +687,7 @@ impl Default for CloudConfig {
             enabled: false,
             api_key: None,
             device_id: None,
-            org_id: None,
+            workspace_id: None,
             endpoint: DEFAULT_CLOUD_ENDPOINT.to_string(),
             sync: CloudSyncConfig::default(),
             label: None,
@@ -754,12 +762,12 @@ impl CloudConfig {
     }
 
     /// Returns true only if cloud sync is configured enough to run:
-    /// enabled, has api_key, has device_id, has org_id.
+    /// enabled, has api_key, has device_id, has workspace_id.
     pub fn is_ready(&self) -> bool {
         self.effective_enabled()
             && self.effective_api_key().is_some()
             && self.device_id.is_some()
-            && self.org_id.is_some()
+            && self.workspace_id.is_some()
     }
 
     /// Returns true when the `api_key` in the loaded config is exactly the
@@ -791,8 +799,8 @@ impl CloudConfig {
         if self.device_id.is_none() {
             return Some("missing device_id");
         }
-        if self.org_id.is_none() {
-            return Some("missing org_id");
+        if self.workspace_id.is_none() {
+            return Some("missing workspace_id");
         }
         None
     }
@@ -842,7 +850,7 @@ pub enum SeedDeviceIdOutcome {
 /// configured enough to matter — fresh installs that never opted
 /// into cloud never see a `cloud.toml` modification.
 ///
-/// `org_id` is NOT auto-generated; it has to come from the dashboard
+/// `workspace_id` is NOT auto-generated; it has to come from the dashboard
 /// Settings page. The CLI render step nudges users to that value
 /// separately.
 ///
@@ -1301,7 +1309,7 @@ enabled = true
         assert!(!config.enabled);
         assert!(config.api_key.is_none());
         assert!(config.device_id.is_none());
-        assert!(config.org_id.is_none());
+        assert!(config.workspace_id.is_none());
         assert_eq!(config.endpoint, "https://app.getbudi.dev");
         assert_eq!(config.sync.interval_seconds, 300);
         assert_eq!(config.sync.retry_max_seconds, 300);
@@ -1319,7 +1327,7 @@ enabled = true
 enabled = true
 api_key = "budi_abc123"
 device_id = "dev_xyz"
-org_id = "org_test"
+workspace_id = "org_test"
 endpoint = "https://custom.example.com"
 
 [cloud.sync]
@@ -1331,7 +1339,7 @@ retry_max_seconds = 120
         assert!(config.enabled);
         assert_eq!(config.api_key.as_deref(), Some("budi_abc123"));
         assert_eq!(config.device_id.as_deref(), Some("dev_xyz"));
-        assert_eq!(config.org_id.as_deref(), Some("org_test"));
+        assert_eq!(config.workspace_id.as_deref(), Some("org_test"));
         assert_eq!(config.endpoint, "https://custom.example.com");
         assert_eq!(config.sync.interval_seconds, 60);
         assert_eq!(config.sync.retry_max_seconds, 120);
@@ -1351,7 +1359,7 @@ retry_max_seconds = 120
         config.device_id = Some("dev_test".into());
         assert!(!config.is_ready());
 
-        config.org_id = Some("org_test".into());
+        config.workspace_id = Some("org_test".into());
         assert!(config.is_ready());
     }
 
@@ -1395,10 +1403,10 @@ retry_max_seconds = 120
         assert_eq!(config.disabled_reason(), Some("missing device_id"));
 
         config.device_id = Some("dev_test".to_string());
-        // device_id set, but no org_id.
-        assert_eq!(config.disabled_reason(), Some("missing org_id"));
+        // device_id set, but no workspace_id.
+        assert_eq!(config.disabled_reason(), Some("missing workspace_id"));
 
-        config.org_id = Some("org_test".to_string());
+        config.workspace_id = Some("org_test".to_string());
         // Everything populated: no disabled reason — caller should log "configured".
         assert_eq!(config.disabled_reason(), None);
         assert!(config.is_ready());

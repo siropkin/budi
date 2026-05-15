@@ -203,8 +203,8 @@ fn render_team_pricing_text(body: &Value) {
         return;
     }
 
-    if let Some(org) = team.get("org_id").and_then(Value::as_str) {
-        println!("  {bold}Org{reset}              {green}{org}{reset}");
+    if let Some(workspace) = team.get("workspace_id").and_then(Value::as_str) {
+        println!("  {bold}Workspace{reset}        {green}{workspace}{reset}");
     }
     if let Some(v) = team.get("list_version").and_then(Value::as_u64) {
         println!("  {bold}List version{reset}     v{v}");
@@ -661,7 +661,7 @@ mod tests {
             "source_label": "disk cache",
             "team_pricing": {
                 "active": true,
-                "org_id": "acme-corp",
+                "workspace_id": "acme-corp",
                 "list_version": 3,
                 "effective_from": "2026-04-01",
                 "effective_to": null,
@@ -681,7 +681,7 @@ mod tests {
         let team = body.get("team_pricing").unwrap();
         assert_eq!(team.get("active").and_then(Value::as_bool), Some(true));
         assert_eq!(
-            team.get("org_id").and_then(Value::as_str),
+            team.get("workspace_id").and_then(Value::as_str),
             Some("acme-corp")
         );
         assert_eq!(team.get("list_version").and_then(Value::as_u64), Some(3));

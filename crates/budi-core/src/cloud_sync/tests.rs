@@ -104,7 +104,7 @@ fn empty_payload_detected() {
         &SyncEnvelope {
             schema_version: 1,
             device_id: "dev_test".into(),
-            org_id: "org_test".into(),
+            workspace_id: "org_test".into(),
             label: "test-host".into(),
             synced_at: "2026-04-12T00:00:00Z".into(),
             payload: SyncPayload {
@@ -620,14 +620,14 @@ fn build_envelope_success() {
         enabled: true,
         api_key: Some("budi_test".into()),
         device_id: Some("dev_test".into()),
-        org_id: Some("org_test".into()),
+        workspace_id: Some("org_test".into()),
         ..CloudConfig::default()
     };
 
     let envelope = build_sync_envelope(&conn, &config).unwrap();
     assert_eq!(envelope.schema_version, 2);
     assert_eq!(envelope.device_id, "dev_test");
-    assert_eq!(envelope.org_id, "org_test");
+    assert_eq!(envelope.workspace_id, "org_test");
     assert!(envelope.payload.daily_rollups.is_empty());
     assert!(envelope.payload.session_summaries.is_empty());
 
@@ -698,7 +698,7 @@ fn current_cloud_status_reports_pending_counts_when_ready() {
         enabled: true,
         api_key: Some("budi_test".into()),
         device_id: Some("dev_test".into()),
-        org_id: Some("org_test".into()),
+        workspace_id: Some("org_test".into()),
         ..CloudConfig::default()
     };
     let status = current_cloud_status(&db_path, &config);
@@ -714,7 +714,7 @@ fn envelope_serializes_to_expected_shape() {
     let envelope = SyncEnvelope {
         schema_version: 2,
         device_id: "dev_test".into(),
-        org_id: "org_test".into(),
+        workspace_id: "org_test".into(),
         label: "ivan-mbp".into(),
         synced_at: "2026-04-12T00:00:00Z".into(),
         payload: SyncPayload {
@@ -745,7 +745,7 @@ fn envelope_serializes_to_expected_shape() {
     // wire structs.
     assert_eq!(json["schema_version"], 2);
     assert_eq!(json["device_id"], "dev_test");
-    // #552: label travels alongside device_id / org_id / synced_at
+    // #552: label travels alongside device_id / workspace_id / synced_at
     // on the envelope root.
     assert_eq!(json["label"], "ivan-mbp");
     assert_eq!(
@@ -828,7 +828,7 @@ fn build_envelope_populates_label_from_config() {
         enabled: true,
         api_key: Some("budi_test".into()),
         device_id: Some("dev_test".into()),
-        org_id: Some("org_test".into()),
+        workspace_id: Some("org_test".into()),
         label: Some("ivan-mbp".into()),
         ..CloudConfig::default()
     };

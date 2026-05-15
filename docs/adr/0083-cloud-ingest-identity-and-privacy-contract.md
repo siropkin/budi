@@ -1,7 +1,7 @@
 # ADR-0083: Cloud Ingest, Identity, and Privacy Contract
 
 - **Date**: 2026-04-10
-- **Status**: Accepted (amended by [ADR-0091](./0091-model-pricing-manifest-source-of-truth.md) and [ADR-0094](./0094-custom-team-pricing-and-effective-cost-recalculation.md) — see banners)
+- **Status**: Accepted (amended by [ADR-0091](./0091-model-pricing-manifest-source-of-truth.md), [ADR-0094](./0094-custom-team-pricing-and-effective-cost-recalculation.md), and the 2026-05-15 org→workspace rename — see banners)
 - **Issue**: [#83](https://github.com/siropkin/budi/issues/83)
 - **Milestone**: 8.0.0
 - **Depends on**: [ADR-0082](./0082-proxy-compatibility-matrix-and-gateway-contract.md)
@@ -9,6 +9,15 @@
 > **Amended by [ADR-0091](./0091-model-pricing-manifest-source-of-truth.md) (2026-04-21), §Neutral.** Budi's permitted outbound-network surface is extended by exactly one additional destination: an anonymous HTTPS `GET` to `https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json` issued by the daemon-side pricing refresher. The request carries no user content, no identifiers, and no headers beyond the standard `User-Agent` / `Accept` pair. Operator opt-out is `BUDI_PRICING_REFRESH=0`. The user-data privacy contract defined in §1 of this ADR is unchanged.
 
 > **Amended by [ADR-0094](./0094-custom-team-pricing-and-effective-cost-recalculation.md) (2026-05-11), §Neutral.** The permitted outbound-network surface gains one additional destination: an authenticated HTTPS `GET` to `https://app.getbudi.dev/v1/pricing/active` (Bearer-authed with the same `budi_<key>` token as `POST /v1/ingest`). The request carries no user content; the response carries the calling org's negotiated price list (a small JSON document of rates) — not per-user data, no rollups, no token counts. Operator opt-out is the existing `BUDI_PRICING_REFRESH=0` env switch (one switch governs both the LiteLLM manifest refresh and the team-pricing pull). The user-data privacy contract defined in §1 of this ADR is unchanged.
+
+> **Amended 2026-05-15 (#836), §2 — `org_id` → `workspace_id` rename.** The cloud dashboard renamed the per-team identifier from "Organization" to "Workspace" (siropkin/budi-cloud#315 / #320). The daemon side mirrors that rename across code identifiers, CLI flags, config keys, and the ingest wire format. To avoid a forced cross-repo cutover, the daemon enters a **dual-emit / dual-accept** deprecation window:
+>
+> - **Wire format** (`POST /v1/ingest`, `GET /v1/whoami`, `GET /v1/ingest/status`, `GET /v1/pricing/active`): the daemon serializes the workspace identifier under **both** the new `workspace_id` key and the legacy `org_id` key on every envelope, and deserializes either key on every response. Field values are identical — the dual emission exists only so a daemon that has shipped the rename keeps working against a cloud that has not.
+> - **Local config** (`~/.config/budi/cloud.toml`): the canonical key is `workspace_id`. The legacy `org_id` TOML key is still read via `serde(alias)` so users do not have to edit their config file in lockstep with the daemon upgrade.
+> - **CLI flag**: the canonical flag is `--workspace-id`. The legacy `--org-id` flag stays accepted as a clap alias.
+> - **CLI JSON output** (`budi cloud reset --format json`): the workspace identifier is dual-emitted under both `workspace` (new) and `org` (legacy) keys.
+>
+> The order of operations is documented in the issue body (#836). The legacy keys / flag / aliases stay in place until siropkin/budi-cloud#321 ships and one release cycle (≥ 30 days) of mixed-version operation has been observed in production ingest logs. After that, a follow-up commit drops the dual-emit and dual-accept paths. The user-data privacy contract defined in §1 of this ADR is unchanged — the workspace identifier carries no per-user data; only the JSON key name moves.
 
 ## Context
 
@@ -80,9 +89,11 @@ The daemon syncs **daily rollup records** to the cloud. Daily granularity balanc
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "device_id": "d_abc123def456",
-  "org_id": "org_xyz789",
+  "workspace_id": "ws_xyz789",
+  "org_id": "ws_xyz789",
+  "label": "ivan-mbp",
   "synced_at": "2026-04-10T18:30:00Z",
   "payload": {
     "daily_rollups": [ ... ],
@@ -90,6 +101,8 @@ The daemon syncs **daily rollup records** to the cloud. Daily granularity balanc
   }
 }
 ```
+
+The envelope dual-emits the workspace identifier under both `workspace_id` (the canonical key after #836) and the legacy `org_id` alias during the rename deprecation window described in the 2026-05-15 amendment above. Both fields always carry the same value; cloud ingest may read either. The legacy `org_id` key is dropped after siropkin/budi-cloud#321 lands and one release cycle of mixed-version operation has passed.
 
 #### Daily Rollup Record
 
@@ -386,13 +399,15 @@ New fields in `~/.config/budi/cloud.toml` (created by `budi cloud join` or `budi
 enabled = false
 api_key = "budi_..."
 device_id = "dev_..."
-org_id = "org_..."
+workspace_id = "ws_..."
 endpoint = "https://app.getbudi.dev"
 
 [cloud.sync]
 interval_seconds = 300    # 5 minutes
 retry_max_seconds = 300   # 5 minute backoff cap
 ```
+
+The legacy `org_id` TOML key still loads via `serde(alias)` during the deprecation window described in the 2026-05-15 amendment (#836). Existing configs do not need to be edited; new configs are written with `workspace_id`.
 
 New env vars:
 

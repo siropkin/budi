@@ -21,11 +21,19 @@ use crate::config::CloudConfig;
 // Sync envelope types (ADR-0083 §2)
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Serialize)]
+/// Top-level wire envelope POSTed to `/v1/ingest`.
+///
+/// Custom [`Serialize`] impl: the workspace identifier is emitted under
+/// **both** `workspace_id` (the post-rename key) and the legacy `org_id`
+/// alias during the deprecation window described in ADR-0083 §2 (#836).
+/// The legacy alias is dropped after siropkin/budi-cloud#321 lands and
+/// one release cycle of mixed-version operation has passed.
+#[derive(Debug, Clone)]
 pub struct SyncEnvelope {
     pub schema_version: u32,
     pub device_id: String,
-    pub org_id: String,
+    /// Workspace identifier on the cloud dashboard.
+    pub workspace_id: String,
     /// Human-friendly device label (#552). Populated from
     /// [`CloudConfig::effective_label`] on every ingest, so a local
     /// rename propagates without the user having to re-link. Always
@@ -34,6 +42,29 @@ pub struct SyncEnvelope {
     pub label: String,
     pub synced_at: String,
     pub payload: SyncPayload,
+}
+
+impl Serialize for SyncEnvelope {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeStruct;
+        // #836: dual-emit `workspace_id` (new) and `org_id` (legacy) from
+        // the single in-memory `workspace_id` source so cloud ingest still
+        // accepting the old key keeps working against new daemons. Field
+        // count stays in lockstep with the entries actually serialized
+        // below.
+        let mut s = serializer.serialize_struct("SyncEnvelope", 7)?;
+        s.serialize_field("schema_version", &self.schema_version)?;
+        s.serialize_field("device_id", &self.device_id)?;
+        s.serialize_field("workspace_id", &self.workspace_id)?;
+        s.serialize_field("org_id", &self.workspace_id)?;
+        s.serialize_field("label", &self.label)?;
+        s.serialize_field("synced_at", &self.synced_at)?;
+        s.serialize_field("payload", &self.payload)?;
+        s.end()
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -381,7 +412,7 @@ pub struct CloudSyncStatus {
 /// daemon `/cloud/status` endpoint to report readiness and freshness at a
 /// glance. Pending counts are computed by running the envelope builder
 /// against the current watermarks; if envelope construction fails (e.g.
-/// device_id/org_id missing), pending counts fall back to 0 and the caller
+/// device_id/workspace_id missing), pending counts fall back to 0 and the caller
 /// can still rely on `ready=false` to explain what is missing.
 pub fn current_cloud_status(db_path: &Path, config: &CloudConfig) -> CloudSyncStatus {
     let endpoint = config.effective_endpoint();
@@ -780,10 +811,10 @@ pub fn build_sync_envelope(conn: &Connection, config: &CloudConfig) -> Result<Sy
         .as_ref()
         .context("device_id not configured")?
         .clone();
-    let org_id = config
-        .org_id
+    let workspace_id = config
+        .workspace_id
         .as_ref()
-        .context("org_id not configured")?
+        .context("workspace_id not configured")?
         .clone();
 
     // Read watermarks
@@ -805,7 +836,7 @@ pub fn build_sync_envelope(conn: &Connection, config: &CloudConfig) -> Result<Sy
         // 014.
         schema_version: 2,
         device_id,
-        org_id,
+        workspace_id,
         label: config.effective_label(),
         synced_at: chrono::Utc::now().to_rfc3339(),
         payload: SyncPayload {
@@ -951,18 +982,26 @@ pub fn validate_https_endpoint(endpoint: &str) -> Result<()> {
 /// #541: response shape of `GET /v1/whoami` (cloud PR siropkin/budi-cloud#56).
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct WhoamiResponse {
-    pub org_id: String,
+    /// Workspace identifier returned by `GET /v1/whoami`.
+    ///
+    /// #836: dual-accept the legacy `org_id` key via `serde(alias)` so a
+    /// fresh CLI can still seed `cloud.toml` from an older cloud that hasn't
+    /// shipped the workspace rename yet (siropkin/budi-cloud#321). The alias
+    /// is dropped once the cloud-side rename lands and one release cycle of
+    /// mixed-version operation has passed. ADR-0083 §2.
+    #[serde(alias = "org_id")]
+    pub workspace_id: String,
 }
 
 /// #541: outcome of a `whoami` call — distinguishes the fatal cases the
 /// CLI wants to surface (bad key) from the benign "cloud doesn't expose
 /// this yet" case the CLI wants to fall through on. A fresh 8.3.x CLI
 /// pointed at an old self-hosted cloud without `/v1/whoami` keeps the
-/// pre-#541 behavior (template with commented `device_id` / `org_id`
+/// pre-#541 behavior (template with commented `device_id` / `workspace_id`
 /// lines) rather than hard-failing `budi cloud init`.
 #[derive(Debug, Clone)]
 pub enum WhoamiOutcome {
-    /// Cloud authenticated the key and returned `org_id`.
+    /// Cloud authenticated the key and returned `workspace_id`.
     Ok(WhoamiResponse),
     /// 401 — the key is revoked, malformed, or doesn't belong to any
     /// user. The CLI should NOT write `enabled = true` on this path.
@@ -979,7 +1018,7 @@ pub enum WhoamiOutcome {
 }
 
 /// #541: `GET /v1/whoami` — identifies the bearer of the api_key.
-/// Used by `budi cloud init --api-key KEY` to auto-seed `org_id`
+/// Used by `budi cloud init --api-key KEY` to auto-seed `workspace_id`
 /// without making the user hand-copy it out of the dashboard.
 ///
 /// Returns a structured [`WhoamiOutcome`] so the caller can distinguish
@@ -1203,7 +1242,7 @@ pub fn sync_tick_report(db_path: &Path, config: &CloudConfig) -> SyncTickReport 
     let mut last_result = SyncResult::TransientError("no chunks were sent".to_string());
 
     let device_id = envelope.device_id;
-    let org_id = envelope.org_id;
+    let workspace_id = envelope.workspace_id;
     let label = envelope.label;
     let schema_version = envelope.schema_version;
 
@@ -1211,7 +1250,7 @@ pub fn sync_tick_report(db_path: &Path, config: &CloudConfig) -> SyncTickReport 
         let chunk_envelope = SyncEnvelope {
             schema_version,
             device_id: device_id.clone(),
-            org_id: org_id.clone(),
+            workspace_id: workspace_id.clone(),
             label: label.clone(),
             synced_at: chrono::Utc::now().to_rfc3339(),
             payload: chunk,
