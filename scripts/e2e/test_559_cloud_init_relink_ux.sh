@@ -69,7 +69,9 @@ enabled = true
 api_key = "${OLD_KEY_PLACEHOLDER}"
 endpoint = "https://app.getbudi.dev"
 device_id = "00000000-0000-4000-8000-000000000001"
-org_id = "org_old"
+# Exercise the #836 back-compat path: cloud.toml on disk still uses
+# the legacy `org_id` key, which is read via serde alias.
+org_id = "ws_old"
 
 [cloud.sync]
 interval_seconds = 300
@@ -93,8 +95,8 @@ if [[ "$status" -eq 0 ]]; then
   exit 1
 fi
 
-if ! grep -q 'org "org_old"' "$ERR_LOG"; then
-  echo "[e2e] FAIL: error must name the existing org (org_old)" >&2
+if ! grep -q 'workspace "ws_old"' "$ERR_LOG"; then
+  echo "[e2e] FAIL: error must name the existing workspace (ws_old)" >&2
   cat "$ERR_LOG" >&2
   exit 1
 fi
@@ -103,7 +105,7 @@ if ! grep -q -- "--force" "$ERR_LOG"; then
   cat "$ERR_LOG" >&2
   exit 1
 fi
-if ! grep -Eq "switching orgs|rotating" "$ERR_LOG"; then
+if ! grep -Eq "switching workspaces|rotating" "$ERR_LOG"; then
   echo "[e2e] FAIL: error must call out the rotation/switch case" >&2
   cat "$ERR_LOG" >&2
   exit 1
@@ -115,7 +117,7 @@ if grep -q 'Pass --force to overwrite' "$ERR_LOG"; then
   exit 1
 fi
 # cloud.toml must be unchanged — error path must not write.
-if ! grep -q 'org_old' "$CLOUD_TOML"; then
+if ! grep -q 'ws_old' "$CLOUD_TOML"; then
   echo "[e2e] FAIL: error path must not modify cloud.toml" >&2
   cat "$CLOUD_TOML" >&2
   exit 1
@@ -132,7 +134,7 @@ echo "[e2e] OK: scenario 1 — rotation-aware error, file unchanged"
 # prompt and leave the file in a parseable shape.
 echo "[e2e] scenario 2: --force --yes rewrites cloud.toml with the new key"
 "$BUDI" cloud init --api-key "$NEW_KEY_PLACEHOLDER" --force --yes \
-    --org-id "org_new" --device-id "11111111-1111-4111-8111-111111111111" \
+    --workspace-id "ws_new" --device-id "11111111-1111-4111-8111-111111111111" \
     </dev/null >"$TMPDIR_ROOT/init-2.log" 2>&1 || {
   echo "[e2e] FAIL: --force --yes rotation path failed" >&2
   cat "$TMPDIR_ROOT/init-2.log" >&2
@@ -149,8 +151,8 @@ if grep -qF "$OLD_KEY_PLACEHOLDER" "$CLOUD_TOML"; then
   cat "$CLOUD_TOML" >&2
   exit 1
 fi
-if ! grep -q 'org_id = "org_new"' "$CLOUD_TOML"; then
-  echo "[e2e] FAIL: --force --yes must seed the new org_id" >&2
+if ! grep -q 'workspace_id = "ws_new"' "$CLOUD_TOML"; then
+  echo "[e2e] FAIL: --force --yes must seed the new workspace_id" >&2
   cat "$CLOUD_TOML" >&2
   exit 1
 fi

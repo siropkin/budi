@@ -37,7 +37,7 @@ pub(crate) fn cmd_init(no_integrations: bool, no_daemon: bool) -> Result<()> {
     // `budi init` seeds these values on a real enable. Prints a
     // single-line status so the user sees whether the seeding just
     // happened, already existed, or was skipped because cloud is off.
-    // `org_id` is NOT auto-generated (it has to come from the dashboard
+    // `workspace_id` is NOT auto-generated (it has to come from the dashboard
     // Settings page); we nudge the user separately when it's missing.
     announce_cloud_device_id_seeding();
 
@@ -90,7 +90,7 @@ pub(crate) fn cmd_init(no_integrations: bool, no_daemon: bool) -> Result<()> {
 /// configured` after following the documented flow.
 ///
 /// On `Generated`, print a short confirmation + a nudge to set
-/// `org_id` (which the dashboard Settings page exposes). On
+/// `workspace_id` (which the dashboard Settings page exposes). On
 /// `AlreadySet`, stay silent — subsequent `budi init` runs should not
 /// nag. On `Skipped`, stay silent — cloud sync isn't opted in, so
 /// the user hasn't asked budi to touch `cloud.toml`. Failures print a
@@ -110,14 +110,14 @@ fn announce_cloud_device_id_seeding() {
             println!(
                 "  {green}✓{reset} Cloud device_id seeded ({short}…) in ~/.config/budi/cloud.toml"
             );
-            // Nudge for org_id if it's still missing. Checking via
+            // Nudge for workspace_id if it's still missing. Checking via
             // `load_cloud_config` keeps this one read-only pass; the
             // file was just mutated above, so the re-load is
             // intentional.
             let cfg = budi_core::config::load_cloud_config();
-            if cfg.org_id.is_none() {
+            if cfg.workspace_id.is_none() {
                 println!(
-                    "  {yellow}!{reset} Set {dim}org_id{reset} in ~/.config/budi/cloud.toml {dim}(copy from Settings page at https://app.getbudi.dev/dashboard/settings){reset}"
+                    "  {yellow}!{reset} Set {dim}workspace_id{reset} in ~/.config/budi/cloud.toml {dim}(copy from Settings page at https://app.getbudi.dev/dashboard/settings){reset}"
                 );
             }
         }

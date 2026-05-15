@@ -37,7 +37,7 @@ pub(crate) async fn run(
 
     loop {
         // #560: re-read cloud.toml every tick so a rewritten api_key /
-        // endpoint / org_id / device_id propagates without a daemon
+        // endpoint / workspace_id / device_id propagates without a daemon
         // restart. The on-disk read is a small TOML parse — cheap at the
         // default 5-minute interval. The previous behaviour cloned the
         // config captured at daemon startup, so a key rotation produced

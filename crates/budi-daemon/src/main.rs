@@ -410,7 +410,7 @@ async fn main() -> Result<()> {
                     tracing::info!(
                         endpoint = %cloud_config.effective_endpoint(),
                         device_id = %log_id_prefix(cloud_config.device_id.as_deref()),
-                        org_id = %log_id_prefix(cloud_config.org_id.as_deref()),
+                        workspace_id = %log_id_prefix(cloud_config.workspace_id.as_deref()),
                         interval_s = cloud_config.sync.interval_seconds,
                         "cloud uploader configured"
                     );
@@ -488,7 +488,7 @@ const SHUTDOWN_DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_se
 /// here — `std::process::exit(0)` below ends it along with the rest of
 /// the runtime. If we want to drain in-flight HTTP requests on the same
 /// signal, that is a larger refactor tracked outside this ticket.
-/// #540: abbreviate a `device_id` / `org_id` for the daemon startup log
+/// #540: abbreviate a `device_id` / `workspace_id` for the daemon startup log
 /// line. Full values are stored in `cloud.toml` and aren't secret, but
 /// long opaque UUIDs / org slugs clutter the log. Prints the first 8
 /// chars followed by `…` when the value is longer than that; returns
@@ -750,7 +750,7 @@ mod tests {
 
     #[test]
     fn log_id_prefix_abbreviates_long_ids_and_preserves_short_ones() {
-        // #540: the daemon startup log prints device_id / org_id
+        // #540: the daemon startup log prints device_id / workspace_id
         // abbreviated so operators can eyeball "am I on the right
         // device?" without full opaque UUIDs cluttering the log.
         assert_eq!(

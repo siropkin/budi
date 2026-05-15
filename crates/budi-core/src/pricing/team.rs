@@ -46,7 +46,14 @@ pub struct TeamPricingDefaults {
 /// at [`cache_path`] for warm-start after a daemon restart.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct TeamPricing {
-    pub org_id: String,
+    /// Workspace identifier the price list belongs to.
+    ///
+    /// #836: dual-accepts the legacy `org_id` key during the org→workspace
+    /// rename deprecation window (ADR-0083 §2) so a fresh daemon stays
+    /// compatible with a cloud that hasn't shipped siropkin/budi-cloud#321
+    /// yet.
+    #[serde(alias = "org_id")]
+    pub workspace_id: String,
     pub list_version: u32,
     pub effective_from: String,
     #[serde(default)]
@@ -221,7 +228,7 @@ pub struct RecomputeAuditRow {
 pub struct TeamPricingStatus {
     pub active: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub org_id: Option<String>,
+    pub workspace_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub list_version: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -243,7 +250,7 @@ impl TeamPricingStatus {
     pub fn inactive() -> Self {
         Self {
             active: false,
-            org_id: None,
+            workspace_id: None,
             list_version: None,
             effective_from: None,
             effective_to: None,
@@ -279,7 +286,7 @@ pub fn build_status(conn: &Connection) -> Result<TeamPricingStatus> {
 
     Ok(TeamPricingStatus {
         active: true,
-        org_id: Some(pricing.org_id.clone()),
+        workspace_id: Some(pricing.workspace_id.clone()),
         list_version: Some(pricing.list_version),
         effective_from: Some(pricing.effective_from.clone()),
         effective_to: pricing.effective_to.clone(),
@@ -498,7 +505,7 @@ mod tests {
 
     fn sample_pricing() -> TeamPricing {
         TeamPricing {
-            org_id: "org_test".to_string(),
+            workspace_id: "org_test".to_string(),
             list_version: 3,
             effective_from: "2026-04-01".to_string(),
             effective_to: None,
@@ -701,7 +708,7 @@ mod tests {
             .expect("open db");
         let status = build_status(&conn).expect("build_status");
         assert!(!status.active);
-        assert!(status.org_id.is_none());
+        assert!(status.workspace_id.is_none());
         assert!(status.list_version.is_none());
         assert!(status.last_recompute.is_none());
         // No messages → savings is 0, not None.
@@ -739,7 +746,7 @@ mod tests {
         install(None);
 
         assert!(status.active);
-        assert_eq!(status.org_id.as_deref(), Some("org_test"));
+        assert_eq!(status.workspace_id.as_deref(), Some("org_test"));
         assert_eq!(status.list_version, Some(3));
         assert_eq!(status.effective_from.as_deref(), Some("2026-04-01"));
         let audit = status.last_recompute.expect("audit row present");

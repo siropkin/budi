@@ -453,11 +453,13 @@ enum CloudAction {
         /// whoami call can't reach the cloud.
         #[arg(long, value_name = "ID")]
         device_id: Option<String>,
-        /// Manually set `org_id` instead of fetching it via
+        /// Manually set `workspace_id` instead of fetching it via
         /// `GET /v1/whoami`. Useful for self-hosted endpoints that
         /// don't expose `/v1/whoami` yet, or offline installs.
-        #[arg(long, value_name = "ID")]
-        org_id: Option<String>,
+        /// Accepts the legacy `--org-id` flag during the workspace
+        /// rename deprecation window (#836).
+        #[arg(long, value_name = "ID", alias = "org-id")]
+        workspace_id: Option<String>,
     },
     /// Show cloud sync readiness and last-synced-at
     Status {
@@ -489,11 +491,12 @@ enum CloudAction {
     },
     /// Drop the cloud sync watermarks so the next sync re-uploads everything
     ///
-    /// Useful after switching orgs, rotating an api_key, or recovering from a
-    /// cloud-side data wipe — the daemon's local watermark is org-blind and
-    /// keeps the cloud "ahead" of where it actually is until the watermark is
-    /// reset (#564). Cloud-side dedup means the re-upload is safe even if some
-    /// records overlap with rows the cloud already has.
+    /// Useful after switching workspaces, rotating an api_key, or recovering
+    /// from a cloud-side data wipe — the daemon's local watermark is
+    /// workspace-blind and keeps the cloud "ahead" of where it actually is
+    /// until the watermark is reset (#564). Cloud-side dedup means the
+    /// re-upload is safe even if some records overlap with rows the cloud
+    /// already has.
     Reset {
         /// Skip the interactive confirmation. Required for non-TTY callers
         /// (CI, scripts) — otherwise the prompt aborts to avoid a silent
@@ -828,8 +831,8 @@ fn main() -> Result<()> {
                 force,
                 yes,
                 device_id,
-                org_id,
-            } => commands::cloud::cmd_cloud_init(api_key, force, yes, device_id, org_id),
+                workspace_id,
+            } => commands::cloud::cmd_cloud_init(api_key, force, yes, device_id, workspace_id),
             CloudAction::Status { format } => commands::cloud::cmd_cloud_status(format),
             CloudAction::Sync { format, full, yes } => {
                 commands::cloud::cmd_cloud_sync(format, full, yes)

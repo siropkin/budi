@@ -44,7 +44,7 @@ pub(crate) async fn pricing_status() -> Result<Json<Value>, (StatusCode, Json<Va
             Err(_) => match team::snapshot() {
                 Some(p) => team::TeamPricingStatus {
                     active: true,
-                    org_id: Some(p.org_id),
+                    workspace_id: Some(p.workspace_id),
                     list_version: Some(p.list_version),
                     effective_from: Some(p.effective_from),
                     effective_to: p.effective_to,

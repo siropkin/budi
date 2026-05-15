@@ -276,7 +276,7 @@ fn create_current_schema(conn: &Connection) -> Result<()> {
 /// #731 / ADR-0094 §7: lightweight local audit log of team-pricing
 /// recompute passes. One row per [`pricing::team::recompute_messages`]
 /// invocation. Mirrors the cloud's `recalculation_runs` shape minus the
-/// columns that only make sense org-side (`org_id`, `price_list_ids[]`,
+/// columns that only make sense org-side (`workspace_id`, `price_list_ids[]`,
 /// `triggered_by`). Surfaced by `budi pricing status` (#732).
 fn ensure_recalculation_runs_local(conn: &Connection) -> Result<()> {
     conn.execute_batch(
