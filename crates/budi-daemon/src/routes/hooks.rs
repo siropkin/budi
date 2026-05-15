@@ -846,6 +846,502 @@ mod tests {
             HealthSourcesResponse::Filtered { .. } => panic!("expected grouped shape"),
         }
     }
+
+    // ─── #817 handler coverage tests ────────────────────────────────────
+    //
+    // Baseline coverage on `routes/hooks.rs` was 25.5% on the 8.5.2
+    // baseline (#804) — `surface_for_path` + `collect_health_sources`
+    // were well covered, but every handler body (the proxy hot path) was
+    // 0%. These tests exercise each handler directly under a tempdir
+    // HOME, plus a small set of full-router cases for the
+    // `require_local_host` middleware and the axum extractor 400 paths.
+
+    use super::{
+        API_VERSION, HealthSourcesParams, InstallIntegrationsRequest, SyncParams, SyncResponse,
+        admin_install_integrations, analytics_history, analytics_sync, analytics_sync_reset,
+        favicon, health, health_integrations, health_sources, sync_status,
+    };
+    use crate::AppState;
+    use crate::routes::HostAllowlist;
+    use axum::Json;
+    use axum::Router;
+    use axum::body::Body;
+    use axum::extract::{ConnectInfo, State};
+    use axum::http::{Method, Request, StatusCode, header};
+    use axum::middleware::from_fn_with_state;
+    use axum::response::IntoResponse;
+    use axum::routing::{get, post};
+    use http_body_util::BodyExt;
+    use std::net::SocketAddr;
+    use std::sync::Arc;
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use tower::ServiceExt;
+
+    /// Process-global `HOME` / `BUDI_HOME` are mutated to point at a
+    /// throw-away tempdir below. `cargo test` runs tests in parallel by
+    /// default, so without this mutex two tests would observe each
+    /// other's env writes between `set_var` and `remove_var`. Mirrors
+    /// the pattern used in `routes::pricing` / `routes::analytics` tests.
+    static HOME_MUTEX: Mutex<()> = Mutex::new(());
+
+    struct HomeGuard {
+        prev_home: Option<String>,
+        prev_budi_home: Option<String>,
+        _tmp: tempfile::TempDir,
+        _lock: std::sync::MutexGuard<'static, ()>,
+    }
+
+    impl HomeGuard {
+        fn new() -> Self {
+            let lock = HOME_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+            let tmp = tempfile::tempdir().expect("tempdir for HomeGuard");
+            let prev_home = std::env::var("HOME").ok();
+            let prev_budi_home = std::env::var("BUDI_HOME").ok();
+            // SAFETY: serialized by HOME_MUTEX above; no other thread
+            // reads HOME / BUDI_HOME for the duration of the guard.
+            unsafe { std::env::set_var("HOME", tmp.path()) };
+            unsafe { std::env::remove_var("BUDI_HOME") };
+            Self {
+                prev_home,
+                prev_budi_home,
+                _tmp: tmp,
+                _lock: lock,
+            }
+        }
+    }
+
+    impl Drop for HomeGuard {
+        fn drop(&mut self) {
+            match &self.prev_home {
+                Some(h) => unsafe { std::env::set_var("HOME", h) },
+                None => unsafe { std::env::remove_var("HOME") },
+            }
+            match &self.prev_budi_home {
+                Some(h) => unsafe { std::env::set_var("BUDI_HOME", h) },
+                None => unsafe { std::env::remove_var("BUDI_HOME") },
+            }
+        }
+    }
+
+    fn fresh_app_state() -> AppState {
+        AppState {
+            syncing: Arc::new(AtomicBool::new(false)),
+            integrations_installing: Arc::new(AtomicBool::new(false)),
+            cloud_syncing: Arc::new(AtomicBool::new(false)),
+            sync_progress: Arc::new(Mutex::new(None)),
+        }
+    }
+
+    // ─── Direct-handler tests ───────────────────────────────────────────
+
+    #[tokio::test]
+    async fn favicon_returns_svg_with_cache_headers() {
+        let resp = favicon().await.into_response();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let ct = resp
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        assert!(
+            ct.starts_with("image/svg+xml"),
+            "expected svg content-type, got {ct}"
+        );
+        // Cache-Control is set to make doctor / browser probes cheap.
+        assert!(resp.headers().get(header::CACHE_CONTROL).is_some());
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let text = std::str::from_utf8(&body).unwrap();
+        assert!(text.starts_with("<svg"), "expected svg body, got {text}");
+    }
+
+    #[tokio::test]
+    async fn health_returns_advertised_api_version_and_surfaces() {
+        let Json(body) = health().await;
+        assert!(body.ok);
+        assert_eq!(body.api_version, API_VERSION);
+        // The wire contract pins exactly these five canonical surfaces;
+        // host extensions key their host-filter UI off this slice.
+        assert_eq!(
+            body.surfaces,
+            ["vscode", "cursor", "jetbrains", "terminal", "unknown"]
+        );
+        // `version` is whatever Cargo baked in; just check it's non-empty.
+        assert!(!body.version.is_empty());
+    }
+
+    #[tokio::test]
+    async fn health_sources_handler_returns_filtered_shape_for_unknown_surface() {
+        // The handler doesn't reject unknown surface filters at the
+        // extractor — it normalizes the input and returns the empty
+        // Filtered shape, which is what host extensions expect when
+        // probing for a surface their daemon's providers don't expose.
+        let params = HealthSourcesParams {
+            surface: Some("definitely-not-a-real-surface".to_string()),
+        };
+        let Json(resp) = health_sources(axum::extract::Query(params))
+            .await
+            .expect("handler must not error for an unknown surface filter");
+        match resp {
+            HealthSourcesResponse::Filtered { surface, paths } => {
+                assert_eq!(surface, "definitely-not-a-real-surface");
+                assert!(
+                    paths.is_empty(),
+                    "no provider should publish a path for an unknown surface"
+                );
+            }
+            HealthSourcesResponse::Grouped { .. } => panic!("expected filtered shape"),
+        }
+    }
+
+    #[tokio::test]
+    async fn health_sources_handler_returns_grouped_shape_when_param_absent() {
+        let Json(resp) =
+            health_sources(axum::extract::Query(HealthSourcesParams { surface: None }))
+                .await
+                .expect("handler must succeed without surface filter");
+        match resp {
+            HealthSourcesResponse::Grouped { .. } => {}
+            HealthSourcesResponse::Filtered { .. } => panic!("expected grouped shape"),
+        }
+    }
+
+    #[tokio::test]
+    async fn health_integrations_returns_paths_shape_against_empty_home() {
+        let _guard = HomeGuard::new();
+        let Json(body) = health_integrations()
+            .await
+            .expect("integrations handler must not error on empty HOME");
+        // Cursor extension cannot be installed (no fixture under HOME),
+        // statusline cannot be installed (no claude settings file).
+        assert!(!body.cursor_extension);
+        assert!(!body.statusline);
+        // Database stats fall through to the zeroed default when the
+        // DB hasn't been materialized yet.
+        assert_eq!(body.database.records, 0);
+        // Paths must always be populated — the dashboard renders the
+        // settings.json / database / config paths regardless of state.
+        assert!(body.paths.database.ends_with(".sqlite") || !body.paths.database.is_empty());
+        assert!(!body.paths.config.is_empty());
+        assert!(
+            body.paths
+                .claude_settings
+                .ends_with(".claude/settings.json")
+        );
+    }
+
+    #[tokio::test]
+    async fn sync_status_returns_idle_shape_when_no_sync_in_flight() {
+        let _guard = HomeGuard::new();
+        let state = fresh_app_state();
+        let Json(resp) = sync_status(State(state)).await;
+        assert!(!resp.syncing);
+        // Progress slot is only populated while `syncing=true`. With a
+        // freshly-built state on a non-syncing daemon, it must be None
+        // even though the underlying Mutex holds an Option.
+        assert!(resp.progress.is_none());
+        // The ingest-queue fields stay at zero on the read path; this
+        // pin matches the pre-#603 wire shape budi-cursor still relies
+        // on for its statusline render.
+        assert_eq!(resp.ingest_backlog, 0);
+        assert_eq!(resp.ingest_ready, 0);
+        assert_eq!(resp.ingest_failed, 0);
+    }
+
+    #[tokio::test]
+    async fn sync_status_reports_syncing_true_when_busy_flag_is_set() {
+        let _guard = HomeGuard::new();
+        let state = fresh_app_state();
+        state.syncing.store(true, Ordering::SeqCst);
+        let Json(resp) = sync_status(State(state)).await;
+        assert!(resp.syncing);
+    }
+
+    #[tokio::test]
+    async fn analytics_sync_returns_409_when_a_sync_is_already_running() {
+        // Pre-set the busy flag to simulate a concurrent in-flight sync.
+        // The handler must short-circuit with 409 before touching the
+        // DB, so we don't even need to init it.
+        let _guard = HomeGuard::new();
+        let state = fresh_app_state();
+        state.syncing.store(true, Ordering::SeqCst);
+        let err = match analytics_sync(State(state), None).await {
+            Err(e) => e,
+            Ok(_) => panic!("a second concurrent sync must return 409"),
+        };
+        assert_eq!(err.0, StatusCode::CONFLICT);
+        assert_eq!(err.1.0["ok"], false);
+    }
+
+    #[tokio::test]
+    async fn analytics_sync_succeeds_with_migrate_true_on_fresh_tempdir() {
+        // `migrate=true` lets the handler bootstrap the schema instead
+        // of returning 503 needs-migration. Against a tempdir HOME with
+        // no JSONLs, the sync completes cleanly with zero rows.
+        let _guard = HomeGuard::new();
+        let state = fresh_app_state();
+        let Json(SyncResponse {
+            files_synced,
+            messages_ingested,
+            warnings: _warnings,
+            per_provider: _per_provider,
+        }) = analytics_sync(
+            State(state.clone()),
+            Some(Json(SyncParams { migrate: true })),
+        )
+        .await
+        .expect("sync handler must succeed against a fresh tempdir HOME");
+        assert_eq!(files_synced, 0);
+        assert_eq!(messages_ingested, 0);
+        // BusyFlagGuard must clear the busy flag on the happy path so a
+        // follow-up sync can run.
+        assert!(!state.syncing.load(Ordering::SeqCst));
+    }
+
+    // Note: the migrate=false + stale-schema branch of `analytics_sync`
+    // is exercised by `routes::tests::schema_status_for_returns_stale_for_pre_migration_db`,
+    // which drives the same pure `schema_status_for` classifier the
+    // handler relies on. A direct handler test for this branch would
+    // race with sibling test modules' separate `HOME_MUTEX` statics
+    // (each `routes/*` module declares its own; there is no
+    // process-global coordination — see #366 PR history) because
+    // reaching the stale branch needs two HOME-dependent calls
+    // back-to-back (`open_db_with_migration` to materialize the DB,
+    // then a second `db_path()` read inside the handler), and another
+    // module's `HomeGuard` Drop can swap HOME between them on CI's
+    // multi-threaded test runner.
+
+    #[tokio::test]
+    async fn analytics_sync_reset_succeeds_on_fresh_tempdir() {
+        let _guard = HomeGuard::new();
+        let state = fresh_app_state();
+        let Json(resp) = analytics_sync_reset(State(state.clone()))
+            .await
+            .expect("reset handler must succeed against a fresh HOME");
+        assert_eq!(resp.files_synced, 0);
+        assert_eq!(resp.messages_ingested, 0);
+        assert!(!state.syncing.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn analytics_sync_reset_returns_409_when_a_sync_is_already_running() {
+        let _guard = HomeGuard::new();
+        let state = fresh_app_state();
+        state.syncing.store(true, Ordering::SeqCst);
+        let err = match analytics_sync_reset(State(state)).await {
+            Err(e) => e,
+            Ok(_) => panic!("a second concurrent reset must return 409"),
+        };
+        assert_eq!(err.0, StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
+    async fn analytics_history_succeeds_on_fresh_tempdir() {
+        let _guard = HomeGuard::new();
+        let state = fresh_app_state();
+        let Json(resp) = analytics_history(State(state.clone()))
+            .await
+            .expect("history handler must succeed against a fresh HOME");
+        assert_eq!(resp.files_synced, 0);
+        assert_eq!(resp.messages_ingested, 0);
+        assert!(!state.syncing.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn analytics_history_returns_409_when_a_sync_is_already_running() {
+        let _guard = HomeGuard::new();
+        let state = fresh_app_state();
+        state.syncing.store(true, Ordering::SeqCst);
+        let err = match analytics_history(State(state)).await {
+            Err(e) => e,
+            Ok(_) => panic!("a second concurrent history pull must return 409"),
+        };
+        assert_eq!(err.0, StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
+    async fn admin_install_integrations_rejects_empty_components_with_400() {
+        let _guard = HomeGuard::new();
+        let state = fresh_app_state();
+        let err = admin_install_integrations(
+            State(state.clone()),
+            Json(InstallIntegrationsRequest { components: vec![] }),
+        )
+        .await
+        .expect_err("empty components must 400");
+        assert_eq!(err.0, StatusCode::BAD_REQUEST);
+        let msg = err.1.0["error"].as_str().unwrap_or_default();
+        assert!(
+            msg.contains("components"),
+            "error must mention components, got {msg}"
+        );
+        // The busy flag must remain unset since we 400'd before
+        // entering the BusyFlagGuard scope.
+        assert!(!state.integrations_installing.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn admin_install_integrations_returns_409_when_another_install_is_in_flight() {
+        let _guard = HomeGuard::new();
+        let state = fresh_app_state();
+        state.integrations_installing.store(true, Ordering::SeqCst);
+        let err = admin_install_integrations(
+            State(state),
+            Json(InstallIntegrationsRequest {
+                components: vec![super::IntegrationInstallComponent::Starship],
+            }),
+        )
+        .await
+        .expect_err("concurrent install must 409");
+        assert_eq!(err.0, StatusCode::CONFLICT);
+        let msg = err.1.0["error"].as_str().unwrap_or_default();
+        assert!(msg.contains("in progress"), "got {msg}");
+    }
+
+    // ─── Full-router middleware tests ───────────────────────────────────
+    //
+    // Wires the public hooks routes through `require_local_host` so the
+    // DNS-rebinding defense (#695) is exercised against this surface
+    // specifically, plus malformed-body / malformed-query 400 paths
+    // through axum's extractors.
+
+    fn hooks_test_router() -> Router {
+        Router::new()
+            .route("/health", get(health))
+            .route("/health/sources", get(health_sources))
+            .route("/sync/status", get(sync_status))
+            .route(
+                "/admin/integrations/install",
+                post(admin_install_integrations),
+            )
+            .with_state(fresh_app_state())
+            .layer(from_fn_with_state(
+                HostAllowlist::for_tests(),
+                crate::routes::require_local_host,
+            ))
+    }
+
+    fn loopback_request(
+        method: Method,
+        uri: &str,
+        host: Option<&'static str>,
+        body: Body,
+    ) -> Request<Body> {
+        let mut req = Request::builder()
+            .method(method)
+            .uri(uri)
+            .body(body)
+            .unwrap();
+        if let Some(h) = host {
+            req.headers_mut()
+                .insert(header::HOST, axum::http::HeaderValue::from_static(h));
+        }
+        req.extensions_mut()
+            .insert(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 54545))));
+        req
+    }
+
+    #[tokio::test]
+    async fn hooks_router_accepts_loopback_host_on_health() {
+        let _guard = HomeGuard::new();
+        let app = hooks_test_router();
+        let req = loopback_request(Method::GET, "/health", Some("127.0.0.1"), Body::empty());
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["api_version"], API_VERSION);
+    }
+
+    #[tokio::test]
+    async fn hooks_router_rejects_non_local_host_on_health_with_403() {
+        // DNS-rebinding scenario: peer IP is loopback (browser dialed
+        // 127.0.0.1) but the Host header is an attacker-controlled name.
+        let _guard = HomeGuard::new();
+        let app = hooks_test_router();
+        let req = loopback_request(
+            Method::GET,
+            "/health",
+            Some("attacker.example"),
+            Body::empty(),
+        );
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["error"], "invalid Host header");
+    }
+
+    #[tokio::test]
+    async fn hooks_router_rejects_missing_host_header_with_403() {
+        let _guard = HomeGuard::new();
+        let app = hooks_test_router();
+        let req = loopback_request(Method::GET, "/sync/status", None, Body::empty());
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn hooks_router_rejects_malformed_install_body_with_4xx() {
+        // axum's `Json<T>` extractor returns 400 for syntactically
+        // malformed JSON and 422 for valid JSON that fails to
+        // deserialize against the target type. Both close the gap
+        // before the handler runs — the test covers both branches.
+        let _guard = HomeGuard::new();
+        let app = hooks_test_router();
+
+        // Branch 1: junk bytes — 400 from the json parser.
+        let mut req = loopback_request(
+            Method::POST,
+            "/admin/integrations/install",
+            Some("127.0.0.1"),
+            Body::from("not-json-at-all{"),
+        );
+        req.headers_mut().insert(
+            header::CONTENT_TYPE,
+            axum::http::HeaderValue::from_static("application/json"),
+        );
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+        // Branch 2: valid JSON but an unknown enum variant — 422 from
+        // the typed deserializer (`IntegrationInstallComponent` is a
+        // closed enum). Either way, the handler body must not run.
+        let mut req = loopback_request(
+            Method::POST,
+            "/admin/integrations/install",
+            Some("127.0.0.1"),
+            Body::from(r#"{"components":["not-a-real-component"]}"#),
+        );
+        req.headers_mut().insert(
+            header::CONTENT_TYPE,
+            axum::http::HeaderValue::from_static("application/json"),
+        );
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    #[tokio::test]
+    async fn hooks_router_health_sources_filtered_path_via_oneshot() {
+        // Drives the `?surface=<id>` path through the router so the
+        // axum::Query extractor's parsing is exercised end-to-end.
+        let _guard = HomeGuard::new();
+        let app = hooks_test_router();
+        let req = loopback_request(
+            Method::GET,
+            "/health/sources?surface=jetbrains",
+            Some("127.0.0.1"),
+            Body::empty(),
+        );
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        // Filtered shape has `surface` + `paths` at the top level
+        // (HealthSourcesResponse is `#[serde(untagged)]`).
+        assert_eq!(json["surface"], "jetbrains");
+        assert!(json["paths"].is_array());
+    }
 }
 
 #[derive(serde::Deserialize, Default)]
