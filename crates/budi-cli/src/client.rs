@@ -159,7 +159,7 @@ fn parse_needs_migration_error(body: &str) -> Option<String> {
 /// and `POST /sync/reset`. Used by `budi db import` to render the final
 /// per-agent breakdown (#440).
 #[derive(Debug, Clone, serde::Deserialize)]
-pub struct SyncResponse {
+pub(crate) struct SyncResponse {
     pub files_synced: usize,
     pub messages_ingested: usize,
     #[serde(default)]
@@ -179,7 +179,7 @@ pub struct SyncResponse {
 /// tripping the dead-code lint for the unused ones.
 #[derive(Debug, Clone, serde::Deserialize)]
 #[allow(dead_code)]
-pub struct SyncStatusResponse {
+pub(crate) struct SyncStatusResponse {
     pub syncing: bool,
     #[serde(default)]
     pub last_sync_completed_at: Option<String>,
@@ -202,7 +202,7 @@ pub struct SyncStatusResponse {
 /// CLI can render the optional `fallback_reason` on stderr without
 /// digging through raw JSON.
 #[derive(Debug, Clone, serde::Deserialize)]
-pub struct ResolvedSession {
+pub(crate) struct ResolvedSession {
     pub session_id: String,
     /// `"current"` if the cwd-encoded transcript dir resolved
     /// directly; `"latest"` if we fell back to the newest DB session.
@@ -218,7 +218,7 @@ pub struct ResolvedSession {
 
 /// Thin HTTP client that talks to budi-daemon.
 #[derive(Clone)]
-pub struct DaemonClient {
+pub(crate) struct DaemonClient {
     base_url: String,
     client: Client,
 }
@@ -245,7 +245,7 @@ where
 
 impl DaemonClient {
     /// Create a new client, auto-starting the daemon if needed.
-    pub fn connect() -> Result<Self> {
+    pub(crate) fn connect() -> Result<Self> {
         let config = Self::load_config();
         let base_url = config.daemon_base_url();
         let repo_root = std::env::current_dir()
@@ -345,20 +345,20 @@ impl DaemonClient {
 
     /// `POST /sync/all` — run a quick 30-day sync and return the typed
     /// per-agent report. Used by `budi db import` (no `--force`).
-    pub fn history(&self) -> Result<SyncResponse> {
+    pub(crate) fn history(&self) -> Result<SyncResponse> {
         self.sync_request(|| self.send_sync_post("sync/all"))
     }
 
     /// `POST /sync/reset` — clear sync state and re-ingest all history from
     /// scratch. Used by `budi db import --force`.
-    pub fn sync_reset(&self) -> Result<SyncResponse> {
+    pub(crate) fn sync_reset(&self) -> Result<SyncResponse> {
         self.sync_request(|| self.send_sync_post("sync/reset"))
     }
 
     /// `GET /sync/status` — typed snapshot. The `progress` field is populated
     /// only while a sync is in flight (see `/sync/status` handler).
     /// `budi db import` polls this every ~2 s to render live per-agent progress.
-    pub fn sync_status(&self) -> Result<SyncStatusResponse> {
+    pub(crate) fn sync_status(&self) -> Result<SyncStatusResponse> {
         let resp = self
             .client
             .get(format!("{}/sync/status", self.base_url))
@@ -368,7 +368,7 @@ impl DaemonClient {
         Ok(resp.json()?)
     }
 
-    pub fn check(&self) -> Result<Value> {
+    pub(crate) fn check(&self) -> Result<Value> {
         let resp = self
             .client
             .get(format!("{}/admin/check", self.base_url))
@@ -379,7 +379,7 @@ impl DaemonClient {
         Ok(resp.json()?)
     }
 
-    pub fn repair(&self) -> Result<Value> {
+    pub(crate) fn repair(&self) -> Result<Value> {
         let resp = self
             .client
             .post(format!("{}/admin/repair", self.base_url))
@@ -398,7 +398,7 @@ impl DaemonClient {
     /// surfaced as `anyhow` errors via [`check_response`]; a successful HTTP
     /// status still encodes per-result outcomes (`auth_failure`,
     /// `transient_error`, …) in `result`.
-    pub fn cloud_sync(&self) -> Result<Value> {
+    pub(crate) fn cloud_sync(&self) -> Result<Value> {
         let resp = self
             .client
             .post(format!("{}/cloud/sync", self.base_url))
@@ -414,7 +414,7 @@ impl DaemonClient {
     ///
     /// Returns the same `{ok, result, removed, message}` shape on success
     /// and a 409 `busy` error when the worker / a manual sync are mid-flight.
-    pub fn cloud_reset(&self) -> Result<Value> {
+    pub(crate) fn cloud_reset(&self) -> Result<Value> {
         let resp = self
             .client
             .post(format!("{}/cloud/reset", self.base_url))
@@ -427,7 +427,7 @@ impl DaemonClient {
 
     /// `GET /cloud/status` — read cloud sync readiness and watermarks.
     /// Never blocks on the network; the daemon only reads local state.
-    pub fn cloud_status(&self) -> Result<Value> {
+    pub(crate) fn cloud_status(&self) -> Result<Value> {
         let resp = self
             .client
             .get(format!("{}/cloud/status", self.base_url))
@@ -440,7 +440,7 @@ impl DaemonClient {
     /// `GET /pricing/status` — snapshot of the in-memory pricing manifest
     /// (layer, version, known model count, unknown models seen). Backs
     /// `budi pricing status` (ADR-0091 §8).
-    pub fn pricing_status(&self) -> Result<Value> {
+    pub(crate) fn pricing_status(&self) -> Result<Value> {
         let resp = self
             .client
             .get(format!("{}/pricing/status", self.base_url))
@@ -463,7 +463,7 @@ impl DaemonClient {
     /// so the caller sees the structured body; the CLI in
     /// `cmd_pricing_status` already distinguishes `body.ok == true`
     /// from `body.ok == false` on the rendering side.
-    pub fn pricing_refresh(&self) -> Result<Value> {
+    pub(crate) fn pricing_refresh(&self) -> Result<Value> {
         let resp = self
             .client
             .post(format!("{}/pricing/refresh", self.base_url))
@@ -500,7 +500,7 @@ impl DaemonClient {
     /// `budi pricing recompute`. `force=true` runs the recompute even
     /// when `list_version` is unchanged (the worker would otherwise
     /// short-circuit). #732.
-    pub fn pricing_recompute(&self, force: bool) -> Result<Value> {
+    pub(crate) fn pricing_recompute(&self, force: bool) -> Result<Value> {
         // #745: the daemon route uses serde's strict bool deserializer, which
         // only accepts the literal strings "true" / "false". A numeric
         // 0 / 1 (the older convention) trips 400 Bad Request.
@@ -520,7 +520,7 @@ impl DaemonClient {
 
     // ─── Analytics ───────────────────────────────────────────────────
 
-    pub fn summary(
+    pub(crate) fn summary(
         &self,
         since: Option<&str>,
         until: Option<&str>,
@@ -550,7 +550,7 @@ impl DaemonClient {
         Ok(resp.json()?)
     }
 
-    pub fn cost(
+    pub(crate) fn cost(
         &self,
         since: Option<&str>,
         until: Option<&str>,
@@ -581,7 +581,7 @@ impl DaemonClient {
     }
 
     /// Single-call snapshot of summary + cost + providers (#619).
-    pub fn status_snapshot(
+    pub(crate) fn status_snapshot(
         &self,
         since: Option<&str>,
         until: Option<&str>,
@@ -611,7 +611,7 @@ impl DaemonClient {
         Ok(resp.json()?)
     }
 
-    pub fn projects(
+    pub(crate) fn projects(
         &self,
         since: Option<&str>,
         until: Option<&str>,
@@ -645,7 +645,7 @@ impl DaemonClient {
 
     /// Fetch per-cwd-basename breakdown of non-repo work for the
     /// `--include-non-repo` view on `budi stats --projects` (#442).
-    pub fn non_repo(
+    pub(crate) fn non_repo(
         &self,
         since: Option<&str>,
         until: Option<&str>,
@@ -669,7 +669,7 @@ impl DaemonClient {
         Ok(resp.json()?)
     }
 
-    pub fn branches(
+    pub(crate) fn branches(
         &self,
         since: Option<&str>,
         until: Option<&str>,
@@ -701,7 +701,7 @@ impl DaemonClient {
         Ok(resp.json()?)
     }
 
-    pub fn branch_detail(
+    pub(crate) fn branch_detail(
         &self,
         branch: &str,
         repo_id: Option<&str>,
@@ -741,7 +741,7 @@ impl DaemonClient {
     /// `GET /analytics/tickets` — per-ticket cost roll-up. Matches the
     /// daemon's `TicketListParams` shape (date window + dimension filters +
     /// limit). Used by `budi stats --tickets`.
-    pub fn tickets(
+    pub(crate) fn tickets(
         &self,
         since: Option<&str>,
         until: Option<&str>,
@@ -776,7 +776,7 @@ impl DaemonClient {
     /// `GET /analytics/tickets/{id}` — single-ticket detail with per-branch
     /// breakdown. Returns `Ok(None)` for an unknown ticket id (mirrors
     /// `branch_detail`).
-    pub fn ticket_detail(
+    pub(crate) fn ticket_detail(
         &self,
         ticket_id: &str,
         repo_id: Option<&str>,
@@ -815,7 +815,7 @@ impl DaemonClient {
     /// `GET /analytics/activities` — per-activity cost roll-up. Used by
     /// `budi stats --activities`. Mirrors `tickets` so operators can swap
     /// `--tickets` / `--activities` without learning a new query shape.
-    pub fn activities(
+    pub(crate) fn activities(
         &self,
         since: Option<&str>,
         until: Option<&str>,
@@ -850,7 +850,7 @@ impl DaemonClient {
     /// `GET /analytics/activities/{name}` — single-activity detail with
     /// per-branch breakdown. Returns `Ok(None)` for an unknown activity
     /// (mirrors `ticket_detail`).
-    pub fn activity_detail(
+    pub(crate) fn activity_detail(
         &self,
         activity: &str,
         repo_id: Option<&str>,
@@ -888,7 +888,7 @@ impl DaemonClient {
 
     /// `GET /analytics/files` — per-file cost roll-up. Used by
     /// `budi stats --files`. Mirrors `tickets` / `activities`.
-    pub fn files(
+    pub(crate) fn files(
         &self,
         since: Option<&str>,
         until: Option<&str>,
@@ -922,7 +922,7 @@ impl DaemonClient {
 
     /// `GET /analytics/files/{path}` — single-file detail with per-branch
     /// and per-ticket breakdowns. Returns `Ok(None)` for an unknown file.
-    pub fn file_detail(
+    pub(crate) fn file_detail(
         &self,
         file_path: &str,
         repo_id: Option<&str>,
@@ -958,7 +958,7 @@ impl DaemonClient {
         Ok(Some(serde_json::from_value(val)?))
     }
 
-    pub fn models(
+    pub(crate) fn models(
         &self,
         since: Option<&str>,
         until: Option<&str>,
@@ -990,7 +990,7 @@ impl DaemonClient {
         Ok(resp.json()?)
     }
 
-    pub fn tags(
+    pub(crate) fn tags(
         &self,
         key: Option<&str>,
         since: Option<&str>,
@@ -1018,7 +1018,7 @@ impl DaemonClient {
         Ok(resp.json()?)
     }
 
-    pub fn providers(
+    pub(crate) fn providers(
         &self,
         since: Option<&str>,
         until: Option<&str>,
@@ -1047,7 +1047,7 @@ impl DaemonClient {
     /// `GET /analytics/surfaces` — per-host-environment breakdown (#702).
     /// Mirror of [`Self::providers`] keyed on the surface axis. Returns one
     /// row per surface present in the window; empty surfaces are excluded.
-    pub fn surfaces(
+    pub(crate) fn surfaces(
         &self,
         since: Option<&str>,
         until: Option<&str>,
@@ -1074,7 +1074,7 @@ impl DaemonClient {
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub fn sessions(
+    pub(crate) fn sessions(
         &self,
         since: Option<&str>,
         until: Option<&str>,
@@ -1130,7 +1130,7 @@ impl DaemonClient {
         Ok(resp.json()?)
     }
 
-    pub fn session_detail(&self, session_id: &str) -> Result<Option<SessionListEntry>> {
+    pub(crate) fn session_detail(&self, session_id: &str) -> Result<Option<SessionListEntry>> {
         let resp = self
             .client
             .get(format!(
@@ -1146,7 +1146,7 @@ impl DaemonClient {
         Ok(Some(resp.json()?))
     }
 
-    pub fn session_tags(&self, session_id: &str) -> Result<Vec<SessionTag>> {
+    pub(crate) fn session_tags(&self, session_id: &str) -> Result<Vec<SessionTag>> {
         let resp = self
             .client
             .get(format!(
@@ -1163,7 +1163,11 @@ impl DaemonClient {
     /// server-side resolution for the `current` and `latest` literal
     /// session tokens (#603). Returns the resolved session id plus
     /// an optional `fallback_reason` line the CLI prints on stderr.
-    pub fn resolve_session_token(&self, token: &str, cwd: Option<&str>) -> Result<ResolvedSession> {
+    pub(crate) fn resolve_session_token(
+        &self,
+        token: &str,
+        cwd: Option<&str>,
+    ) -> Result<ResolvedSession> {
         let mut params: Vec<(&str, &str)> = vec![("token", token)];
         if let Some(c) = cwd {
             params.push(("cwd", c));
@@ -1178,7 +1182,7 @@ impl DaemonClient {
         Ok(resp.json()?)
     }
 
-    pub fn session_health(&self, session_id: Option<&str>) -> Result<SessionHealth> {
+    pub(crate) fn session_health(&self, session_id: Option<&str>) -> Result<SessionHealth> {
         let mut params: Vec<(&str, &str)> = Vec::new();
         if let Some(s) = session_id {
             params.push(("session_id", s));

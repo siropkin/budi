@@ -35,7 +35,7 @@ struct BackupEntry {
     backup: Option<PathBuf>,
 }
 
-pub fn cmd_update(yes: bool, version: Option<String>) -> Result<()> {
+pub(crate) fn cmd_update(yes: bool, version: Option<String>) -> Result<()> {
     let is_brew = is_homebrew_install();
 
     let current = env!("CARGO_PKG_VERSION");

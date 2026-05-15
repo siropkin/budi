@@ -13,7 +13,7 @@ use serde::Serialize;
 use crate::StatsFormat;
 use crate::daemon::{daemon_health, ensure_daemon_running, resolve_daemon_binary};
 
-pub fn cmd_doctor(
+pub(crate) fn cmd_doctor(
     repo_root: Option<PathBuf>,
     deep: bool,
     quiet: bool,

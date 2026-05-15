@@ -166,6 +166,9 @@ impl EnvContext {
     }
 }
 
+// Variants are constructed via cfg-gated branches in `current_platform`; on any
+// single target some variants appear dead to the lint but are required for tests
+// that drive scans for the other platforms.
 #[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PlatformFamily {

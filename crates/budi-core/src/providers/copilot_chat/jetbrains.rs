@@ -1107,7 +1107,6 @@ pub(super) fn empty_fixture_dir() -> PathBuf {
 }
 
 #[cfg(test)]
-#[allow(dead_code)]
 pub(super) fn parse_session_dir_for_tests(
     session_dir: &Path,
 ) -> anyhow::Result<Vec<ParsedMessage>> {

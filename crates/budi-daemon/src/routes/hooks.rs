@@ -11,7 +11,7 @@ use super::{internal_error, schema_unavailable};
 use crate::AppState;
 
 #[derive(serde::Serialize)]
-pub struct HealthResponse {
+pub(crate) struct HealthResponse {
     pub ok: bool,
     pub version: &'static str,
     /// Daemon management API version.  The Cursor extension checks this field
@@ -27,7 +27,7 @@ pub struct HealthResponse {
 }
 
 #[derive(serde::Serialize)]
-pub struct SyncResponse {
+pub(crate) struct SyncResponse {
     pub files_synced: usize,
     pub messages_ingested: usize,
     pub warnings: Vec<String>,
@@ -40,7 +40,7 @@ pub struct SyncResponse {
 }
 
 #[derive(serde::Serialize)]
-pub struct SyncStatusResponse {
+pub(crate) struct SyncStatusResponse {
     pub syncing: bool,
     pub last_sync_completed_at: Option<String>,
     pub newest_data_at: Option<String>,
@@ -59,7 +59,7 @@ pub struct SyncStatusResponse {
 
 #[derive(Debug, Clone, Copy, serde::Deserialize)]
 #[serde(rename_all = "kebab-case")]
-pub enum IntegrationInstallComponent {
+pub(crate) enum IntegrationInstallComponent {
     ClaudeCodeHooks,
     ClaudeCodeMcp,
     ClaudeCodeOtel,
@@ -84,13 +84,13 @@ impl IntegrationInstallComponent {
 }
 
 #[derive(Debug, serde::Deserialize)]
-pub struct InstallIntegrationsRequest {
+pub(crate) struct InstallIntegrationsRequest {
     #[serde(default)]
     pub components: Vec<IntegrationInstallComponent>,
 }
 
 #[derive(Debug, serde::Serialize)]
-pub struct InstallIntegrationsResponse {
+pub(crate) struct InstallIntegrationsResponse {
     pub ok: bool,
     pub command: String,
     #[serde(skip_serializing_if = "String::is_empty")]
@@ -240,7 +240,7 @@ fn is_cursor_extension_installed(home: &str) -> bool {
         || cursor_extension_installed_via_filesystem(home)
 }
 
-pub async fn favicon() -> impl IntoResponse {
+pub(crate) async fn favicon() -> impl IntoResponse {
     let svg = "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>&#x1f4ca;</text></svg>";
     (
         [
@@ -266,7 +266,7 @@ pub async fn favicon() -> impl IntoResponse {
 /// they can fall back to the all-rows view when talking to an older
 /// daemon. Sibling ticket adds the HTTP + CLI filter; this PR ships the
 /// data layer and the `surface` field shows up in returned rows.
-pub const API_VERSION: u32 = 3;
+pub(crate) const API_VERSION: u32 = 3;
 
 /// Canonical surface values advertised on `/health` (#701). Mirrors
 /// `budi_core::surface`'s `VSCODE` / `CURSOR` / `JETBRAINS` / `TERMINAL`
@@ -275,7 +275,7 @@ pub const API_VERSION: u32 = 3;
 /// format stays a deliberate snapshot rather than a transitive view.
 const SURFACES: &[&str] = &["vscode", "cursor", "jetbrains", "terminal", "unknown"];
 
-pub async fn health() -> Json<HealthResponse> {
+pub(crate) async fn health() -> Json<HealthResponse> {
     Json(HealthResponse {
         ok: true,
         version: env!("CARGO_PKG_VERSION"),
@@ -293,19 +293,19 @@ pub async fn health() -> Json<HealthResponse> {
 /// consume the unfiltered form yet, but the contract is documented
 /// here so future hosts can rely on it.
 #[derive(Debug, serde::Deserialize)]
-pub struct HealthSourcesParams {
+pub(crate) struct HealthSourcesParams {
     pub surface: Option<String>,
 }
 
 #[derive(Debug, serde::Serialize)]
-pub struct HealthSourcesByGroup {
+pub(crate) struct HealthSourcesByGroup {
     pub surface: String,
     pub paths: Vec<String>,
 }
 
 #[derive(Debug, serde::Serialize)]
 #[serde(untagged)]
-pub enum HealthSourcesResponse {
+pub(crate) enum HealthSourcesResponse {
     Filtered { surface: String, paths: Vec<String> },
     Grouped { surfaces: Vec<HealthSourcesByGroup> },
 }
@@ -328,7 +328,7 @@ pub enum HealthSourcesResponse {
 /// `copilot_chat` (whose watch roots span VS Code, Cursor, and
 /// JetBrains storage) gets [`budi_core::surface::infer_copilot_chat_surface`]
 /// per path so each root is bucketed correctly.
-pub async fn health_sources(
+pub(crate) async fn health_sources(
     axum::extract::Query(params): axum::extract::Query<HealthSourcesParams>,
 ) -> Result<Json<HealthSourcesResponse>, (StatusCode, Json<serde_json::Value>)> {
     let result = tokio::task::spawn_blocking(move || collect_health_sources(params.surface))
@@ -411,7 +411,7 @@ fn collect_health_sources(surface_filter: Option<String>) -> HealthSourcesRespon
     HealthSourcesResponse::Grouped { surfaces }
 }
 
-pub async fn health_check_update()
+pub(crate) async fn health_check_update()
 -> Result<Json<super::analytics::CheckUpdateResponse>, (StatusCode, Json<serde_json::Value>)> {
     use super::analytics::CheckUpdateResponse;
 
@@ -494,7 +494,7 @@ pub async fn health_check_update()
     Ok(Json(result))
 }
 
-pub async fn admin_install_integrations(
+pub(crate) async fn admin_install_integrations(
     State(state): State<AppState>,
     Json(req): Json<InstallIntegrationsRequest>,
 ) -> Result<Json<InstallIntegrationsResponse>, (StatusCode, Json<serde_json::Value>)> {
@@ -575,7 +575,7 @@ pub async fn admin_install_integrations(
     }))
 }
 
-pub async fn health_integrations()
+pub(crate) async fn health_integrations()
 -> Result<Json<super::analytics::IntegrationsResponse>, (StatusCode, Json<serde_json::Value>)> {
     use super::analytics::{DatabaseStats, IntegrationPaths, IntegrationsResponse};
 
@@ -662,7 +662,7 @@ pub async fn health_integrations()
     Ok(Json(result))
 }
 
-pub async fn sync_status(State(state): State<AppState>) -> Json<SyncStatusResponse> {
+pub(crate) async fn sync_status(State(state): State<AppState>) -> Json<SyncStatusResponse> {
     let syncing = state.syncing.load(std::sync::atomic::Ordering::Acquire);
     // Only return a progress snapshot when we actually hold the busy flag;
     // a leftover `Some(..)` from a previous run (cleared by `BusyFlagGuard`
@@ -1345,7 +1345,7 @@ mod tests {
 }
 
 #[derive(serde::Deserialize, Default)]
-pub struct SyncParams {
+pub(crate) struct SyncParams {
     #[serde(default)]
     pub migrate: bool,
 }
@@ -1367,7 +1367,7 @@ fn progress_publisher(
     }
 }
 
-pub async fn analytics_sync(
+pub(crate) async fn analytics_sync(
     State(state): State<AppState>,
     body: Option<Json<SyncParams>>,
 ) -> Result<Json<SyncResponse>, (StatusCode, Json<serde_json::Value>)> {
@@ -1433,7 +1433,7 @@ pub async fn analytics_sync(
     }
 }
 
-pub async fn analytics_sync_reset(
+pub(crate) async fn analytics_sync_reset(
     State(state): State<AppState>,
 ) -> Result<Json<SyncResponse>, (StatusCode, Json<serde_json::Value>)> {
     if state
@@ -1478,7 +1478,7 @@ pub async fn analytics_sync_reset(
     Ok(Json(result))
 }
 
-pub async fn analytics_history(
+pub(crate) async fn analytics_history(
     State(state): State<AppState>,
 ) -> Result<Json<SyncResponse>, (StatusCode, Json<serde_json::Value>)> {
     if state

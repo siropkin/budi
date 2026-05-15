@@ -10,7 +10,7 @@ use serde_json::Value;
 
 use super::statusline::CLAUDE_USER_SETTINGS;
 
-pub fn cmd_uninstall(keep_data: bool, yes: bool) -> Result<()> {
+pub(crate) fn cmd_uninstall(keep_data: bool, yes: bool) -> Result<()> {
     let green = super::ansi("\x1b[32m");
     let yellow = super::ansi("\x1b[33m");
     let reset = super::ansi("\x1b[0m");

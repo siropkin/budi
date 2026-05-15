@@ -31,7 +31,7 @@ use crate::workers::team_pricing;
 /// `team_pricing` is always present so JSON consumers can probe a
 /// single key — `team_pricing.active == false` means "not in use", same
 /// shape as the inactive path.
-pub async fn pricing_status() -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+pub(crate) async fn pricing_status() -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let result = tokio::task::spawn_blocking(|| -> anyhow::Result<Value> {
         let state = pricing::current_state();
         let mut body = serde_json::to_value(state)?;
@@ -75,7 +75,7 @@ pub async fn pricing_status() -> Result<Json<Value>, (StatusCode, Json<Value>)> 
 }
 
 #[derive(Debug, Deserialize)]
-pub struct RecomputeQuery {
+pub(crate) struct RecomputeQuery {
     #[serde(default)]
     pub force: bool,
 }
@@ -125,7 +125,7 @@ fn recompute_outcome_body(outcome: team_pricing::CliTickOutcome) -> Value {
 /// the version check and always runs a recompute pass against the
 /// currently-installed list. Returns the resulting `RecomputeSummary`
 /// (or `{ok: true, skipped: true}` for the short-circuit path).
-pub async fn pricing_recompute(
+pub(crate) async fn pricing_recompute(
     Query(q): Query<RecomputeQuery>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let force = q.force;
@@ -169,7 +169,7 @@ fn refresh_report_body(report: &pricing_refresh::RefreshReport) -> Value {
 }
 
 /// `POST /pricing/refresh` — loopback-only; fire a manual refresh tick.
-pub async fn pricing_refresh() -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+pub(crate) async fn pricing_refresh() -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let result =
         tokio::task::spawn_blocking(|| -> anyhow::Result<pricing_refresh::RefreshReport> {
             let db_path = analytics::db_path()?;

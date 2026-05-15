@@ -32,7 +32,7 @@ const MODEL_COL_WIDTH: usize = 28;
 use budi_core::analytics::SHORT_ID_LEN;
 
 #[allow(clippy::too_many_arguments)]
-pub fn cmd_sessions(
+pub(crate) fn cmd_sessions(
     period: StatsPeriod,
     search: Option<&str>,
     provider: Option<&str>,
@@ -200,7 +200,7 @@ pub fn cmd_sessions(
     Ok(())
 }
 
-pub fn cmd_session_detail(session_id: &str, json_output: bool) -> Result<()> {
+pub(crate) fn cmd_session_detail(session_id: &str, json_output: bool) -> Result<()> {
     let client = DaemonClient::connect().context(
         "Could not reach budi daemon. Run `budi init` to set up, or `budi doctor` to diagnose.",
     )?;

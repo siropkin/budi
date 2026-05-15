@@ -13,7 +13,7 @@ use serde_json::{Value, json};
 use crate::StatuslineFormat;
 use crate::daemon::daemon_client_with_timeout;
 
-pub const CLAUDE_USER_SETTINGS: &str = ".claude/settings.json";
+pub(crate) const CLAUDE_USER_SETTINGS: &str = ".claude/settings.json";
 
 use super::format_cost as fmt_cost;
 use super::normalize_provider;
@@ -298,7 +298,7 @@ fn parse_slots_arg(raw: &str) -> Vec<String> {
         .collect()
 }
 
-pub fn cmd_statusline(
+pub(crate) fn cmd_statusline(
     format: StatuslineFormat,
     provider: Option<String>,
     slots: Option<String>,
@@ -582,7 +582,7 @@ pub(crate) fn statusline_has_budi(cmd: &str) -> bool {
     cmd.contains("budi statusline") || cmd.contains("budi_out=$(budi")
 }
 
-pub fn cmd_statusline_install() -> Result<()> {
+pub(crate) fn cmd_statusline_install() -> Result<()> {
     let home = budi_core::config::home_dir()?;
     let settings_path = home.join(CLAUDE_USER_SETTINGS);
     if let Some(parent) = settings_path.parent() {
@@ -619,7 +619,7 @@ pub fn cmd_statusline_install() -> Result<()> {
 /// Remove legacy budi hooks from ~/.claude/settings.json.
 /// Old budi versions installed hooks that call `budi hook <subcommand>` (with arguments).
 /// Preserves new-style hooks that use just `budi hook` (no arguments).
-pub fn remove_legacy_hooks() {
+pub(crate) fn remove_legacy_hooks() {
     let Ok(home) = budi_core::config::home_dir() else {
         return;
     };

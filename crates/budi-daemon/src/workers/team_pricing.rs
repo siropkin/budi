@@ -47,7 +47,7 @@ const ENDPOINT_PATH: &str = "/v1/pricing/active";
 /// HTTP timeout per poll, matching the cloud-sync 30 s budget.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
-pub async fn run(db_path: PathBuf, shutdown: Arc<AtomicBool>) {
+pub(crate) async fn run(db_path: PathBuf, shutdown: Arc<AtomicBool>) {
     // Warm-load any cached price list so the very first `budi pricing
     // status` call after a daemon restart still has the team layer
     // populated. Cheap — a single JSON read off disk.
@@ -210,7 +210,7 @@ enum TickOutcome {
 /// can distinguish "the list version was unchanged but we ran anyway"
 /// from "we installed a new list".
 #[derive(Debug)]
-pub enum CliTickOutcome {
+pub(crate) enum CliTickOutcome {
     Updated(RecomputeSummary),
     Cleared(RecomputeSummary),
     ForcedRecompute(RecomputeSummary),
@@ -223,7 +223,7 @@ pub enum CliTickOutcome {
 /// fetch and re-run `recompute_messages` against the currently-
 /// installed list anyway — useful for support cases where the operator
 /// suspects a cost number drifted.
-pub fn run_tick_for_cli(force: bool) -> anyhow::Result<CliTickOutcome> {
+pub(crate) fn run_tick_for_cli(force: bool) -> anyhow::Result<CliTickOutcome> {
     let db_path = budi_core::analytics::db_path()?;
     let outcome = run_tick(&db_path)?;
     match outcome {

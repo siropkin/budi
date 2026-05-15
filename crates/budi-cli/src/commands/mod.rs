@@ -6,26 +6,26 @@ use budi_core::config;
 use serde::Serialize;
 use serde_json::Value;
 
-pub mod autostart;
-pub mod cloud;
-pub mod db;
-pub mod doctor;
-pub mod import;
-pub mod init;
-pub mod integrations;
-pub mod pricing;
-pub mod sessions;
-pub mod stats;
-pub mod status;
-pub mod statusline;
-pub mod uninstall;
-pub mod update;
+pub(crate) mod autostart;
+pub(crate) mod cloud;
+pub(crate) mod db;
+pub(crate) mod doctor;
+pub(crate) mod import;
+pub(crate) mod init;
+pub(crate) mod integrations;
+pub(crate) mod pricing;
+pub(crate) mod sessions;
+pub(crate) mod stats;
+pub(crate) mod status;
+pub(crate) mod statusline;
+pub(crate) mod uninstall;
+pub(crate) mod update;
 
 // ---------------------------------------------------------------------------
 // Hook event constants and detection helpers — re-exported from budi-core
 // ---------------------------------------------------------------------------
 
-pub use budi_core::integrations::{
+pub(crate) use budi_core::integrations::{
     CC_HOOK_EVENTS, CURSOR_HOOK_EVENTS, is_budi_cc_hook_entry, is_budi_cursor_hook_entry,
 };
 
@@ -34,7 +34,7 @@ pub use budi_core::integrations::{
 // ---------------------------------------------------------------------------
 
 /// Read a JSON file, returning an empty object if missing or invalid.
-pub fn read_json_or_default(path: &Path) -> Result<Value> {
+pub(crate) fn read_json_or_default(path: &Path) -> Result<Value> {
     if !path.exists() {
         return Ok(serde_json::json!({}));
     }
@@ -52,7 +52,7 @@ pub fn read_json_or_default(path: &Path) -> Result<Value> {
 ///
 /// If the file does not exist, returns `{}`. If parsing fails (or the root is not an
 /// object), creates a backup next to the file and returns an error.
-pub fn read_json_object_strict(path: &Path) -> Result<Value> {
+pub(crate) fn read_json_object_strict(path: &Path) -> Result<Value> {
     if !path.exists() {
         return Ok(serde_json::json!({}));
     }
@@ -106,7 +106,7 @@ fn backup_invalid_json(path: &Path) -> Result<PathBuf> {
 ///    rename, permissions, etc.), we fall back to a non-atomic
 ///    in-place write through the symlink and emit a warning so
 ///    dotfile managers don't desync silently.
-pub fn atomic_write_json(path: &Path, value: &Value) -> Result<()> {
+pub(crate) fn atomic_write_json(path: &Path, value: &Value) -> Result<()> {
     let out = serde_json::to_string_pretty(value)?;
 
     // If `path` is a symlink, write to its canonical target so the
@@ -210,17 +210,17 @@ pub fn atomic_write_json(path: &Path, value: &Value) -> Result<()> {
 // ---------------------------------------------------------------------------
 
 /// Returns true if color output should be used (NO_COLOR env var is not set).
-pub fn use_color() -> bool {
+pub(crate) fn use_color() -> bool {
     std::env::var("NO_COLOR").is_err()
 }
 
 /// Returns the ANSI escape code if color is enabled, otherwise empty string.
-pub fn ansi(code: &str) -> &str {
+pub(crate) fn ansi(code: &str) -> &str {
     if use_color() { code } else { "" }
 }
 
 /// Try to resolve a repo root, but return None if not in a git repository.
-pub fn try_resolve_repo_root(candidate: Option<PathBuf>) -> Option<PathBuf> {
+pub(crate) fn try_resolve_repo_root(candidate: Option<PathBuf>) -> Option<PathBuf> {
     if let Some(path) = candidate {
         return Some(path);
     }
@@ -249,7 +249,7 @@ pub fn try_resolve_repo_root(candidate: Option<PathBuf>) -> Option<PathBuf> {
 /// Walk `value` in place and round every numeric field whose key ends
 /// in `_cents` to an integer. Non-numeric values at those keys are
 /// left unchanged. Returns the mutated reference for chaining.
-pub fn round_cents_to_integer(value: &mut Value) -> &mut Value {
+pub(crate) fn round_cents_to_integer(value: &mut Value) -> &mut Value {
     match value {
         Value::Object(map) => {
             for (k, v) in map.iter_mut() {
@@ -280,7 +280,7 @@ fn is_cents_key(key: &str) -> bool {
 /// CLI cents normalisation applied. All `budi` commands that emit
 /// `--format json` should route through this helper so the contract
 /// stays consistent.
-pub fn print_json<T: Serialize>(value: &T) -> Result<()> {
+pub(crate) fn print_json<T: Serialize>(value: &T) -> Result<()> {
     let mut v = serde_json::to_value(value).context("serialise to JSON value")?;
     round_cents_to_integer(&mut v);
     let out = serde_json::to_string_pretty(&v).context("serialise JSON value to string")?;
@@ -293,7 +293,7 @@ pub fn print_json<T: Serialize>(value: &T) -> Result<()> {
 /// (Cursor extension, cloud dashboard, user's starship prompt)
 /// expects a single-line payload but still benefits from the cents
 /// normalisation.
-pub fn print_json_compact<T: Serialize>(value: &T) -> Result<()> {
+pub(crate) fn print_json_compact<T: Serialize>(value: &T) -> Result<()> {
     let mut v = serde_json::to_value(value).context("serialise to JSON value")?;
     round_cents_to_integer(&mut v);
     let out = serde_json::to_string(&v).context("serialise JSON value to string")?;
@@ -302,7 +302,7 @@ pub fn print_json_compact<T: Serialize>(value: &T) -> Result<()> {
 }
 
 /// Format a cost value in dollars: $1.2K, $123, $12.50, $0.42, $0.00
-pub fn format_cost(dollars: f64) -> String {
+pub(crate) fn format_cost(dollars: f64) -> String {
     if dollars >= 1000.0 {
         format!("${:.1}K", dollars / 1000.0)
     } else if dollars >= 100.0 {
@@ -322,7 +322,7 @@ pub fn format_cost(dollars: f64) -> String {
 /// the canonical form used in SQLite. Prompt-style commands that want to
 /// stay quiet on a typo can map this error to a soft fallback themselves
 /// (#615).
-pub fn normalize_provider(input: &str) -> Result<String> {
+pub(crate) fn normalize_provider(input: &str) -> Result<String> {
     const KNOWN_PROVIDERS: &[&str] = &[
         "claude_code",
         "cursor",
@@ -361,7 +361,7 @@ pub fn normalize_provider(input: &str) -> Result<String> {
 /// silently returning empty results. Surfaces are canonical-only at first
 /// (no `code` → `vscode` alias yet) per the #702 ticket's "Out of scope".
 /// Accepts mixed-case input — `--surface VSCode` lowercases to `vscode`.
-pub fn normalize_surface(input: &str) -> Result<String> {
+pub(crate) fn normalize_surface(input: &str) -> Result<String> {
     const KNOWN_SURFACES: &[&str] = &[
         budi_core::surface::VSCODE,
         budi_core::surface::CURSOR,
