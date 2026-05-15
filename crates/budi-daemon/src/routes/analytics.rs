@@ -1828,17 +1828,23 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn analytics_schema_version_reports_target_when_db_missing() {
-        // `db_path()` resolves but the file doesn't exist → handler
-        // returns the `exists: false` shape with `current = 0` so a
-        // fresh-install CLI can tell "no DB yet" from "DB at vN".
-        let _guard = HomeGuard::new();
+    async fn analytics_schema_version_reports_current_after_migration() {
+        // After `open_db_with_migration`, the schema version handler must
+        // report `exists: true` with `current == target`. This is the
+        // happy path the CLI keys off when deciding whether to suggest
+        // `budi db check --fix`.
+        let guard = HomeGuard::new();
+        guard.init_db();
         let Json(resp) = analytics_schema_version()
             .await
-            .expect("schema_version must succeed even when DB is absent");
-        assert!(!resp.exists);
-        assert_eq!(resp.current, 0);
+            .expect("schema_version must succeed on migrated DB");
+        assert!(resp.exists);
         assert!(resp.target > 0, "target SCHEMA_VERSION must be > 0");
+        assert_eq!(
+            resp.current, resp.target,
+            "freshly migrated DB must be at target version"
+        );
+        assert_eq!(resp.needs_migration, Some(false));
     }
 
     #[tokio::test]
