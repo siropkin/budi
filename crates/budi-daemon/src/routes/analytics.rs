@@ -1430,3 +1430,764 @@ pub async fn analytics_session_audit()
     .map_err(internal_error)?;
     Ok(Json(result))
 }
+
+// ─── #816 handler coverage tests ─────────────────────────────────────────
+//
+// Baseline coverage on `routes/analytics.rs` was 1.27% (the lowest line-
+// coverage figure in the workspace per #804). The query/SQL layer is well
+// covered by `analytics/queries/*` tests; what was missing was direct
+// exercise of the axum handler layer: query-extractor 400 paths,
+// pagination clamps, host-header rejection, and the empty-DB success
+// shape. These tests close that gap. They run each handler in a fresh
+// tempdir-scoped HOME with a freshly-migrated empty DB so they stay
+// hermetic and never observe data from a developer's actual budi home.
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::Router;
+    use axum::body::Body;
+    use axum::extract::ConnectInfo;
+    use axum::http::{Method, Request, StatusCode};
+    use axum::middleware::from_fn_with_state;
+    use axum::routing::get;
+    use http_body_util::BodyExt;
+    use std::net::SocketAddr;
+    use std::sync::Mutex;
+    use tower::ServiceExt;
+
+    /// Process-global `HOME` / `BUDI_HOME` mutations need a mutex —
+    /// cargo runs tests in parallel and unsynchronized env writes are
+    /// unsound on macOS (see #366 PR history).
+    static HOME_MUTEX: Mutex<()> = Mutex::new(());
+
+    struct HomeGuard {
+        prev_home: Option<String>,
+        prev_budi_home: Option<String>,
+        _tmp: tempfile::TempDir,
+        _lock: std::sync::MutexGuard<'static, ()>,
+    }
+
+    impl HomeGuard {
+        fn new() -> Self {
+            let lock = HOME_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+            let tmp = tempfile::tempdir().expect("tempdir for HomeGuard");
+            let prev_home = std::env::var("HOME").ok();
+            let prev_budi_home = std::env::var("BUDI_HOME").ok();
+            // SAFETY: serialized by HOME_MUTEX above; no other thread
+            // reads HOME / BUDI_HOME for the duration of the guard.
+            unsafe { std::env::set_var("HOME", tmp.path()) };
+            unsafe { std::env::remove_var("BUDI_HOME") };
+            Self {
+                prev_home,
+                prev_budi_home,
+                _tmp: tmp,
+                _lock: lock,
+            }
+        }
+
+        /// Materialize the analytics DB at the redirected home so handler
+        /// success paths don't fall over on `open_db` for a missing schema.
+        fn init_db(&self) {
+            let db_path = analytics::db_path().expect("db_path");
+            analytics::open_db_with_migration(&db_path).expect("migrate empty db");
+        }
+    }
+
+    impl Drop for HomeGuard {
+        fn drop(&mut self) {
+            match &self.prev_home {
+                Some(h) => unsafe { std::env::set_var("HOME", h) },
+                None => unsafe { std::env::remove_var("HOME") },
+            }
+            match &self.prev_budi_home {
+                Some(h) => unsafe { std::env::set_var("BUDI_HOME", h) },
+                None => unsafe { std::env::remove_var("BUDI_HOME") },
+            }
+        }
+    }
+
+    // ─── Direct-handler validation tests (no DB / pre-DB validation) ────
+
+    #[tokio::test]
+    async fn analytics_messages_rejects_unknown_sort_by_with_400() {
+        let _guard = HomeGuard::new();
+        let params = MessagesParams {
+            since: None,
+            until: None,
+            search: None,
+            sort_by: Some("not_a_sort_column".to_string()),
+            sort_asc: None,
+            limit: None,
+            offset: None,
+            provider: None,
+            filters: DimensionParams {
+                agents: None,
+                models: None,
+                projects: None,
+                branches: None,
+                surfaces: None,
+            },
+        };
+        let err = analytics_messages(axum::extract::Query(params))
+            .await
+            .expect_err("unknown sort_by must 400");
+        assert_eq!(err.0, StatusCode::BAD_REQUEST);
+        let body = err.1.0;
+        assert_eq!(body["ok"], false);
+        assert!(
+            body["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("invalid sort_by"),
+            "error must mention invalid sort_by: {body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn analytics_sessions_rejects_unknown_sort_by_with_400() {
+        let _guard = HomeGuard::new();
+        let params = SessionsQueryParams {
+            since: None,
+            until: None,
+            search: None,
+            sort_by: Some("garbage".to_string()),
+            sort_asc: None,
+            limit: None,
+            offset: None,
+            ticket: None,
+            activity: None,
+            filters: DimensionParams {
+                agents: None,
+                models: None,
+                projects: None,
+                branches: None,
+                surfaces: None,
+            },
+        };
+        let err = analytics_sessions(axum::extract::Query(params))
+            .await
+            .expect_err("unknown sort_by must 400");
+        assert_eq!(err.0, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn analytics_activity_rejects_unknown_granularity_with_400() {
+        let _guard = HomeGuard::new();
+        let params = ActivityChartParams {
+            since: None,
+            until: None,
+            granularity: Some("fortnight".to_string()),
+            tz_offset: None,
+            filters: DimensionParams {
+                agents: None,
+                models: None,
+                projects: None,
+                branches: None,
+                surfaces: None,
+            },
+        };
+        let err = analytics_activity(axum::extract::Query(params))
+            .await
+            .expect_err("unknown granularity must 400");
+        assert_eq!(err.0, StatusCode::BAD_REQUEST);
+        assert!(
+            err.1.0["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("invalid granularity"),
+        );
+    }
+
+    #[tokio::test]
+    async fn analytics_resolve_session_rejects_unknown_token_with_400() {
+        let _guard = HomeGuard::new();
+        let params = ResolveSessionParams {
+            token: "neither-current-nor-latest".to_string(),
+            cwd: None,
+        };
+        let err = analytics_resolve_session(axum::extract::Query(params))
+            .await
+            .expect_err("unknown token must 400");
+        assert_eq!(err.0, StatusCode::BAD_REQUEST);
+        assert!(
+            err.1.0["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("unknown session token"),
+        );
+    }
+
+    #[tokio::test]
+    async fn analytics_file_detail_rejects_absolute_path_with_400() {
+        let _guard = HomeGuard::new();
+        let params = FileDetailParams {
+            since: None,
+            until: None,
+            repo_id: None,
+        };
+        let err = analytics_file_detail(
+            axum::extract::Path("/etc/passwd".to_string()),
+            axum::extract::Query(params),
+        )
+        .await
+        .expect_err("absolute path must 400");
+        assert_eq!(err.0, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn analytics_file_detail_rejects_traversal_with_400() {
+        let _guard = HomeGuard::new();
+        let params = FileDetailParams {
+            since: None,
+            until: None,
+            repo_id: None,
+        };
+        let err = analytics_file_detail(
+            axum::extract::Path("src/../../etc/passwd".to_string()),
+            axum::extract::Query(params),
+        )
+        .await
+        .expect_err("traversal must 400");
+        assert_eq!(err.0, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn analytics_resolve_session_current_with_empty_cwd_falls_back_to_latest() {
+        // Empty cwd + `token=current` must not 400; the handler should
+        // record a fallback_reason and try the DB for the latest session.
+        // With an empty DB, that returns 404 — pin that contract.
+        let guard = HomeGuard::new();
+        guard.init_db();
+        let params = ResolveSessionParams {
+            token: "current".to_string(),
+            cwd: Some(String::new()),
+        };
+        let err = analytics_resolve_session(axum::extract::Query(params))
+            .await
+            .expect_err("empty DB → no sessions → 404");
+        assert_eq!(err.0, StatusCode::NOT_FOUND);
+    }
+
+    // ─── Empty-DB success-shape tests ───────────────────────────────────
+
+    #[tokio::test]
+    async fn analytics_registered_providers_returns_static_list_without_db() {
+        // This handler never opens the DB — it surfaces the registry.
+        let _guard = HomeGuard::new();
+        let Json(list) = analytics_registered_providers()
+            .await
+            .expect("registered_providers must always succeed");
+        assert!(!list.is_empty(), "at least one provider must be registered");
+        for entry in &list {
+            assert!(!entry.name.is_empty());
+            assert!(!entry.display_name.is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn analytics_summary_with_empty_db_returns_zeroed_shape() {
+        let guard = HomeGuard::new();
+        guard.init_db();
+        let params = SummaryParams {
+            since: None,
+            until: None,
+            provider: None,
+            filters: DimensionParams {
+                agents: None,
+                models: None,
+                projects: None,
+                branches: None,
+                surfaces: None,
+            },
+        };
+        let Json(summary) = analytics_summary(axum::extract::Query(params))
+            .await
+            .expect("summary must succeed on empty DB");
+        // Round-trip the body through serde so the test asserts on the
+        // wire shape the CLI / dashboard consume, not the in-memory
+        // struct field names.
+        let body = serde_json::to_value(&summary).expect("serialize summary");
+        assert!(body.is_object(), "summary must serialize as a JSON object");
+    }
+
+    #[tokio::test]
+    async fn analytics_messages_with_empty_db_returns_empty_page() {
+        let guard = HomeGuard::new();
+        guard.init_db();
+        let params = MessagesParams {
+            since: None,
+            until: None,
+            search: None,
+            sort_by: None,
+            sort_asc: None,
+            limit: None,
+            offset: None,
+            provider: None,
+            filters: DimensionParams {
+                agents: None,
+                models: None,
+                projects: None,
+                branches: None,
+                surfaces: None,
+            },
+        };
+        let Json(page) = analytics_messages(axum::extract::Query(params))
+            .await
+            .expect("messages must succeed on empty DB");
+        assert!(page.messages.is_empty(), "empty DB → no messages");
+    }
+
+    #[tokio::test]
+    async fn analytics_messages_clamps_oversized_limit_to_200() {
+        // `?limit=99999` is the "out-of-range pagination" path on
+        // acceptance criterion #4. The handler caps via `.min(200)` so
+        // the request must succeed (no 400, no 500) and return at most
+        // 200 rows. On an empty DB the page is empty; we just pin the
+        // success outcome here.
+        let guard = HomeGuard::new();
+        guard.init_db();
+        let params = MessagesParams {
+            since: None,
+            until: None,
+            search: None,
+            sort_by: None,
+            sort_asc: None,
+            limit: Some(99_999),
+            offset: Some(0),
+            provider: None,
+            filters: DimensionParams {
+                agents: None,
+                models: None,
+                projects: None,
+                branches: None,
+                surfaces: None,
+            },
+        };
+        let Json(page) = analytics_messages(axum::extract::Query(params))
+            .await
+            .expect("oversized limit must not 400");
+        assert!(page.messages.len() <= 200);
+    }
+
+    #[tokio::test]
+    async fn analytics_projects_with_zero_limit_succeeds() {
+        // `--limit 0` is the CLI's "no cap" sentinel (see
+        // `resolve_breakdown_limit`). The handler must accept it and
+        // not fall over on the `.min(100_000)` branch.
+        let guard = HomeGuard::new();
+        guard.init_db();
+        let params = ListParams {
+            since: None,
+            until: None,
+            limit: Some(0),
+            filters: DimensionParams {
+                agents: None,
+                models: None,
+                projects: None,
+                branches: None,
+                surfaces: None,
+            },
+        };
+        let Json(_page) = analytics_projects(axum::extract::Query(params))
+            .await
+            .expect("limit=0 must succeed");
+    }
+
+    #[tokio::test]
+    async fn analytics_filter_options_returns_shape_on_empty_db() {
+        let guard = HomeGuard::new();
+        guard.init_db();
+        let params = FilterOptionsParams { limit: None };
+        let Json(opts) = analytics_filter_options(axum::extract::Query(params))
+            .await
+            .expect("filter_options must succeed on empty DB");
+        let body = serde_json::to_value(&opts).expect("serialize");
+        assert!(body.is_object(), "filter_options is a JSON object");
+    }
+
+    #[tokio::test]
+    async fn analytics_status_snapshot_returns_shape_on_empty_db() {
+        let guard = HomeGuard::new();
+        guard.init_db();
+        let params = SummaryParams {
+            since: None,
+            until: None,
+            provider: None,
+            filters: DimensionParams {
+                agents: None,
+                models: None,
+                projects: None,
+                branches: None,
+                surfaces: None,
+            },
+        };
+        let Json(snapshot) = analytics_status_snapshot(axum::extract::Query(params))
+            .await
+            .expect("status_snapshot must succeed on empty DB");
+        let _ = serde_json::to_value(&snapshot).expect("serialize");
+    }
+
+    #[tokio::test]
+    async fn analytics_schema_version_reports_target_when_db_missing() {
+        // `db_path()` resolves but the file doesn't exist → handler
+        // returns the `exists: false` shape with `current = 0` so a
+        // fresh-install CLI can tell "no DB yet" from "DB at vN".
+        let _guard = HomeGuard::new();
+        let Json(resp) = analytics_schema_version()
+            .await
+            .expect("schema_version must succeed even when DB is absent");
+        assert!(!resp.exists);
+        assert_eq!(resp.current, 0);
+        assert!(resp.target > 0, "target SCHEMA_VERSION must be > 0");
+    }
+
+    #[tokio::test]
+    async fn analytics_branch_detail_404s_for_missing_branch() {
+        // Empty DB → `branch_cost_single` returns None → handler maps
+        // to 404 via the shared `not_found` helper.
+        let guard = HomeGuard::new();
+        guard.init_db();
+        let params = BranchDetailParams {
+            since: None,
+            until: None,
+            repo_id: None,
+        };
+        let err = analytics_branch_detail(
+            axum::extract::Path("nonexistent-branch".to_string()),
+            axum::extract::Query(params),
+        )
+        .await
+        .expect_err("missing branch must 404");
+        assert_eq!(err.0, StatusCode::NOT_FOUND);
+    }
+
+    // ─── Full-router middleware tests ───────────────────────────────────
+    //
+    // The handler-level tests above call the functions directly; the
+    // tests below wire the routes into a Router with the
+    // `require_local_host` middleware so the host-allowlist branch
+    // (the DNS-rebinding defense in #695) is exercised against the
+    // analytics surface specifically.
+
+    fn analytics_test_router() -> Router {
+        Router::new()
+            .route("/analytics/summary", get(analytics_summary))
+            .route("/analytics/messages", get(analytics_messages))
+            .route("/analytics/projects", get(analytics_projects))
+            .layer(from_fn_with_state(
+                super::super::HostAllowlist::for_tests(),
+                super::super::require_local_host,
+            ))
+    }
+
+    fn loopback_request(uri: &str, host: Option<&'static str>) -> Request<Body> {
+        let mut req = Request::builder()
+            .method(Method::GET)
+            .uri(uri)
+            .body(Body::empty())
+            .unwrap();
+        if let Some(h) = host {
+            req.headers_mut().insert(
+                axum::http::header::HOST,
+                axum::http::HeaderValue::from_static(h),
+            );
+        }
+        req.extensions_mut()
+            .insert(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 54545))));
+        req
+    }
+
+    #[tokio::test]
+    async fn analytics_router_rejects_non_local_host_with_403() {
+        // The DNS-rebinding scenario: peer IP is loopback (because the
+        // browser dialed 127.0.0.1) but the Host header is an attacker
+        // name. The middleware must reject before any handler runs.
+        let _guard = HomeGuard::new();
+        let app = analytics_test_router();
+        let req = loopback_request("/analytics/summary", Some("attacker.example"));
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["error"], "invalid Host header");
+    }
+
+    #[tokio::test]
+    async fn analytics_router_accepts_loopback_host_on_summary() {
+        let guard = HomeGuard::new();
+        guard.init_db();
+        let app = analytics_test_router();
+        let req = loopback_request("/analytics/summary", Some("127.0.0.1"));
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn analytics_router_rejects_missing_host_header_with_403() {
+        let _guard = HomeGuard::new();
+        let app = analytics_test_router();
+        let req = loopback_request("/analytics/messages", None);
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    // ─── Bulk empty-DB success tests for the remaining GET breakdowns ──
+    //
+    // These handlers share the same shape: extract `ListParams` /
+    // `DateRangeParams`, spawn-blocking into a query against an empty
+    // DB, paginate or return the raw vec. Coverage-wise they're the
+    // long tail of the module; each adds 5-15 lines of executed code.
+    // Folded into a single test per handler family so the file doesn't
+    // grow a tail of near-identical bodies.
+
+    fn empty_dimension_filters() -> DimensionParams {
+        DimensionParams {
+            agents: None,
+            models: None,
+            projects: None,
+            branches: None,
+            surfaces: None,
+        }
+    }
+
+    fn empty_list_params() -> ListParams {
+        ListParams {
+            since: None,
+            until: None,
+            limit: None,
+            filters: empty_dimension_filters(),
+        }
+    }
+
+    fn empty_date_range_params() -> DateRangeParams {
+        DateRangeParams {
+            since: None,
+            until: None,
+            filters: empty_dimension_filters(),
+        }
+    }
+
+    fn empty_summary_params() -> SummaryParams {
+        SummaryParams {
+            since: None,
+            until: None,
+            provider: None,
+            filters: empty_dimension_filters(),
+        }
+    }
+
+    #[tokio::test]
+    async fn analytics_breakdowns_succeed_on_empty_db() {
+        let guard = HomeGuard::new();
+        guard.init_db();
+
+        let Json(_) = analytics_projects(axum::extract::Query(empty_list_params()))
+            .await
+            .expect("projects");
+        let Json(_) = analytics_non_repo(axum::extract::Query(empty_list_params()))
+            .await
+            .expect("non_repo");
+        let Json(_) = analytics_models(axum::extract::Query(empty_list_params()))
+            .await
+            .expect("models");
+        let Json(_) = analytics_branches(axum::extract::Query(empty_list_params()))
+            .await
+            .expect("branches");
+
+        let tag_params = TagParams {
+            since: None,
+            until: None,
+            key: None,
+            limit: None,
+            filters: empty_dimension_filters(),
+        };
+        let Json(_) = analytics_tags(axum::extract::Query(tag_params))
+            .await
+            .expect("tags");
+
+        let ticket_params = TicketListParams {
+            since: None,
+            until: None,
+            limit: None,
+            filters: empty_dimension_filters(),
+        };
+        let Json(_) = analytics_tickets(axum::extract::Query(ticket_params))
+            .await
+            .expect("tickets");
+
+        let activity_list_params = ActivityListParams {
+            since: None,
+            until: None,
+            limit: None,
+            filters: empty_dimension_filters(),
+        };
+        let Json(_) = analytics_activities(axum::extract::Query(activity_list_params))
+            .await
+            .expect("activities");
+
+        let file_list_params = FileListParams {
+            since: None,
+            until: None,
+            limit: None,
+            filters: empty_dimension_filters(),
+        };
+        let Json(_) = analytics_files(axum::extract::Query(file_list_params))
+            .await
+            .expect("files");
+    }
+
+    #[tokio::test]
+    async fn analytics_date_range_endpoints_succeed_on_empty_db() {
+        let guard = HomeGuard::new();
+        guard.init_db();
+
+        let Json(_) = analytics_providers(axum::extract::Query(empty_date_range_params()))
+            .await
+            .expect("providers");
+        let Json(_) = analytics_surfaces(axum::extract::Query(empty_date_range_params()))
+            .await
+            .expect("surfaces");
+        let Json(_) = analytics_cache_efficiency(axum::extract::Query(empty_date_range_params()))
+            .await
+            .expect("cache_efficiency");
+        let Json(_) = analytics_session_cost_curve(axum::extract::Query(empty_date_range_params()))
+            .await
+            .expect("session_cost_curve");
+        let Json(_) = analytics_cost_confidence(axum::extract::Query(empty_date_range_params()))
+            .await
+            .expect("cost_confidence");
+        let Json(_) = analytics_subagent_cost(axum::extract::Query(empty_date_range_params()))
+            .await
+            .expect("subagent_cost");
+
+        let activity_chart = ActivityChartParams {
+            since: None,
+            until: None,
+            granularity: Some("day".to_string()),
+            tz_offset: None,
+            filters: empty_dimension_filters(),
+        };
+        let Json(_) = analytics_activity(axum::extract::Query(activity_chart))
+            .await
+            .expect("activity (day)");
+    }
+
+    #[tokio::test]
+    async fn analytics_cost_and_audit_succeed_on_empty_db() {
+        let guard = HomeGuard::new();
+        guard.init_db();
+
+        let Json(_) = analytics_cost(axum::extract::Query(empty_summary_params()))
+            .await
+            .expect("cost");
+        let Json(_) = analytics_session_audit().await.expect("session_audit");
+        let Json(_) = analytics_check().await.expect("check");
+    }
+
+    #[tokio::test]
+    async fn analytics_sessions_succeed_on_empty_db() {
+        let guard = HomeGuard::new();
+        guard.init_db();
+
+        let params = SessionsQueryParams {
+            since: None,
+            until: None,
+            search: None,
+            sort_by: None,
+            sort_asc: None,
+            limit: None,
+            offset: None,
+            ticket: None,
+            activity: None,
+            filters: empty_dimension_filters(),
+        };
+        let Json(page) = analytics_sessions(axum::extract::Query(params))
+            .await
+            .expect("sessions");
+        assert!(page.sessions.is_empty());
+
+        let Json(_) = analytics_session_health(axum::extract::Query(SessionHealthParams {
+            session_id: None,
+        }))
+        .await
+        .expect("session_health");
+    }
+
+    #[tokio::test]
+    async fn analytics_session_detail_404s_for_missing_session() {
+        let guard = HomeGuard::new();
+        guard.init_db();
+        let err = analytics_session_detail(axum::extract::Path("deadbeef".to_string()))
+            .await
+            .expect_err("missing session must 404");
+        assert_eq!(err.0, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn analytics_message_detail_404s_for_missing_message() {
+        let guard = HomeGuard::new();
+        guard.init_db();
+        let err = analytics_message_detail(axum::extract::Path("not-a-uuid".to_string()))
+            .await
+            .expect_err("missing message must 404");
+        assert_eq!(err.0, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn analytics_ticket_and_activity_detail_404_for_missing_keys() {
+        let guard = HomeGuard::new();
+        guard.init_db();
+        let ticket_err = analytics_ticket_detail(
+            axum::extract::Path("ENG-999".to_string()),
+            axum::extract::Query(TicketDetailParams {
+                since: None,
+                until: None,
+                repo_id: None,
+            }),
+        )
+        .await
+        .expect_err("missing ticket must 404");
+        assert_eq!(ticket_err.0, StatusCode::NOT_FOUND);
+
+        let activity_err = analytics_activity_detail(
+            axum::extract::Path("bugfix".to_string()),
+            axum::extract::Query(ActivityDetailParams {
+                since: None,
+                until: None,
+                repo_id: None,
+            }),
+        )
+        .await
+        .expect_err("missing activity must 404");
+        assert_eq!(activity_err.0, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn analytics_file_detail_404s_for_missing_repo_relative_path() {
+        let guard = HomeGuard::new();
+        guard.init_db();
+        let err = analytics_file_detail(
+            axum::extract::Path("src/lib.rs".to_string()),
+            axum::extract::Query(FileDetailParams {
+                since: None,
+                until: None,
+                repo_id: None,
+            }),
+        )
+        .await
+        .expect_err("missing file must 404");
+        assert_eq!(err.0, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn analytics_router_400s_on_unparseable_query() {
+        // `limit=` is a string the `Option<usize>` deserializer can't
+        // accept — axum maps the extractor failure to 400. Pins the
+        // contract that bad query shapes don't bypass to a 500.
+        let _guard = HomeGuard::new();
+        let app = analytics_test_router();
+        let req = loopback_request("/analytics/projects?limit=not-a-number", Some("127.0.0.1"));
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+}
