@@ -1,5 +1,17 @@
 # Changelog
 
+## 8.5.2 — unreleased
+
+8.5.2 is the polish-release umbrella tracked by #798. No user-visible behaviour changes. `api_version` stays at `3`.
+
+### Internal — 8.5.2
+
+- **Dead code sweep: `cargo-udeps`, `cargo-machete`, `clippy -W unreachable_pub -W dead_code`** (#806) — workspace-wide hygiene pass for the 8.5.2 release. `cargo machete` and `cargo +nightly udeps --workspace --all-targets` both report clean. `cargo clippy --workspace --all-targets -- -W dead_code -W unreachable_pub` reported 255 `unreachable_pub` items across the binary crates (`budi-cli`, `budi-daemon`) and the workspace-private `budi-core` library; all were mechanically narrowed to `pub(crate)` via `clippy --fix`, since neither crate has external API consumers. The surviving `#[allow(dead_code)]` annotations now carry one-line explanations (added one for `PlatformFamily` in `crates/budi-core/src/legacy_proxy.rs`, whose variants are constructed via cfg-gated branches that look dead per-target but are required for cross-platform tests). One redundant `#[allow(dead_code)]` was dropped from `parse_session_dir_for_tests` in `crates/budi-core/src/providers/copilot_chat/jetbrains.rs` since it is exercised by the sibling test module. No `#[deprecated]` items, no `#[cfg(feature = "...")]` gates, and no unused workspace dependencies were found.
+
+### Cross-repo lockstep
+
+- No cross-repo changes required.
+
 ## 8.5.1 — 2026-05-13
 
 8.5.1 is the v8.5.0 followup release that closes the four post-release smoke-test cuts surfaced on 2026-05-12: an autostart regression that left the macOS LaunchAgent in `not running` after any clean shutdown (statusline silently rendered `$0.00`), a Copilot Chat tailer noise source that made a healthy parser look like a shape regression in `budi doctor`, a JetBrains Phase 2 resolver gap where extracted `file://` URIs landed with `repo_id = NULL` and no diagnostic, and a longstanding pipeline gap where the `session_title` constant existed but no enricher emitted it — forcing the v8.5.0 backfill to re-walk session dirs on every sync tick. `api_version` stays at `3`.

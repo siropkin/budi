@@ -12,18 +12,18 @@ use reqwest::blocking::Client;
 
 use crate::HEALTH_TIMEOUT_SECS;
 
-pub fn daemon_client_with_timeout(timeout: Duration) -> Result<Client> {
+pub(crate) fn daemon_client_with_timeout(timeout: Duration) -> Result<Client> {
     Client::builder()
         .timeout(timeout)
         .build()
         .context("Failed to construct HTTP client")
 }
 
-pub fn daemon_health(config: &BudiConfig) -> bool {
+pub(crate) fn daemon_health(config: &BudiConfig) -> bool {
     daemon_health_with_timeout(config, Duration::from_secs(HEALTH_TIMEOUT_SECS))
 }
 
-pub fn daemon_health_with_timeout(config: &BudiConfig, timeout: Duration) -> bool {
+pub(crate) fn daemon_health_with_timeout(config: &BudiConfig, timeout: Duration) -> bool {
     let Ok(client) = daemon_client_with_timeout(timeout) else {
         return false;
     };
@@ -49,11 +49,11 @@ fn startup_timeout_retries() -> usize {
         .unwrap_or(80) // default: 80 retries * ~650ms = ~52s
 }
 
-pub fn ensure_daemon_running(repo_root: Option<&Path>, config: &BudiConfig) -> Result<()> {
+pub(crate) fn ensure_daemon_running(repo_root: Option<&Path>, config: &BudiConfig) -> Result<()> {
     ensure_daemon_running_with_binary(repo_root, config, None)
 }
 
-pub fn ensure_daemon_running_with_binary(
+pub(crate) fn ensure_daemon_running_with_binary(
     repo_root: Option<&Path>,
     config: &BudiConfig,
     daemon_bin_override: Option<&Path>,
@@ -187,7 +187,7 @@ fn daemon_version_equals(config: &BudiConfig, expected: &str) -> bool {
 ///
 /// No-op when the daemon already reports the expected version (the brew /
 /// launchd respawn already picked up the new binary on its own).
-pub fn restart_daemon_for_version_upgrade(
+pub(crate) fn restart_daemon_for_version_upgrade(
     repo_root: Option<&Path>,
     config: &BudiConfig,
     daemon_bin_override: Option<&Path>,
@@ -437,7 +437,7 @@ fn daemon_process_command(pid: u32) -> Option<String> {
     }
 }
 
-pub fn is_budi_daemon_command_for_port(command: &str, port: u16) -> bool {
+pub(crate) fn is_budi_daemon_command_for_port(command: &str, port: u16) -> bool {
     let spaced = format!("--port {port}");
     let inline = format!("--port={port}");
     command.contains("budi-daemon")

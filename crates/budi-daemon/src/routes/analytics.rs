@@ -24,7 +24,7 @@ impl Drop for BusyFlagGuard {
 }
 
 #[derive(serde::Deserialize)]
-pub struct DimensionParams {
+pub(crate) struct DimensionParams {
     #[serde(alias = "agent", alias = "providers")]
     pub agents: Option<String>,
     #[serde(alias = "model")]
@@ -65,7 +65,7 @@ fn parse_dimension_filters(params: &DimensionParams) -> analytics::DimensionFilt
 }
 
 #[derive(serde::Deserialize)]
-pub struct DateRangeParams {
+pub(crate) struct DateRangeParams {
     pub since: Option<String>,
     pub until: Option<String>,
     #[serde(flatten)]
@@ -73,14 +73,14 @@ pub struct DateRangeParams {
 }
 
 #[derive(serde::Deserialize)]
-pub struct BranchDetailParams {
+pub(crate) struct BranchDetailParams {
     pub since: Option<String>,
     pub until: Option<String>,
     pub repo_id: Option<String>,
 }
 
 #[derive(serde::Deserialize)]
-pub struct SummaryParams {
+pub(crate) struct SummaryParams {
     pub since: Option<String>,
     pub until: Option<String>,
     pub provider: Option<String>,
@@ -88,7 +88,7 @@ pub struct SummaryParams {
     pub filters: DimensionParams,
 }
 
-pub async fn analytics_summary(
+pub(crate) async fn analytics_summary(
     Query(params): Query<SummaryParams>,
 ) -> Result<Json<analytics::UsageSummary>, (StatusCode, Json<serde_json::Value>)> {
     let filters = parse_dimension_filters(&params.filters);
@@ -111,7 +111,7 @@ pub async fn analytics_summary(
 }
 
 #[derive(serde::Deserialize)]
-pub struct MessagesParams {
+pub(crate) struct MessagesParams {
     pub since: Option<String>,
     pub until: Option<String>,
     pub search: Option<String>,
@@ -155,7 +155,7 @@ const VALID_SESSION_SORT_BY: &[&str] = &[
 
 const VALID_ACTIVITY_GRANULARITY: &[&str] = &["hour", "day", "week", "month"];
 
-pub async fn analytics_messages(
+pub(crate) async fn analytics_messages(
     Query(params): Query<MessagesParams>,
 ) -> Result<Json<analytics::PaginatedMessages>, (StatusCode, Json<serde_json::Value>)> {
     if let Some(ref sort) = params.sort_by
@@ -194,7 +194,7 @@ pub async fn analytics_messages(
 }
 
 #[derive(serde::Deserialize)]
-pub struct ListParams {
+pub(crate) struct ListParams {
     pub since: Option<String>,
     pub until: Option<String>,
     pub limit: Option<usize>,
@@ -209,7 +209,7 @@ fn resolve_breakdown_limit(requested: Option<usize>) -> usize {
     if raw == 0 { 0 } else { raw.min(100_000) }
 }
 
-pub async fn analytics_projects(
+pub(crate) async fn analytics_projects(
     Query(params): Query<ListParams>,
 ) -> Result<
     Json<analytics::BreakdownPage<analytics::RepoUsage>>,
@@ -239,7 +239,7 @@ pub async fn analytics_projects(
 /// `repo_id` is NULL. Returned as a flat `Vec<RepoUsage>` (no paginated
 /// `(other)` bucket) because the expected cardinality is small — any
 /// single user's non-repo scratch-dir set tops out in the low dozens.
-pub async fn analytics_non_repo(
+pub(crate) async fn analytics_non_repo(
     Query(params): Query<ListParams>,
 ) -> Result<Json<Vec<analytics::RepoUsage>>, (StatusCode, Json<serde_json::Value>)> {
     let limit = resolve_breakdown_limit(params.limit);
@@ -260,7 +260,7 @@ pub async fn analytics_non_repo(
     Ok(Json(result))
 }
 
-pub async fn analytics_models(
+pub(crate) async fn analytics_models(
     Query(params): Query<ListParams>,
 ) -> Result<
     Json<analytics::BreakdownPage<analytics::ModelUsage>>,
@@ -286,7 +286,7 @@ pub async fn analytics_models(
     Ok(Json(analytics::paginate_breakdown(result, limit)))
 }
 
-pub async fn analytics_branches(
+pub(crate) async fn analytics_branches(
     Query(params): Query<ListParams>,
 ) -> Result<
     Json<analytics::BreakdownPage<analytics::BranchCost>>,
@@ -312,7 +312,7 @@ pub async fn analytics_branches(
     Ok(Json(analytics::paginate_breakdown(result, limit)))
 }
 
-pub async fn analytics_cost(
+pub(crate) async fn analytics_cost(
     Query(params): Query<SummaryParams>,
 ) -> Result<Json<cost::CostEstimate>, (StatusCode, Json<serde_json::Value>)> {
     let filters = parse_dimension_filters(&params.filters);
@@ -336,7 +336,7 @@ pub async fn analytics_cost(
 
 /// `GET /analytics/status_snapshot` — summary + cost + providers from one
 /// connection so `budi status` sees a single consistent snapshot (#619).
-pub async fn analytics_status_snapshot(
+pub(crate) async fn analytics_status_snapshot(
     Query(params): Query<SummaryParams>,
 ) -> Result<Json<analytics::StatusSnapshot>, (StatusCode, Json<serde_json::Value>)> {
     let result = tokio::task::spawn_blocking(move || {
@@ -357,7 +357,7 @@ pub async fn analytics_status_snapshot(
 }
 
 #[derive(serde::Deserialize)]
-pub struct ActivityChartParams {
+pub(crate) struct ActivityChartParams {
     pub since: Option<String>,
     pub until: Option<String>,
     pub granularity: Option<String>,
@@ -366,7 +366,7 @@ pub struct ActivityChartParams {
     pub filters: DimensionParams,
 }
 
-pub async fn analytics_activity(
+pub(crate) async fn analytics_activity(
     Query(params): Query<ActivityChartParams>,
 ) -> Result<Json<Vec<analytics::ActivityBucket>>, (StatusCode, Json<serde_json::Value>)> {
     let granularity = params.granularity.unwrap_or_else(|| "day".to_string());
@@ -397,7 +397,7 @@ pub async fn analytics_activity(
     Ok(Json(result))
 }
 
-pub async fn analytics_providers(
+pub(crate) async fn analytics_providers(
     Query(params): Query<DateRangeParams>,
 ) -> Result<Json<Vec<analytics::ProviderStats>>, (StatusCode, Json<serde_json::Value>)> {
     let filters = parse_dimension_filters(&params.filters);
@@ -423,7 +423,7 @@ pub async fn analytics_providers(
 /// (`vscode` / `cursor` / `jetbrains` / `terminal` / `unknown`). Empty
 /// surfaces (no rows in window) are excluded so a single-host install
 /// never sees three empty rows.
-pub async fn analytics_surfaces(
+pub(crate) async fn analytics_surfaces(
     Query(params): Query<DateRangeParams>,
 ) -> Result<Json<Vec<analytics::SurfaceStats>>, (StatusCode, Json<serde_json::Value>)> {
     let filters = parse_dimension_filters(&params.filters);
@@ -451,7 +451,7 @@ pub(crate) struct ProviderInfo {
 }
 
 #[derive(serde::Serialize)]
-pub struct SchemaVersionResponse {
+pub(crate) struct SchemaVersionResponse {
     pub current: u32,
     pub target: u32,
     pub exists: bool,
@@ -460,7 +460,7 @@ pub struct SchemaVersionResponse {
 }
 
 #[derive(serde::Serialize)]
-pub struct RepairResponse {
+pub(crate) struct RepairResponse {
     pub from_version: u32,
     pub to_version: u32,
     pub migrated: bool,
@@ -471,7 +471,7 @@ pub struct RepairResponse {
 }
 
 #[derive(serde::Serialize)]
-pub struct IntegrationsResponse {
+pub(crate) struct IntegrationsResponse {
     pub cursor_extension: bool,
     pub statusline: bool,
     pub database: DatabaseStats,
@@ -479,21 +479,21 @@ pub struct IntegrationsResponse {
 }
 
 #[derive(serde::Serialize)]
-pub struct DatabaseStats {
+pub(crate) struct DatabaseStats {
     pub size_mb: f64,
     pub records: i64,
     pub first_record: Option<String>,
 }
 
 #[derive(serde::Serialize)]
-pub struct IntegrationPaths {
+pub(crate) struct IntegrationPaths {
     pub database: String,
     pub config: String,
     pub claude_settings: String,
 }
 
 #[derive(serde::Serialize)]
-pub struct CheckUpdateResponse {
+pub(crate) struct CheckUpdateResponse {
     pub current: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub latest: Option<String>,
@@ -503,7 +503,7 @@ pub struct CheckUpdateResponse {
     pub error: Option<String>,
 }
 
-pub async fn analytics_registered_providers()
+pub(crate) async fn analytics_registered_providers()
 -> Result<Json<Vec<ProviderInfo>>, (StatusCode, Json<serde_json::Value>)> {
     let providers = budi_core::provider::all_providers();
     let list: Vec<ProviderInfo> = providers
@@ -516,7 +516,7 @@ pub async fn analytics_registered_providers()
     Ok(Json(list))
 }
 
-pub async fn analytics_statusline(
+pub(crate) async fn analytics_statusline(
     Query(params): Query<analytics::StatuslineParams>,
 ) -> Result<Json<analytics::StatuslineStats>, (StatusCode, Json<serde_json::Value>)> {
     let result = tokio::task::spawn_blocking(move || {
@@ -540,7 +540,7 @@ pub async fn analytics_statusline(
 }
 
 #[derive(serde::Deserialize)]
-pub struct TagParams {
+pub(crate) struct TagParams {
     pub since: Option<String>,
     pub until: Option<String>,
     pub key: Option<String>,
@@ -549,7 +549,7 @@ pub struct TagParams {
     pub filters: DimensionParams,
 }
 
-pub async fn analytics_tags(
+pub(crate) async fn analytics_tags(
     Query(params): Query<TagParams>,
 ) -> Result<Json<analytics::BreakdownPage<analytics::TagCost>>, (StatusCode, Json<serde_json::Value>)>
 {
@@ -573,7 +573,7 @@ pub async fn analytics_tags(
     Ok(Json(analytics::paginate_breakdown(result, limit)))
 }
 
-pub async fn analytics_branch_detail(
+pub(crate) async fn analytics_branch_detail(
     Path(branch): Path<String>,
     Query(params): Query<BranchDetailParams>,
 ) -> Result<Json<analytics::BranchCost>, (StatusCode, Json<serde_json::Value>)> {
@@ -606,7 +606,7 @@ pub async fn analytics_branch_detail(
 /// `--provider`/`--model`/`--repo` slicing offered by `--branches` is also
 /// available for `--tickets`.
 #[derive(serde::Deserialize)]
-pub struct TicketListParams {
+pub(crate) struct TicketListParams {
     pub since: Option<String>,
     pub until: Option<String>,
     pub limit: Option<usize>,
@@ -615,13 +615,13 @@ pub struct TicketListParams {
 }
 
 #[derive(serde::Deserialize)]
-pub struct TicketDetailParams {
+pub(crate) struct TicketDetailParams {
     pub since: Option<String>,
     pub until: Option<String>,
     pub repo_id: Option<String>,
 }
 
-pub async fn analytics_tickets(
+pub(crate) async fn analytics_tickets(
     Query(params): Query<TicketListParams>,
 ) -> Result<
     Json<analytics::BreakdownPage<analytics::TicketCost>>,
@@ -647,7 +647,7 @@ pub async fn analytics_tickets(
     Ok(Json(analytics::paginate_breakdown(result, limit)))
 }
 
-pub async fn analytics_ticket_detail(
+pub(crate) async fn analytics_ticket_detail(
     Path(ticket_id): Path<String>,
     Query(params): Query<TicketDetailParams>,
 ) -> Result<Json<analytics::TicketCostDetail>, (StatusCode, Json<serde_json::Value>)> {
@@ -683,7 +683,7 @@ pub async fn analytics_ticket_detail(
 
 /// `GET /analytics/activities` query params. Mirrors `TicketListParams`.
 #[derive(serde::Deserialize)]
-pub struct ActivityListParams {
+pub(crate) struct ActivityListParams {
     pub since: Option<String>,
     pub until: Option<String>,
     pub limit: Option<usize>,
@@ -692,13 +692,13 @@ pub struct ActivityListParams {
 }
 
 #[derive(serde::Deserialize)]
-pub struct ActivityDetailParams {
+pub(crate) struct ActivityDetailParams {
     pub since: Option<String>,
     pub until: Option<String>,
     pub repo_id: Option<String>,
 }
 
-pub async fn analytics_activities(
+pub(crate) async fn analytics_activities(
     Query(params): Query<ActivityListParams>,
 ) -> Result<
     Json<analytics::BreakdownPage<analytics::ActivityCost>>,
@@ -724,7 +724,7 @@ pub async fn analytics_activities(
     Ok(Json(analytics::paginate_breakdown(result, limit)))
 }
 
-pub async fn analytics_activity_detail(
+pub(crate) async fn analytics_activity_detail(
     Path(activity): Path<String>,
     Query(params): Query<ActivityDetailParams>,
 ) -> Result<Json<analytics::ActivityCostDetail>, (StatusCode, Json<serde_json::Value>)> {
@@ -762,7 +762,7 @@ pub async fn analytics_activity_detail(
 // ---------------------------------------------------------------------------
 
 #[derive(serde::Deserialize)]
-pub struct FileListParams {
+pub(crate) struct FileListParams {
     pub since: Option<String>,
     pub until: Option<String>,
     pub limit: Option<usize>,
@@ -771,13 +771,13 @@ pub struct FileListParams {
 }
 
 #[derive(serde::Deserialize)]
-pub struct FileDetailParams {
+pub(crate) struct FileDetailParams {
     pub since: Option<String>,
     pub until: Option<String>,
     pub repo_id: Option<String>,
 }
 
-pub async fn analytics_files(
+pub(crate) async fn analytics_files(
     Query(params): Query<FileListParams>,
 ) -> Result<
     Json<analytics::BreakdownPage<analytics::FileCost>>,
@@ -803,7 +803,7 @@ pub async fn analytics_files(
     Ok(Json(analytics::paginate_breakdown(result, limit)))
 }
 
-pub async fn analytics_file_detail(
+pub(crate) async fn analytics_file_detail(
     Path(file_path): Path<String>,
     Query(params): Query<FileDetailParams>,
 ) -> Result<Json<analytics::FileCostDetail>, (StatusCode, Json<serde_json::Value>)> {
@@ -844,7 +844,7 @@ pub async fn analytics_file_detail(
     }
 }
 
-pub async fn analytics_schema_version()
+pub(crate) async fn analytics_schema_version()
 -> Result<Json<SchemaVersionResponse>, (StatusCode, Json<serde_json::Value>)> {
     let result = tokio::task::spawn_blocking(move || -> anyhow::Result<SchemaVersionResponse> {
         let db_path = analytics::db_path()?;
@@ -872,7 +872,7 @@ pub async fn analytics_schema_version()
     Ok(Json(result))
 }
 
-pub async fn analytics_cache_efficiency(
+pub(crate) async fn analytics_cache_efficiency(
     Query(params): Query<DateRangeParams>,
 ) -> Result<Json<analytics::CacheEfficiency>, (StatusCode, Json<serde_json::Value>)> {
     let filters = parse_dimension_filters(&params.filters);
@@ -892,7 +892,7 @@ pub async fn analytics_cache_efficiency(
     Ok(Json(result))
 }
 
-pub async fn analytics_session_cost_curve(
+pub(crate) async fn analytics_session_cost_curve(
     Query(params): Query<DateRangeParams>,
 ) -> Result<Json<Vec<analytics::SessionCostBucket>>, (StatusCode, Json<serde_json::Value>)> {
     let filters = parse_dimension_filters(&params.filters);
@@ -912,7 +912,7 @@ pub async fn analytics_session_cost_curve(
     Ok(Json(result))
 }
 
-pub async fn analytics_cost_confidence(
+pub(crate) async fn analytics_cost_confidence(
     Query(params): Query<DateRangeParams>,
 ) -> Result<Json<Vec<analytics::CostConfidenceStat>>, (StatusCode, Json<serde_json::Value>)> {
     let filters = parse_dimension_filters(&params.filters);
@@ -932,7 +932,7 @@ pub async fn analytics_cost_confidence(
     Ok(Json(result))
 }
 
-pub async fn analytics_subagent_cost(
+pub(crate) async fn analytics_subagent_cost(
     Query(params): Query<DateRangeParams>,
 ) -> Result<Json<Vec<analytics::SubagentCostStat>>, (StatusCode, Json<serde_json::Value>)> {
     let filters = parse_dimension_filters(&params.filters);
@@ -953,11 +953,11 @@ pub async fn analytics_subagent_cost(
 }
 
 #[derive(serde::Deserialize)]
-pub struct FilterOptionsParams {
+pub(crate) struct FilterOptionsParams {
     pub limit: Option<usize>,
 }
 
-pub async fn analytics_filter_options(
+pub(crate) async fn analytics_filter_options(
     Query(params): Query<FilterOptionsParams>,
 ) -> Result<Json<analytics::FilterOptions>, (StatusCode, Json<serde_json::Value>)> {
     let limit = params.limit.map(|value| value.min(5000));
@@ -973,7 +973,7 @@ pub async fn analytics_filter_options(
 }
 
 #[derive(serde::Deserialize)]
-pub struct SessionsQueryParams {
+pub(crate) struct SessionsQueryParams {
     pub since: Option<String>,
     pub until: Option<String>,
     pub search: Option<String>,
@@ -992,7 +992,7 @@ pub struct SessionsQueryParams {
     pub filters: DimensionParams,
 }
 
-pub async fn analytics_sessions(
+pub(crate) async fn analytics_sessions(
     Query(params): Query<SessionsQueryParams>,
 ) -> Result<Json<analytics::PaginatedSessions>, (StatusCode, Json<serde_json::Value>)> {
     if let Some(ref sort) = params.sort_by
@@ -1044,7 +1044,7 @@ pub async fn analytics_sessions(
 /// Code's `~/.claude/projects/<encoded>/` form and walk for the
 /// most-recent transcript.
 #[derive(serde::Deserialize)]
-pub struct ResolveSessionParams {
+pub(crate) struct ResolveSessionParams {
     pub token: String,
     pub cwd: Option<String>,
 }
@@ -1070,7 +1070,7 @@ pub struct ResolveSessionParams {
 /// - `token=latest` returns the newest session id from the DB.
 /// - Any other token → 400 Bad Request.
 /// - Empty workspace (no sessions at all anywhere) → 404 Not Found.
-pub async fn analytics_resolve_session(
+pub(crate) async fn analytics_resolve_session(
     Query(params): Query<ResolveSessionParams>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
     let token = params.token.trim().to_lowercase();
@@ -1194,7 +1194,7 @@ async fn resolve_sid(prefix: String) -> Result<String, (StatusCode, Json<serde_j
     }
 }
 
-pub async fn analytics_session_detail(
+pub(crate) async fn analytics_session_detail(
     Path(session_id): Path<String>,
 ) -> Result<Json<analytics::SessionListEntry>, (StatusCode, Json<serde_json::Value>)> {
     let sid = resolve_sid(session_id.clone()).await?;
@@ -1213,7 +1213,7 @@ pub async fn analytics_session_detail(
     }
 }
 
-pub async fn analytics_session_tags(
+pub(crate) async fn analytics_session_tags(
     Path(session_id): Path<String>,
 ) -> Result<Json<Vec<analytics::SessionTag>>, (StatusCode, Json<serde_json::Value>)> {
     let sid = resolve_sid(session_id).await?;
@@ -1233,7 +1233,7 @@ pub async fn analytics_session_tags(
     Ok(Json(result))
 }
 
-pub async fn analytics_session_messages(
+pub(crate) async fn analytics_session_messages(
     Path(session_id): Path<String>,
     Query(params): Query<SessionMessagesQueryParams>,
 ) -> Result<Json<analytics::PaginatedMessages>, (StatusCode, Json<serde_json::Value>)> {
@@ -1274,7 +1274,7 @@ pub async fn analytics_session_messages(
     Ok(Json(result))
 }
 
-pub async fn analytics_session_message_curve(
+pub(crate) async fn analytics_session_message_curve(
     Path(session_id): Path<String>,
 ) -> Result<Json<Vec<analytics::SessionMessageCurvePoint>>, (StatusCode, Json<serde_json::Value>)> {
     let sid = resolve_sid(session_id).await?;
@@ -1290,7 +1290,7 @@ pub async fn analytics_session_message_curve(
 }
 
 #[derive(serde::Deserialize)]
-pub struct SessionMessagesQueryParams {
+pub(crate) struct SessionMessagesQueryParams {
     pub roles: Option<String>,
     pub sort_by: Option<String>,
     pub sort_asc: Option<bool>,
@@ -1298,7 +1298,7 @@ pub struct SessionMessagesQueryParams {
     pub offset: Option<usize>,
 }
 
-pub async fn analytics_message_detail(
+pub(crate) async fn analytics_message_detail(
     Path(message_uuid): Path<String>,
 ) -> Result<Json<analytics::MessageDetail>, (StatusCode, Json<serde_json::Value>)> {
     let lookup_uuid = message_uuid.clone();
@@ -1317,11 +1317,11 @@ pub async fn analytics_message_detail(
 }
 
 #[derive(serde::Deserialize)]
-pub struct SessionHealthParams {
+pub(crate) struct SessionHealthParams {
     pub session_id: Option<String>,
 }
 
-pub async fn analytics_session_health(
+pub(crate) async fn analytics_session_health(
     Query(params): Query<SessionHealthParams>,
 ) -> Result<Json<analytics::SessionHealth>, (StatusCode, Json<serde_json::Value>)> {
     // #496 (D-3): resolve an 8-char session prefix (or any prefix) the
@@ -1344,8 +1344,8 @@ pub async fn analytics_session_health(
     Ok(Json(result))
 }
 
-pub async fn analytics_check() -> Result<Json<RepairResponse>, (StatusCode, Json<serde_json::Value>)>
-{
+pub(crate) async fn analytics_check()
+-> Result<Json<RepairResponse>, (StatusCode, Json<serde_json::Value>)> {
     // Read-only diagnostic: opens the DB, asks `migration::check` what
     // would change, and returns the same `RepairResponse` shape as
     // `/admin/repair` so the CLI can render either with one renderer.
@@ -1374,7 +1374,7 @@ pub async fn analytics_check() -> Result<Json<RepairResponse>, (StatusCode, Json
     Ok(Json(result))
 }
 
-pub async fn analytics_repair(
+pub(crate) async fn analytics_repair(
     State(state): State<AppState>,
 ) -> Result<Json<RepairResponse>, (StatusCode, Json<serde_json::Value>)> {
     if state
@@ -1418,7 +1418,7 @@ pub async fn analytics_repair(
     Ok(Json(result))
 }
 
-pub async fn analytics_session_audit()
+pub(crate) async fn analytics_session_audit()
 -> Result<Json<analytics::SessionAudit>, (StatusCode, Json<serde_json::Value>)> {
     let result = tokio::task::spawn_blocking(move || {
         let db_path = analytics::db_path()?;

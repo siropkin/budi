@@ -7,7 +7,7 @@ use crate::StatsFormat;
 use crate::daemon;
 
 /// `budi autostart status` — show current autostart state.
-pub fn cmd_autostart_status(format: StatsFormat) -> Result<()> {
+pub(crate) fn cmd_autostart_status(format: StatsFormat) -> Result<()> {
     if matches!(format, StatsFormat::Json) {
         return cmd_autostart_status_json();
     }
@@ -95,7 +95,7 @@ fn autostart_platform_tag() -> &'static str {
 }
 
 /// `budi autostart install` — install the autostart service.
-pub fn cmd_autostart_install() -> Result<()> {
+pub(crate) fn cmd_autostart_install() -> Result<()> {
     let green = super::ansi("\x1b[32m");
     let yellow = super::ansi("\x1b[33m");
     let reset = super::ansi("\x1b[0m");
@@ -132,7 +132,7 @@ pub fn cmd_autostart_install() -> Result<()> {
 }
 
 /// `budi autostart uninstall` — remove the autostart service.
-pub fn cmd_autostart_uninstall() -> Result<()> {
+pub(crate) fn cmd_autostart_uninstall() -> Result<()> {
     let green = super::ansi("\x1b[32m");
     let reset = super::ansi("\x1b[0m");
 

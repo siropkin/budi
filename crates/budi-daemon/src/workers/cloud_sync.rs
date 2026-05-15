@@ -25,7 +25,11 @@ use budi_core::config::CloudConfig;
 /// every iteration so an api_key rotation (`budi cloud init --force`,
 /// cross-org switch per #559, manager-driven rotation) lands on the next
 /// sync without a daemon restart (#560).
-pub async fn run(db_path: PathBuf, initial_config: CloudConfig, cloud_syncing: Arc<AtomicBool>) {
+pub(crate) async fn run(
+    db_path: PathBuf,
+    initial_config: CloudConfig,
+    cloud_syncing: Arc<AtomicBool>,
+) {
     let mut config = initial_config;
     let mut consecutive_failures: u32 = 0;
     let mut auth_failed = false;

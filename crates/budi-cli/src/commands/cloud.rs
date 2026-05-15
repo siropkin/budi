@@ -50,7 +50,7 @@ const DEFAULT_CLOUD_ENDPOINT: &str = "https://app.getbudi.dev";
 /// hard-erroring. Non-TTY callers still need `--force` as the explicit
 /// escape hatch; the error copy now names the existing org so the user
 /// recognizes what they're about to replace.
-pub fn cmd_cloud_init(
+pub(crate) fn cmd_cloud_init(
     api_key: Option<String>,
     force: bool,
     yes: bool,
@@ -510,7 +510,7 @@ fn describe_source(src: IdentitySource) -> &'static str {
 /// build) and then the regular sync runs. Cloud-side dedup keeps the
 /// re-upload safe even when records overlap with rows the cloud
 /// already has.
-pub fn cmd_cloud_sync(format: StatsFormat, full: bool, yes: bool) -> Result<()> {
+pub(crate) fn cmd_cloud_sync(format: StatsFormat, full: bool, yes: bool) -> Result<()> {
     let client = DaemonClient::connect()?;
 
     let reset_removed = if full {
@@ -576,7 +576,7 @@ fn render_full_reset_preamble(removed: usize) {
 }
 
 /// `budi cloud status` — report cloud sync readiness and last-synced-at.
-pub fn cmd_cloud_status(format: StatsFormat) -> Result<()> {
+pub(crate) fn cmd_cloud_status(format: StatsFormat) -> Result<()> {
     let client = DaemonClient::connect()?;
     let body = client.cloud_status()?;
 
@@ -601,7 +601,7 @@ pub fn cmd_cloud_status(format: StatsFormat) -> Result<()> {
 /// background tick would — that way a manual reset can never race a
 /// concurrent envelope build that already read the about-to-be-deleted
 /// watermark.
-pub fn cmd_cloud_reset(yes: bool, format: StatsFormat) -> Result<()> {
+pub(crate) fn cmd_cloud_reset(yes: bool, format: StatsFormat) -> Result<()> {
     let cfg = load_cloud_config();
     if !confirm_reset(&cfg, yes)? {
         if matches!(format, StatsFormat::Json) {

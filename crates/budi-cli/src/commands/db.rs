@@ -40,7 +40,7 @@ use crate::commands::ansi;
 /// scripts (`budi db check && deploy`) can branch on the result. Repair
 /// mode (`/admin/repair`) is the old `db repair` behaviour: applies the
 /// migration, fixes additive drift, and prints a green ✓.
-pub fn cmd_db_check(fix: bool) -> Result<()> {
+pub(crate) fn cmd_db_check(fix: bool) -> Result<()> {
     let client = DaemonClient::connect()?;
     let result = if fix {
         client.repair()?
@@ -146,7 +146,7 @@ const DB_ALIAS_NUDGE_MARKER: &str = "db-alias-nudge";
 /// from 8.2.x. The file is a single-line UTC-date marker with no data;
 /// failure to remove it (missing budi home, permission denied) is
 /// silently ignored so this never fails an upgrade.
-pub fn remove_db_alias_nudge_marker() {
+pub(crate) fn remove_db_alias_nudge_marker() {
     if let Ok(home) = config::budi_home_dir() {
         let _ = fs::remove_file(home.join(DB_ALIAS_NUDGE_MARKER));
     }

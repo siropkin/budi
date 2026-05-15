@@ -269,7 +269,7 @@ fn format_breakdown_row_text(
     }
 }
 
-pub fn period_label(period: StatsPeriod) -> String {
+pub(crate) fn period_label(period: StatsPeriod) -> String {
     match period {
         StatsPeriod::Today => "Today".to_string(),
         StatsPeriod::Week => "Last 7 days".to_string(),
@@ -284,7 +284,7 @@ pub fn period_label(period: StatsPeriod) -> String {
     }
 }
 
-pub fn period_key(period: StatsPeriod) -> String {
+pub(crate) fn period_key(period: StatsPeriod) -> String {
     match period {
         StatsPeriod::Today => "today".to_string(),
         StatsPeriod::Week => "week".to_string(),
@@ -343,14 +343,14 @@ pub(crate) fn period_since_date(today: NaiveDate, period: StatsPeriod) -> Option
     }
 }
 
-pub fn period_date_range(period: StatsPeriod) -> (Option<String>, Option<String>) {
+pub(crate) fn period_date_range(period: StatsPeriod) -> (Option<String>, Option<String>) {
     let today = Local::now().date_naive();
     let since = period_since_date(today, period).map(local_midnight_to_utc);
     (since, None)
 }
 
 #[allow(clippy::too_many_arguments)]
-pub fn cmd_stats(
+pub(crate) fn cmd_stats(
     period: StatsPeriod,
     projects: bool,
     branches: bool,
@@ -2684,7 +2684,7 @@ fn format_breakdown_footer<T>(
 
 // ─── Formatting Utilities ────────────────────────────────────────────────────
 
-pub fn format_tokens(n: u64) -> String {
+pub(crate) fn format_tokens(n: u64) -> String {
     if n >= 1_000_000_000 {
         format!("{:.1}B", n as f64 / 1_000_000_000.0)
     } else if n >= 1_000_000 {
@@ -2696,9 +2696,9 @@ pub fn format_tokens(n: u64) -> String {
     }
 }
 
-pub use super::format_cost;
+pub(crate) use super::format_cost;
 
-pub fn format_cost_cents(cents: f64) -> String {
+pub(crate) fn format_cost_cents(cents: f64) -> String {
     format_cost(cents / 100.0)
 }
 
@@ -2708,7 +2708,7 @@ pub fn format_cost_cents(cents: f64) -> String {
 /// the #450 acceptance for "Single currency format per column type" —
 /// the summary view keeps the humanized `$1.2K` form via
 /// [`format_cost_cents`]; breakdowns use this one.
-pub fn format_cost_cents_fixed(cents: f64) -> String {
+pub(crate) fn format_cost_cents_fixed(cents: f64) -> String {
     let dollars = cents / 100.0;
     let sign = if dollars < 0.0 { "-" } else { "" };
     let magnitude = dollars.abs();

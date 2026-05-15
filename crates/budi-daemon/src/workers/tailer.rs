@@ -107,7 +107,7 @@ const MAX_TAIL_BYTES: usize = 32 * 1024 * 1024;
 /// rechecks filesystem-level availability, not config flags). If the
 /// snapshot has no enabled providers at all, the worker exits
 /// immediately because no later event could give it work.
-pub async fn run(db_path: PathBuf, shutdown: Arc<AtomicBool>) {
+pub(crate) async fn run(db_path: PathBuf, shutdown: Arc<AtomicBool>) {
     let agents_config = budi_core::config::load_agents_config();
     let providers: Vec<Box<dyn Provider>> = match &agents_config {
         Some(cfg) => budi_core::provider::all_providers()
@@ -137,7 +137,7 @@ pub async fn run(db_path: PathBuf, shutdown: Arc<AtomicBool>) {
 /// do not re-filter the set by `is_available()` — a provider whose home
 /// directory appears mid-run should start producing routes on the very
 /// next backstop tick without any daemon restart.
-pub fn run_blocking(
+pub(crate) fn run_blocking(
     db_path: PathBuf,
     providers: Vec<Box<dyn Provider>>,
     shutdown: Arc<AtomicBool>,

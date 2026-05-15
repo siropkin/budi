@@ -15,7 +15,7 @@ use serde_json::{Value, json};
 )]
 #[clap(rename_all = "kebab-case")]
 #[serde(rename_all = "kebab-case")]
-pub enum IntegrationComponent {
+pub(crate) enum IntegrationComponent {
     #[value(skip)]
     ClaudeCodeHooks,
     #[value(skip)]
@@ -28,7 +28,7 @@ pub enum IntegrationComponent {
 }
 
 impl IntegrationComponent {
-    pub fn display_name(self) -> &'static str {
+    pub(crate) fn display_name(self) -> &'static str {
         match self {
             Self::ClaudeCodeHooks => "Claude Code hooks",
             Self::ClaudeCodeOtel => "Claude Code OTEL",
@@ -39,7 +39,7 @@ impl IntegrationComponent {
         }
     }
 
-    pub fn is_removed_surface(self) -> bool {
+    pub(crate) fn is_removed_surface(self) -> bool {
         matches!(
             self,
             Self::ClaudeCodeHooks | Self::ClaudeCodeOtel | Self::CursorHooks
@@ -49,22 +49,22 @@ impl IntegrationComponent {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(default)]
-pub struct IntegrationPreferences {
+pub(crate) struct IntegrationPreferences {
     pub enabled: BTreeSet<IntegrationComponent>,
 }
 
 #[derive(Debug, Default)]
-pub struct InstallReport {
+pub(crate) struct InstallReport {
     pub warnings: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum InstallState {
+pub(crate) enum InstallState {
     Installed,
     NotInstalled,
 }
 
-pub fn cmd_integrations(action: crate::IntegrationAction) -> Result<()> {
+pub(crate) fn cmd_integrations(action: crate::IntegrationAction) -> Result<()> {
     let cfg = crate::client::DaemonClient::load_config();
     match action {
         crate::IntegrationAction::List => {
@@ -157,7 +157,7 @@ pub fn cmd_integrations(action: crate::IntegrationAction) -> Result<()> {
     }
 }
 
-pub fn default_recommended_components() -> BTreeSet<IntegrationComponent> {
+pub(crate) fn default_recommended_components() -> BTreeSet<IntegrationComponent> {
     [
         IntegrationComponent::ClaudeCodeStatusline,
         IntegrationComponent::ClaudeCodeBudiSkill,
@@ -167,7 +167,7 @@ pub fn default_recommended_components() -> BTreeSet<IntegrationComponent> {
     .collect()
 }
 
-pub fn all_components() -> BTreeSet<IntegrationComponent> {
+pub(crate) fn all_components() -> BTreeSet<IntegrationComponent> {
     [
         IntegrationComponent::ClaudeCodeStatusline,
         IntegrationComponent::ClaudeCodeBudiSkill,
@@ -177,11 +177,11 @@ pub fn all_components() -> BTreeSet<IntegrationComponent> {
     .collect()
 }
 
-pub fn integrations_config_path() -> Result<PathBuf> {
+pub(crate) fn integrations_config_path() -> Result<PathBuf> {
     Ok(config::budi_config_dir()?.join("integrations.toml"))
 }
 
-pub fn load_preferences() -> IntegrationPreferences {
+pub(crate) fn load_preferences() -> IntegrationPreferences {
     let path = match integrations_config_path() {
         Ok(p) => p,
         Err(_) => return IntegrationPreferences::default(),
@@ -196,7 +196,7 @@ pub fn load_preferences() -> IntegrationPreferences {
     toml::from_str::<IntegrationPreferences>(&raw).unwrap_or_default()
 }
 
-pub fn save_preferences(prefs: &IntegrationPreferences) -> Result<()> {
+pub(crate) fn save_preferences(prefs: &IntegrationPreferences) -> Result<()> {
     let path = integrations_config_path()?;
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)
@@ -207,7 +207,7 @@ pub fn save_preferences(prefs: &IntegrationPreferences) -> Result<()> {
     Ok(())
 }
 
-pub fn detect_component_state(
+pub(crate) fn detect_component_state(
     config: &config::BudiConfig,
     component: IntegrationComponent,
 ) -> InstallState {
@@ -226,7 +226,7 @@ pub fn detect_component_state(
     }
 }
 
-pub fn infer_preferences_from_system(config: &config::BudiConfig) -> IntegrationPreferences {
+pub(crate) fn infer_preferences_from_system(config: &config::BudiConfig) -> IntegrationPreferences {
     let mut prefs = IntegrationPreferences::default();
     for component in all_components() {
         if matches!(
@@ -239,7 +239,7 @@ pub fn infer_preferences_from_system(config: &config::BudiConfig) -> Integration
     prefs
 }
 
-pub fn install_selected(
+pub(crate) fn install_selected(
     config: &config::BudiConfig,
     selected: &BTreeSet<IntegrationComponent>,
 ) -> InstallReport {
@@ -322,7 +322,7 @@ fn drop_removed_surfaces(selected: &mut BTreeSet<IntegrationComponent>) -> Vec<S
     warnings
 }
 
-pub fn refresh_enabled_integrations(config: &config::BudiConfig) -> InstallReport {
+pub(crate) fn refresh_enabled_integrations(config: &config::BudiConfig) -> InstallReport {
     let mut prefs = load_preferences();
     if prefs.enabled.is_empty() {
         prefs = infer_preferences_from_system(config);
@@ -712,7 +712,7 @@ fn install_cursor_extension(warnings: &mut Vec<String>) {
 }
 
 /// Check if the `cursor` CLI is on PATH (or at the well-known macOS location).
-pub fn find_cursor_cli() -> Option<String> {
+pub(crate) fn find_cursor_cli() -> Option<String> {
     let candidates = if cfg!(target_os = "macos") {
         vec![
             "cursor".to_string(),
@@ -735,7 +735,7 @@ pub fn find_cursor_cli() -> Option<String> {
 }
 
 /// Check if the budi Cursor extension is installed.
-pub fn is_cursor_extension_installed() -> bool {
+pub(crate) fn is_cursor_extension_installed() -> bool {
     match find_cursor_cli() {
         Some(cli) => Command::new(cli)
             .arg("--list-extensions")
@@ -753,7 +753,7 @@ pub fn is_cursor_extension_installed() -> bool {
 }
 
 /// Path to the auto-installed `/budi` Claude Code skill file.
-pub fn claude_budi_skill_path() -> Result<PathBuf> {
+pub(crate) fn claude_budi_skill_path() -> Result<PathBuf> {
     let home = budi_core::config::home_dir()?;
     Ok(home
         .join(".claude")
@@ -766,7 +766,7 @@ pub fn claude_budi_skill_path() -> Result<PathBuf> {
 /// constant so the install path and the e2e regression guard agree on
 /// the byte-for-byte contents (idempotent re-install must leave a
 /// pre-existing file with these bytes untouched).
-pub const BUDI_SKILL_CONTENTS: &str = "---\n\
+pub(crate) const BUDI_SKILL_CONTENTS: &str = "---\n\
 name: budi\n\
 description: \"Show live session vitals — context bloat, cache hit rate, retry loops, cost acceleration — for the current Claude Code session. Buddy is back, but now it's budi.\"\n\
 ---\n\
@@ -818,14 +818,14 @@ fn install_claude_budi_skill() -> Result<BudiSkillApply> {
     Ok(BudiSkillApply::Created)
 }
 
-pub fn claude_budi_skill_installed() -> bool {
+pub(crate) fn claude_budi_skill_installed() -> bool {
     let Ok(path) = claude_budi_skill_path() else {
         return false;
     };
     path.is_file()
 }
 
-pub fn claude_statusline_installed() -> bool {
+pub(crate) fn claude_statusline_installed() -> bool {
     let Some(settings) = read_claude_settings() else {
         return false;
     };
@@ -836,21 +836,21 @@ pub fn claude_statusline_installed() -> bool {
         .is_some_and(super::statusline::statusline_has_budi)
 }
 
-pub fn claude_hooks_installed() -> bool {
+pub(crate) fn claude_hooks_installed() -> bool {
     let Some(settings) = read_claude_settings() else {
         return false;
     };
     budi_core::integrations::validate_cc_hooks(&settings).0
 }
 
-pub fn claude_otel_installed(config: &config::BudiConfig) -> bool {
+pub(crate) fn claude_otel_installed(config: &config::BudiConfig) -> bool {
     let Some(settings) = read_claude_settings() else {
         return false;
     };
     budi_core::integrations::check_otel_config(&settings, config.daemon_port)
 }
 
-pub fn cursor_hooks_installed() -> bool {
+pub(crate) fn cursor_hooks_installed() -> bool {
     let home = match budi_core::config::home_dir() {
         Ok(h) => h,
         Err(_) => return false,

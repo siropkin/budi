@@ -49,7 +49,7 @@ pub(crate) const DISABLE_ENV_VAR: &str = "BUDI_PRICING_REFRESH";
 /// the tailer. Stops when `shutdown` is set; shutdown is checked between
 /// ticks and during the 24 h sleep via a poll loop so clean exits don't
 /// wait 24 h.
-pub async fn run(db_path: PathBuf, shutdown: Arc<AtomicBool>) {
+pub(crate) async fn run(db_path: PathBuf, shutdown: Arc<AtomicBool>) {
     // Warm-load the on-disk cache if present — the daemon may have been
     // restarted between refreshes and the embedded baseline in `pricing`
     // would otherwise serve until the next tick.
@@ -238,7 +238,7 @@ async fn tick(db_path: &std::path::Path) {
 /// by the row-level sanity partition. Pre-8.3.1 the same rows would
 /// have whole-payload-rejected the refresh (ADR-0091 §2 amendment).
 #[derive(Debug, serde::Serialize)]
-pub struct RefreshReport {
+pub(crate) struct RefreshReport {
     pub version: u32,
     pub known_model_count: usize,
     pub backfilled_rows: usize,
@@ -255,7 +255,7 @@ pub struct RefreshReport {
 /// written to the cache, and the rejected rows are returned via
 /// `RefreshReport.rejected_upstream_rows` + surfaced on
 /// `GET /pricing/status`.
-pub fn run_tick(db_path: &std::path::Path) -> anyhow::Result<RefreshReport> {
+pub(crate) fn run_tick(db_path: &std::path::Path) -> anyhow::Result<RefreshReport> {
     let bytes = fetch_upstream()?;
     let entries = pricing::parse_entries(&bytes)?;
     let now = chrono::Utc::now().to_rfc3339();

@@ -37,7 +37,7 @@ const POLL_INTERVAL: Duration = Duration::from_millis(2_000);
 /// `json`: emit a structured per-agent summary on stdout instead of the
 /// text table. Progress chatter is suppressed in JSON mode so stdout stays
 /// parseable.
-pub fn cmd_import(force: bool, json: bool) -> Result<()> {
+pub(crate) fn cmd_import(force: bool, json: bool) -> Result<()> {
     let client = DaemonClient::connect()?;
     let quiet = json;
     let is_tty = std::io::stdout().is_terminal();

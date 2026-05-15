@@ -9,7 +9,7 @@ use crate::{StatsFormat, commands};
 use super::ansi;
 
 /// Quick operational overview: daemon and today's cost.
-pub fn cmd_status(format: StatsFormat) -> Result<()> {
+pub(crate) fn cmd_status(format: StatsFormat) -> Result<()> {
     if matches!(format, StatsFormat::Json) {
         return cmd_status_json();
     }

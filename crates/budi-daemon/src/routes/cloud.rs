@@ -36,7 +36,7 @@ const RESULT_DISABLED: &str = "disabled";
 
 /// `GET /cloud/status` — report cloud sync readiness and freshness.
 /// No network call; reads `cloud.toml` and the local watermarks.
-pub async fn cloud_status() -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+pub(crate) async fn cloud_status() -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let snapshot = tokio::task::spawn_blocking(read_status_snapshot)
         .await
         .map_err(|e| super::internal_error(anyhow::anyhow!("cloud status task panicked: {e}")))?;
@@ -55,7 +55,7 @@ fn read_status_snapshot() -> budi_core::cloud_sync::CloudSyncStatus {
 ///
 /// Returns 409 if another cloud sync is already running (either from the
 /// background worker or a prior CLI invocation).
-pub async fn cloud_sync(
+pub(crate) async fn cloud_sync(
     State(state): State<AppState>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let cfg = config::load_cloud_config();
@@ -130,7 +130,7 @@ pub async fn cloud_sync(
 /// re-push everything anyway. Holding the flag keeps the sequencing
 /// honest. Returns 409 when the worker (or another `cloud sync`) is
 /// already running so the operator can re-run after it finishes.
-pub async fn cloud_reset(
+pub(crate) async fn cloud_reset(
     State(state): State<AppState>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     if state

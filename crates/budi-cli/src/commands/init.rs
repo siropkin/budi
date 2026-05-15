@@ -8,7 +8,7 @@ use budi_core::provider::Provider;
 
 use crate::daemon::ensure_daemon_running;
 
-pub fn cmd_init(no_integrations: bool, no_daemon: bool) -> Result<()> {
+pub(crate) fn cmd_init(no_integrations: bool, no_daemon: bool) -> Result<()> {
     clean_duplicate_binaries();
     check_daemon_binary_and_version();
 

@@ -1,7 +1,7 @@
-pub mod analytics;
-pub mod cloud;
-pub mod hooks;
-pub mod pricing;
+pub(crate) mod analytics;
+pub(crate) mod cloud;
+pub(crate) mod hooks;
+pub(crate) mod pricing;
 
 use std::collections::HashSet;
 use std::net::SocketAddr;
@@ -14,7 +14,7 @@ use axum::http::header;
 use axum::middleware::Next;
 use axum::response::Response;
 
-pub fn internal_error(err: anyhow::Error) -> (StatusCode, Json<serde_json::Value>) {
+pub(crate) fn internal_error(err: anyhow::Error) -> (StatusCode, Json<serde_json::Value>) {
     // Log the full `anyhow` chain (with `{:#}`) so `daemon.log` captures the
     // root cause for ops, even though the HTTP response stays opaque on
     // purpose (no stack frames leaked to loopback consumers).
@@ -53,7 +53,10 @@ pub fn internal_error(err: anyhow::Error) -> (StatusCode, Json<serde_json::Value
 /// handler, and any future endpoints emit byte-identical bodies — which
 /// the CLI in `budi-cli::client::check_response` then pattern-matches on
 /// to render an actionable error instead of "Daemon returned 500".
-pub fn schema_unavailable(current: u32, target: u32) -> (StatusCode, Json<serde_json::Value>) {
+pub(crate) fn schema_unavailable(
+    current: u32,
+    target: u32,
+) -> (StatusCode, Json<serde_json::Value>) {
     (
         StatusCode::SERVICE_UNAVAILABLE,
         Json(serde_json::json!({
@@ -78,7 +81,7 @@ pub fn schema_unavailable(current: u32, target: u32) -> (StatusCode, Json<serde_
 /// reads (setenv across threads is unsound on macOS, which previously
 /// caused flaky CI — see #366 PR history).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SchemaStatus {
+pub(crate) enum SchemaStatus {
     /// DB is absent, unreadable, or at exactly the expected version — let
     /// the request proceed.  A missing file is normal on first boot; the
     /// daemon's `open_db_with_migration` at startup is what materializes
@@ -98,7 +101,7 @@ pub enum SchemaStatus {
 /// Pure function that inspects the SQLite DB at `db_path` and classifies
 /// the schema state.  No env-var reads, no global state — tests drive
 /// this directly with a tempdir path.
-pub fn schema_status_for(db_path: &std::path::Path) -> SchemaStatus {
+pub(crate) fn schema_status_for(db_path: &std::path::Path) -> SchemaStatus {
     if !db_path.exists() {
         return SchemaStatus::Proceed;
     }
@@ -123,7 +126,7 @@ pub fn schema_status_for(db_path: &std::path::Path) -> SchemaStatus {
 ///
 /// Thin wrapper over [`schema_status_for`]: resolves `db_path()` from env,
 /// runs the pure classifier, maps to an HTTP response.
-pub async fn require_current_schema(
+pub(crate) async fn require_current_schema(
     req: Request,
     next: Next,
 ) -> Result<Response, (StatusCode, Json<serde_json::Value>)> {
@@ -155,21 +158,21 @@ pub async fn require_current_schema(
     }
 }
 
-pub fn bad_request(msg: impl std::fmt::Display) -> (StatusCode, Json<serde_json::Value>) {
+pub(crate) fn bad_request(msg: impl std::fmt::Display) -> (StatusCode, Json<serde_json::Value>) {
     (
         StatusCode::BAD_REQUEST,
         Json(serde_json::json!({ "ok": false, "error": format!("{msg}") })),
     )
 }
 
-pub fn not_found(msg: impl std::fmt::Display) -> (StatusCode, Json<serde_json::Value>) {
+pub(crate) fn not_found(msg: impl std::fmt::Display) -> (StatusCode, Json<serde_json::Value>) {
     (
         StatusCode::NOT_FOUND,
         Json(serde_json::json!({ "ok": false, "error": format!("{msg}") })),
     )
 }
 
-pub fn forbidden(msg: impl std::fmt::Display) -> (StatusCode, Json<serde_json::Value>) {
+pub(crate) fn forbidden(msg: impl std::fmt::Display) -> (StatusCode, Json<serde_json::Value>) {
     (
         StatusCode::FORBIDDEN,
         Json(serde_json::json!({ "ok": false, "error": format!("{msg}") })),
@@ -198,12 +201,12 @@ pub fn forbidden(msg: impl std::fmt::Display) -> (StatusCode, Json<serde_json::V
 /// Anything else returns `403` with `invalid Host header` and a
 /// `tracing::warn!` line for ops visibility.
 #[derive(Clone, Debug)]
-pub struct HostAllowlist {
+pub(crate) struct HostAllowlist {
     hosts: Arc<HashSet<String>>,
 }
 
 impl HostAllowlist {
-    pub fn new(configured_host: &str, port: u16) -> Self {
+    pub(crate) fn new(configured_host: &str, port: u16) -> Self {
         let mut hosts = HashSet::new();
         let bases = ["127.0.0.1", "[::1]", "localhost", configured_host];
         for base in bases {
@@ -226,11 +229,11 @@ impl HostAllowlist {
     /// are router-level unit tests where the Host header is unset.
     /// Production callers always go through `HostAllowlist::new`.
     #[cfg(test)]
-    pub fn for_tests() -> Self {
+    pub(crate) fn for_tests() -> Self {
         Self::new("127.0.0.1", 0)
     }
 
-    pub fn allows(&self, host: &str) -> bool {
+    pub(crate) fn allows(&self, host: &str) -> bool {
         self.hosts.contains(host)
     }
 }
@@ -239,7 +242,7 @@ impl HostAllowlist {
 /// allowlist.  Layered onto every route (public and protected) to defend
 /// against DNS-rebinding (#695) — the peer IP is loopback in that
 /// scenario, so `require_loopback` alone is insufficient.
-pub async fn require_local_host(
+pub(crate) async fn require_local_host(
     State(allowlist): State<HostAllowlist>,
     req: Request,
     next: Next,
@@ -272,7 +275,7 @@ pub async fn require_local_host(
     }
 }
 
-pub async fn require_loopback(
+pub(crate) async fn require_loopback(
     req: Request,
     next: Next,
 ) -> Result<Response, (StatusCode, Json<serde_json::Value>)> {

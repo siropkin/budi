@@ -28,7 +28,7 @@ use crate::client::DaemonClient;
 use super::{ansi, format_cost};
 
 /// `budi pricing` (bare) and `budi pricing status` — read-only manifest state.
-pub fn cmd_pricing_status(format: StatsFormat) -> Result<()> {
+pub(crate) fn cmd_pricing_status(format: StatsFormat) -> Result<()> {
     let client = DaemonClient::connect()?;
     let status = client.pricing_status()?;
 
@@ -56,7 +56,7 @@ pub fn cmd_pricing_status(format: StatsFormat) -> Result<()> {
 /// for the hourly worker tick. `--force` skips the `list_version`
 /// short-circuit so the recompute runs even when the list is unchanged.
 /// #732.
-pub fn cmd_pricing_recompute(format: StatsFormat, force: bool) -> Result<()> {
+pub(crate) fn cmd_pricing_recompute(format: StatsFormat, force: bool) -> Result<()> {
     let client = DaemonClient::connect()?;
     let body = client.pricing_recompute(force)?;
     let status = client.pricing_status()?;
@@ -82,7 +82,7 @@ pub fn cmd_pricing_recompute(format: StatsFormat, force: bool) -> Result<()> {
 /// own subcommand, matching the `cloud sync` shape. Exit code is `2` on
 /// refresh failure so CI scripts can branch on status without parsing the
 /// body.
-pub fn cmd_pricing_sync(format: StatsFormat) -> Result<()> {
+pub(crate) fn cmd_pricing_sync(format: StatsFormat) -> Result<()> {
     let client = DaemonClient::connect()?;
     let refresh_body = client.pricing_refresh()?;
     let status = client.pricing_status()?;
