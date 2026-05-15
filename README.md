@@ -12,7 +12,7 @@
 brew install siropkin/budi/budi && budi init
 ```
 
-Everything stays on your machine by default. Optional cloud sync pushes aggregated daily metrics to a team dashboard — prompts, code, and responses never leave your machine.
+Everything stays on your machine by default. Optional cloud sync pushes aggregated daily metrics to a cloud dashboard — prompts, code, and responses never leave your machine.
 
 <p align="center">
   <img src="assets/demo.gif" alt="budi CLI demo" width="800">
@@ -21,7 +21,7 @@ Everything stays on your machine by default. Optional cloud sync pushes aggregat
 <details>
 <summary>Cloud dashboard screenshots</summary>
 
-**Overview** — team-wide cost visibility
+**Overview** — cost visibility across your projects and team
 <p align="center">
   <img src="assets/dashboard-overview.png" alt="budi dashboard — cost overview" width="800">
 </p>
@@ -31,7 +31,7 @@ Everything stays on your machine by default. Optional cloud sync pushes aggregat
   <img src="assets/dashboard-repos.png" alt="budi repos" width="800">
 </p>
 
-**Sessions** — recent sessions across the team
+**Sessions** — recent sessions across your machines and team
 <p align="center">
   <img src="assets/dashboard-sessions.png" alt="budi sessions" width="800">
 </p>
@@ -45,7 +45,7 @@ Everything stays on your machine by default. Optional cloud sync pushes aggregat
 - **Repo, branch, and ticket breakdown** — know which project, PR branch, or ticket is driving spend
 - **Session health** — detects context bloat, cache degradation, and cost acceleration with actionable tips
 - **Live status line** in Claude Code, Cursor, and VS Code showing rolling 1d / 7d / 30d spend (VS Code aggregates over Copilot Chat + any other detected provider)
-- **Team dashboard** at [app.getbudi.dev](https://app.getbudi.dev) — optional sync sends only aggregated metrics; prompts and code never leave your machine
+- **Cloud dashboard** at [app.getbudi.dev](https://app.getbudi.dev) — for solo developers and teams; optional sync sends only aggregated metrics, prompts and code never leave your machine
 - **~6 MB Rust binary**, zero config required, minimal footprint
 
 ## Ecosystem
@@ -53,7 +53,7 @@ Everything stays on your machine by default. Optional cloud sync pushes aggregat
 | | |
 |---|---|
 | **[budi](https://github.com/siropkin/budi)** ← you are here | Core Rust daemon and CLI |
-| **[budi-cloud](https://github.com/siropkin/budi-cloud)** | Team dashboard and ingest API at [app.getbudi.dev](https://app.getbudi.dev) |
+| **[budi-cloud](https://github.com/siropkin/budi-cloud)** | Cloud dashboard and ingest API at [app.getbudi.dev](https://app.getbudi.dev) — for solo developers and teams |
 | **[budi-cursor](https://github.com/siropkin/budi-cursor)** | VS Code / Cursor status bar extension |
 | **[budi-jetbrains](https://github.com/siropkin/budi-jetbrains)** | JetBrains IDE status bar plugin (Kotlin) — [Marketplace listing](https://plugins.jetbrains.com/plugin/31662-budi) |
 | **[homebrew-budi](https://github.com/siropkin/homebrew-budi)** | Homebrew tap for `brew install siropkin/budi/budi` |
@@ -369,7 +369,7 @@ Data views accept `--period today|week|month|all` (or relative like `7d`, `2w`, 
 | Multi-agent support | **Yes** (Claude Code, Codex CLI, Cursor, Copilot CLI, Copilot Chat) | Claude Code only | Claude Code only |
 | Live local transcript tailing | **Yes** | No | No |
 | Cost history | **Per-message + daily** | Per-session | Current session only |
-| Cloud team dashboard | **Yes** ([app.getbudi.dev](https://app.getbudi.dev)) | No | No |
+| Cloud dashboard | **Yes** ([app.getbudi.dev](https://app.getbudi.dev)) | No | No |
 | Status line + session health | **Yes** (with actionable tips) | No | No |
 | Cost attribution (branch/ticket/file) | **Yes** | No | No |
 | Privacy | Local-first, optional cloud sync (aggregates only) | Local | Built-in |
