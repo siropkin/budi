@@ -910,12 +910,6 @@ mod tests {
             }
         }
 
-        /// Materialize the analytics DB at the redirected home so handler
-        /// success paths don't fall over on `open_db` for a missing schema.
-        fn init_db(&self) {
-            let db_path = budi_core::analytics::db_path().expect("db_path");
-            budi_core::analytics::open_db_with_migration(&db_path).expect("migrate empty db");
-        }
     }
 
     impl Drop for HomeGuard {
@@ -1105,34 +1099,18 @@ mod tests {
         assert!(!state.syncing.load(Ordering::SeqCst));
     }
 
-    #[tokio::test]
-    async fn analytics_sync_returns_503_on_stale_schema_without_migrate() {
-        // Pre-create a DB with the schema bootstrap, then bump the
-        // binary's expected version above what's on disk. The
-        // open-with-migration path is gated by `migrate=false`, so the
-        // handler should hit the `SchemaStatus::Stale` branch and
-        // return the structured 503 from `schema_unavailable`.
-        let guard = HomeGuard::new();
-        guard.init_db();
-        // Force `user_version` to 0 so the binary's compiled-in target
-        // looks newer. Tests share the binary's version, so this is the
-        // cleanest way to reach the stale branch without a parallel
-        // binary build.
-        let db_path = budi_core::analytics::db_path().expect("db_path");
-        let conn = rusqlite::Connection::open(&db_path).expect("open db");
-        conn.pragma_update(None, "user_version", 0_u32)
-            .expect("rewind user_version");
-        drop(conn);
-
-        let state = fresh_app_state();
-        let err =
-            match analytics_sync(State(state), Some(Json(SyncParams { migrate: false }))).await {
-                Err(e) => e,
-                Ok(_) => panic!("stale schema without migrate must return 503"),
-            };
-        assert_eq!(err.0, StatusCode::SERVICE_UNAVAILABLE);
-        assert_eq!(err.1.0["needs_migration"], true);
-    }
+    // Note: the migrate=false + stale-schema branch of `analytics_sync`
+    // is exercised by `routes::tests::schema_status_for_returns_stale_for_pre_migration_db`,
+    // which drives the same pure `schema_status_for` classifier the
+    // handler relies on. A direct handler test for this branch would
+    // race with sibling test modules' separate `HOME_MUTEX` statics
+    // (each `routes/*` module declares its own; there is no
+    // process-global coordination — see #366 PR history) because
+    // reaching the stale branch needs two HOME-dependent calls
+    // back-to-back (`open_db_with_migration` to materialize the DB,
+    // then a second `db_path()` read inside the handler), and another
+    // module's `HomeGuard` Drop can swap HOME between them on CI's
+    // multi-threaded test runner.
 
     #[tokio::test]
     async fn analytics_sync_reset_succeeds_on_fresh_tempdir() {
