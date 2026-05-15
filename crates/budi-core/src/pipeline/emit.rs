@@ -206,6 +206,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(debug_assertions)]
     #[should_panic(expected = "emit::file_paths called with empty paths")]
     fn file_paths_rejects_empty_input_in_debug() {
         let mut tags = Vec::new();
@@ -237,6 +238,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(debug_assertions)]
     #[should_panic(expected = "emit::tool_outcomes called with empty outcomes")]
     fn tool_outcomes_rejects_empty_input_in_debug() {
         let mut tags = Vec::new();
