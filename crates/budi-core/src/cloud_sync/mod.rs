@@ -23,12 +23,16 @@ use crate::config::CloudConfig;
 
 /// Top-level wire envelope POSTed to `/v1/ingest`.
 ///
-/// Custom [`Serialize`] impl: the workspace identifier is emitted under
-/// **both** `workspace_id` (the post-rename key) and the legacy `org_id`
-/// alias during the deprecation window described in ADR-0083 §2 (#836).
-/// The legacy alias is dropped after siropkin/budi-cloud#321 lands and
-/// one release cycle of mixed-version operation has passed.
-#[derive(Debug, Clone)]
+/// #843: only emits `workspace_id` — the legacy `org_id` dual-emit added
+/// in #836 is dropped because the cloud already accepts the new key and
+/// reading back its own dual-emit from `/v1/whoami` was breaking the
+/// CLI's serde deserializer with a duplicate-field error. ADR-0083 §2
+/// (Amended 2026-05-15): the legacy alias is dropped on the daemon side
+/// in 8.5.3; the cloud retains its own dual-accept on inputs and
+/// dual-emit on outputs for one more release cycle of mixed-version
+/// operation before retiring the alias server-side too (cross-repo
+/// lockstep siropkin/budi-cloud#321).
+#[derive(Debug, Clone, Serialize)]
 pub struct SyncEnvelope {
     pub schema_version: u32,
     pub device_id: String,
@@ -42,29 +46,6 @@ pub struct SyncEnvelope {
     pub label: String,
     pub synced_at: String,
     pub payload: SyncPayload,
-}
-
-impl Serialize for SyncEnvelope {
-    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        use serde::ser::SerializeStruct;
-        // #836: dual-emit `workspace_id` (new) and `org_id` (legacy) from
-        // the single in-memory `workspace_id` source so cloud ingest still
-        // accepting the old key keeps working against new daemons. Field
-        // count stays in lockstep with the entries actually serialized
-        // below.
-        let mut s = serializer.serialize_struct("SyncEnvelope", 7)?;
-        s.serialize_field("schema_version", &self.schema_version)?;
-        s.serialize_field("device_id", &self.device_id)?;
-        s.serialize_field("workspace_id", &self.workspace_id)?;
-        s.serialize_field("org_id", &self.workspace_id)?;
-        s.serialize_field("label", &self.label)?;
-        s.serialize_field("synced_at", &self.synced_at)?;
-        s.serialize_field("payload", &self.payload)?;
-        s.end()
-    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -980,16 +961,15 @@ pub fn validate_https_endpoint(endpoint: &str) -> Result<()> {
 }
 
 /// #541: response shape of `GET /v1/whoami` (cloud PR siropkin/budi-cloud#56).
+///
+/// #843: cloud dual-emits both `workspace_id` and the legacy `org_id`
+/// during the rename deprecation window (siropkin/budi-cloud#321). We
+/// only consume `workspace_id` — the deprecated `org_id` key is ignored
+/// by serde's default unknown-field handling. A previous attempt that
+/// used `#[serde(alias = "org_id")]` bound both keys to the same field
+/// and failed on the dual-emit shape with a "duplicate field" error.
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct WhoamiResponse {
-    /// Workspace identifier returned by `GET /v1/whoami`.
-    ///
-    /// #836: dual-accept the legacy `org_id` key via `serde(alias)` so a
-    /// fresh CLI can still seed `cloud.toml` from an older cloud that hasn't
-    /// shipped the workspace rename yet (siropkin/budi-cloud#321). The alias
-    /// is dropped once the cloud-side rename lands and one release cycle of
-    /// mixed-version operation has passed. ADR-0083 §2.
-    #[serde(alias = "org_id")]
     pub workspace_id: String,
 }
 

@@ -170,9 +170,6 @@ pub(crate) async fn cloud_reset(
         "result": "reset",
         "endpoint": cfg.effective_endpoint(),
         "workspace_id": cfg.workspace_id,
-        // #836: dual-emit the legacy `org_id` key during the rename
-        // deprecation window. ADR-0083 §2.
-        "org_id": cfg.workspace_id,
         "removed": removed,
         "message": "Cloud sync watermarks reset. Run `budi cloud sync` to push everything now, or wait for the next interval tick.",
     })))

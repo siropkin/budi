@@ -48,11 +48,11 @@ pub struct TeamPricingDefaults {
 pub struct TeamPricing {
     /// Workspace identifier the price list belongs to.
     ///
-    /// #836: dual-accepts the legacy `org_id` key during the org→workspace
-    /// rename deprecation window (ADR-0083 §2) so a fresh daemon stays
-    /// compatible with a cloud that hasn't shipped siropkin/budi-cloud#321
-    /// yet.
-    #[serde(alias = "org_id")]
+    /// #843: the legacy `org_id` alias was removed because the cloud
+    /// dual-emits both keys during the rename deprecation window, and
+    /// `#[serde(alias)]` rejects dual-emit with a duplicate-field error.
+    /// Serde's default unknown-field behaviour silently ignores any
+    /// `org_id` the cloud still sends. ADR-0083 §2 (Amended 2026-05-15).
     pub workspace_id: String,
     pub list_version: u32,
     pub effective_from: String,
