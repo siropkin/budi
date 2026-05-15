@@ -1710,3 +1710,959 @@ fn format_breakdown_footer_uses_fixed_currency() {
     // the same call.
     assert_eq!(format_cost_cents_fixed(210_000.0), "$2,100.00");
 }
+
+// ─── #821 utility-formatter coverage ──────────────────────────────
+//
+// Small public/private formatters used across the stats views. Each
+// has its own targeted test so a regression here surfaces against the
+// formatter, not against the larger view that happens to call it.
+
+#[test]
+fn format_tokens_renders_humanised_scale_suffix() {
+    // Sub-thousand values stay bare; thousand+ values get a one-decimal
+    // suffix per scale class. The summary block depends on this exact
+    // shape — a unit drift here desyncs the Agents column from the
+    // Total row (#494).
+    assert_eq!(format_tokens(0), "0");
+    assert_eq!(format_tokens(42), "42");
+    assert_eq!(format_tokens(999), "999");
+    assert_eq!(format_tokens(1_000), "1.0K");
+    assert_eq!(format_tokens(12_500), "12.5K");
+    assert_eq!(format_tokens(999_999), "1000.0K");
+    assert_eq!(format_tokens(1_000_000), "1.0M");
+    assert_eq!(format_tokens(159_000_000), "159.0M");
+    assert_eq!(format_tokens(1_000_000_000), "1.0B");
+    assert_eq!(format_tokens(2_500_000_000), "2.5B");
+}
+
+#[test]
+fn format_cost_cents_uses_humanised_dollar_shape() {
+    // `format_cost_cents` flows through `format_cost`: bare cents stay
+    // `$X.YY`, mid-hundreds drop decimals, and thousands+ humanise to
+    // `$X.YK`. Summary view uses this; breakdown columns use the fixed
+    // variant.
+    assert_eq!(format_cost_cents(0.0), "$0.00");
+    assert_eq!(format_cost_cents(42.0), "$0.42");
+    assert_eq!(format_cost_cents(9_039.0), "$90.39");
+    assert_eq!(format_cost_cents(12_345.0), "$123");
+    assert_eq!(format_cost_cents(150_000.0), "$1.5K");
+}
+
+#[test]
+fn insert_thousands_separator_handles_short_and_long_numbers() {
+    // Indirect coverage through `format_cost_cents_fixed` exists, but
+    // the helper has its own short-number boundary we want pinned.
+    assert_eq!(insert_thousands_separator(0), "0");
+    assert_eq!(insert_thousands_separator(7), "7");
+    assert_eq!(insert_thousands_separator(999), "999");
+    assert_eq!(insert_thousands_separator(1_000), "1,000");
+    assert_eq!(insert_thousands_separator(12_345), "12,345");
+    assert_eq!(insert_thousands_separator(1_234_567), "1,234,567");
+    assert_eq!(insert_thousands_separator(1_000_000_000), "1,000,000,000");
+}
+
+#[test]
+fn placeholder_tag_maps_every_variant() {
+    // The `--models` JSON envelope expects every row to carry the
+    // tag string so consumers can filter without checking for key
+    // presence (#443).
+    use budi_core::pricing::display::Placeholder;
+    assert_eq!(placeholder_tag(Placeholder::None), "none");
+    assert_eq!(placeholder_tag(Placeholder::CursorAuto), "cursor_auto");
+    assert_eq!(
+        placeholder_tag(Placeholder::NotAttributed),
+        "not_attributed"
+    );
+}
+
+#[test]
+fn is_untagged_only_matches_db_sentinel() {
+    // Pinned so a future rename of the sentinel (unlikely) is caught
+    // by a focused test rather than a sea of failing higher-level
+    // snapshots.
+    assert!(is_untagged(budi_core::analytics::UNTAGGED_DIMENSION));
+    assert!(!is_untagged("PAVA-1669"));
+    assert!(!is_untagged(""));
+    assert!(!is_untagged("untagged")); // missing the parentheses
+}
+
+#[test]
+fn local_midnight_to_utc_returns_rfc3339() {
+    // Daylight saving + timezone drift mean we can't pin the exact
+    // string, but the shape — RFC3339 with explicit offset — is the
+    // load-bearing contract used by the statusline endpoint.
+    let d = chrono::NaiveDate::from_ymd_opt(2026, 5, 15).unwrap();
+    let s = local_midnight_to_utc(d);
+    // RFC3339 always carries a `T` between date and time and either
+    // `Z` or a `±HH:MM` offset at the tail.
+    assert!(s.contains('T'), "expected RFC3339 `T` separator: {s}");
+    let last = s.chars().last().unwrap_or(' ');
+    let has_offset = s.contains('+') || s.matches('-').count() >= 3;
+    assert!(
+        last == 'Z' || has_offset,
+        "expected explicit offset or Z suffix: {s}"
+    );
+    // Round-trips through chrono — confirms the string is parseable
+    // by the upstream consumer.
+    chrono::DateTime::parse_from_rfc3339(&s).expect("must be RFC3339");
+}
+
+#[test]
+fn validate_file_path_arg_accepts_repo_relative_forward_slashed_paths() {
+    assert!(validate_file_path_arg("src/main.rs").is_ok());
+    assert!(validate_file_path_arg("a/b/c.txt").is_ok());
+    assert!(validate_file_path_arg("file.proto").is_ok());
+}
+
+#[test]
+fn validate_file_path_arg_rejects_each_disallowed_shape() {
+    // Empty input is the most common user typo.
+    let err = validate_file_path_arg("").unwrap_err().to_string();
+    assert!(err.contains("must not be empty"), "{err}");
+    let err = validate_file_path_arg("   ").unwrap_err().to_string();
+    assert!(err.contains("must not be empty"), "{err}");
+
+    // Absolute paths can never match a repo-relative file_path tag.
+    let err = validate_file_path_arg("/etc/passwd")
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("repo-relative"), "{err}");
+
+    // Backslashes — Windows-style separators leak the wrong shape;
+    // the pipeline normalises to `/` so the CLI must match.
+    let err = validate_file_path_arg("src\\main.rs")
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("forward slashes"), "{err}");
+
+    // `..` traversal would let the user query outside the repo root.
+    let err = validate_file_path_arg("../etc/hosts")
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains(".."), "{err}");
+
+    // URL schemes are clearly not file paths.
+    let err = validate_file_path_arg("https://x/y")
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("URL scheme"), "{err}");
+}
+
+// ─── #821 breakdown footer + empty-state tests ────────────────────
+
+#[test]
+fn format_breakdown_footer_emits_total_row_and_rule() {
+    let page: budi_core::analytics::BreakdownPage<budi_core::analytics::RepoUsage> =
+        budi_core::analytics::BreakdownPage {
+            rows: vec![budi_core::analytics::RepoUsage {
+                repo_id: "verkada".into(),
+                display_path: "verkada".into(),
+                message_count: 10,
+                input_tokens: 0,
+                output_tokens: 0,
+                cost_cents: 1_234.0,
+            }],
+            other: None,
+            total_cost_cents: 1_234.0,
+            total_rows: 1,
+            shown_rows: 1,
+            limit: 50,
+        };
+    let palette = Palette::plain();
+    let rendered = format_breakdown_footer(&page, 40, 60, &palette);
+    assert!(
+        rendered.contains("Total"),
+        "footer must mention Total: {rendered:?}"
+    );
+    assert!(
+        rendered.contains("$12.34"),
+        "footer must render the grand total: {rendered:?}"
+    );
+    assert!(
+        rendered.contains("1 row shown"),
+        "single-row note must use singular: {rendered:?}"
+    );
+}
+
+#[test]
+fn format_breakdown_footer_emits_other_aggregate_when_truncated() {
+    let page: budi_core::analytics::BreakdownPage<budi_core::analytics::RepoUsage> =
+        budi_core::analytics::BreakdownPage {
+            rows: vec![],
+            other: Some(budi_core::analytics::BreakdownOther {
+                row_count: 7,
+                cost_cents: 5_000.0,
+            }),
+            total_cost_cents: 15_000.0,
+            total_rows: 10,
+            shown_rows: 3,
+            limit: 3,
+        };
+    let palette = Palette::plain();
+    let rendered = format_breakdown_footer(&page, 40, 60, &palette);
+    assert!(
+        rendered.contains("7 more rows"),
+        "other row must include the folded row count: {rendered:?}"
+    );
+    assert!(
+        rendered.contains("3 of 10 rows shown"),
+        "truncation note must include `M of N rows shown`: {rendered:?}"
+    );
+    assert!(
+        rendered.contains("$50.00") && rendered.contains("$150.00"),
+        "footer must show other-aggregate + grand-total cents: {rendered:?}"
+    );
+}
+
+#[test]
+fn format_breakdown_footer_is_empty_for_empty_page() {
+    let page: budi_core::analytics::BreakdownPage<budi_core::analytics::RepoUsage> =
+        budi_core::analytics::BreakdownPage {
+            rows: vec![],
+            other: None,
+            total_cost_cents: 0.0,
+            total_rows: 0,
+            shown_rows: 0,
+            limit: 50,
+        };
+    let palette = Palette::plain();
+    let rendered = format_breakdown_footer(&page, 40, 60, &palette);
+    assert!(
+        rendered.is_empty(),
+        "footer must no-op on a fully empty page: {rendered:?}"
+    );
+}
+
+#[test]
+fn format_untagged_only_empty_state_carries_view_specific_label() {
+    let palette = Palette::plain();
+    let projects =
+        format_untagged_only_empty_state(BreakdownView::Projects, StatsPeriod::Today, &palette);
+    assert!(projects.contains("repository attribution"));
+    // The "Try --period 7d." tip fires on Today / 1d only.
+    assert!(projects.contains("Try --period 7d."));
+
+    let branches =
+        format_untagged_only_empty_state(BreakdownView::Branches, StatsPeriod::Days(30), &palette);
+    assert!(branches.contains("branch attribution"));
+    assert!(
+        !branches.contains("Try --period"),
+        "tip should not fire on wider windows: {branches:?}"
+    );
+
+    for (view, frag) in [
+        (BreakdownView::Tickets, "ticket attribution"),
+        (BreakdownView::Activities, "activity attribution"),
+        (BreakdownView::Files, "file attribution"),
+        (BreakdownView::Models, "labelled model usage"),
+        (BreakdownView::Tag, "tag attribution"),
+    ] {
+        let r = format_untagged_only_empty_state(view, StatsPeriod::Today, &palette);
+        assert!(
+            r.contains(frag),
+            "{view:?} empty-state must include {frag:?}: {r:?}"
+        );
+    }
+}
+
+#[test]
+fn format_breakdown_header_line_wraps_text_with_dim_palette() {
+    let palette = Palette::plain();
+    let line = format_breakdown_header_line("REPOSITORY", 24, "", &palette);
+    // Plain palette emits no ANSI codes, so the line is just the
+    // header text from `format_breakdown_header_text` verbatim.
+    assert_eq!(line, format_breakdown_header_text("REPOSITORY", 24, ""));
+}
+
+// ─── #821 view-level golden-output tests ──────────────────────────
+//
+// Each `format_<view>` is exercised with a small in-memory page so
+// the layout, header, and footer contracts are pinned. The tests
+// assert on the salient substrings rather than the full string,
+// since label widths and minor whitespace are renderer-internal.
+
+fn empty_repo_page() -> budi_core::analytics::BreakdownPage<budi_core::analytics::RepoUsage> {
+    budi_core::analytics::BreakdownPage {
+        rows: vec![],
+        other: None,
+        total_cost_cents: 0.0,
+        total_rows: 0,
+        shown_rows: 0,
+        limit: 50,
+    }
+}
+
+#[test]
+fn format_projects_renders_repository_block_with_total() {
+    let page = budi_core::analytics::BreakdownPage {
+        rows: vec![
+            budi_core::analytics::RepoUsage {
+                repo_id: "github.com/acme/verkada".into(),
+                display_path: "verkada".into(),
+                message_count: 100,
+                input_tokens: 1_000,
+                output_tokens: 500,
+                cost_cents: 12_345.0,
+            },
+            budi_core::analytics::RepoUsage {
+                repo_id: "github.com/acme/budi".into(),
+                display_path: "budi".into(),
+                message_count: 50,
+                input_tokens: 0,
+                output_tokens: 0,
+                cost_cents: 6_543.0,
+            },
+        ],
+        other: None,
+        total_cost_cents: 18_888.0,
+        total_rows: 2,
+        shown_rows: 2,
+        limit: 50,
+    };
+    let palette = Palette::plain();
+    let rendered = format_projects(StatsPeriod::Days(7), &page, &[], 40, false, &palette);
+
+    assert!(rendered.contains("Repositories"));
+    assert!(rendered.contains("Last 7 days"));
+    assert!(rendered.contains("REPOSITORY"));
+    assert!(rendered.contains("budi"));
+    assert!(rendered.contains("verkada"));
+    assert!(
+        rendered.contains("$123.45") && rendered.contains("$65.43"),
+        "row costs must render with fixed cents:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("Total") && rendered.contains("$188.88"),
+        "footer must reconcile to the grand total:\n{rendered}"
+    );
+}
+
+#[test]
+fn format_projects_renders_no_data_message_when_empty() {
+    let palette = Palette::plain();
+    let rendered = format_projects(
+        StatsPeriod::Today,
+        &empty_repo_page(),
+        &[],
+        40,
+        false,
+        &palette,
+    );
+    assert!(rendered.contains("Repositories"));
+    assert!(rendered.contains("No data for this period"));
+    // No header row when there's nothing to render.
+    assert!(!rendered.contains("REPOSITORY"));
+}
+
+#[test]
+fn format_projects_renders_non_repo_section_only_when_requested() {
+    let non_repo = vec![budi_core::analytics::RepoUsage {
+        repo_id: "scratch".into(),
+        display_path: "scratch".into(),
+        message_count: 3,
+        input_tokens: 0,
+        output_tokens: 0,
+        cost_cents: 700.0,
+    }];
+    let palette = Palette::plain();
+    // The wrapper only populates `non_repo_rows` when the flag is on,
+    // so the off path passes an empty slice in. Verify the no-data
+    // message still fires.
+    let hidden = format_projects(
+        StatsPeriod::Today,
+        &empty_repo_page(),
+        &[],
+        40,
+        false,
+        &palette,
+    );
+    assert!(hidden.contains("No data for this period"));
+    assert!(!hidden.contains("Non-repository folders"));
+
+    // With the flag, the FOLDER block renders the bucket.
+    let shown = format_projects(
+        StatsPeriod::Today,
+        &empty_repo_page(),
+        &non_repo,
+        40,
+        true,
+        &palette,
+    );
+    assert!(shown.contains("Non-repository folders"));
+    assert!(shown.contains("FOLDER"));
+    assert!(shown.contains("scratch"));
+    assert!(shown.contains("$7.00"));
+}
+
+#[test]
+fn format_branches_renders_branch_rows_and_strips_refs_prefix() {
+    let page = budi_core::analytics::BreakdownPage {
+        rows: vec![
+            budi_core::analytics::BranchCost {
+                git_branch: "refs/heads/main".into(),
+                repo_id: "github.com/acme/budi".into(),
+                session_count: 5,
+                message_count: 100,
+                input_tokens: 0,
+                output_tokens: 0,
+                cache_read_tokens: 0,
+                cache_creation_tokens: 0,
+                cost_cents: 5_500.0,
+            },
+            budi_core::analytics::BranchCost {
+                git_branch: "feature/x".into(),
+                repo_id: "".into(),
+                session_count: 1,
+                message_count: 10,
+                input_tokens: 0,
+                output_tokens: 0,
+                cache_read_tokens: 0,
+                cache_creation_tokens: 0,
+                cost_cents: 2_500.0,
+            },
+        ],
+        other: None,
+        total_cost_cents: 8_000.0,
+        total_rows: 2,
+        shown_rows: 2,
+        limit: 50,
+    };
+    let palette = Palette::plain();
+    let rendered = format_branches(StatsPeriod::Today, &page, 40, &palette);
+
+    assert!(rendered.contains("Branches"));
+    assert!(rendered.contains("BRANCH"));
+    assert!(rendered.contains("REPO"));
+    // `refs/heads/` prefix is stripped so the user sees the canonical
+    // short name.
+    assert!(rendered.contains("main"));
+    assert!(!rendered.contains("refs/heads/main"));
+    // Empty repo_id renders the `--` placeholder.
+    assert!(rendered.contains("--"));
+    assert!(rendered.contains("$55.00") && rendered.contains("$25.00"));
+    assert!(rendered.contains("Total"));
+}
+
+#[test]
+fn format_branches_renders_no_data_and_untagged_empty_state() {
+    let palette = Palette::plain();
+
+    // Empty page → friendly no-data message, no header row.
+    let empty: budi_core::analytics::BreakdownPage<budi_core::analytics::BranchCost> =
+        budi_core::analytics::BreakdownPage {
+            rows: vec![],
+            other: None,
+            total_cost_cents: 0.0,
+            total_rows: 0,
+            shown_rows: 0,
+            limit: 50,
+        };
+    let r = format_branches(StatsPeriod::Today, &empty, 40, &palette);
+    assert!(r.contains("No branch data for this period"));
+    assert!(!r.contains("BRANCH"));
+
+    // Only `(untagged)` row → empty-state tip instead of a one-row
+    // table.
+    let untagged_only = budi_core::analytics::BreakdownPage {
+        rows: vec![budi_core::analytics::BranchCost {
+            git_branch: budi_core::analytics::UNTAGGED_DIMENSION.into(),
+            repo_id: "".into(),
+            session_count: 1,
+            message_count: 5,
+            input_tokens: 0,
+            output_tokens: 0,
+            cache_read_tokens: 0,
+            cache_creation_tokens: 0,
+            cost_cents: 100.0,
+        }],
+        other: None,
+        total_cost_cents: 100.0,
+        total_rows: 1,
+        shown_rows: 1,
+        limit: 50,
+    };
+    let r = format_branches(StatsPeriod::Today, &untagged_only, 40, &palette);
+    assert!(r.contains("branch attribution"));
+    assert!(!r.contains("BRANCH "));
+}
+
+#[test]
+fn format_branch_detail_renders_data_and_handles_missing_branch() {
+    let palette = Palette::plain();
+
+    let result = budi_core::analytics::BranchCost {
+        git_branch: "main".into(),
+        repo_id: "github.com/acme/budi".into(),
+        session_count: 5,
+        message_count: 120,
+        input_tokens: 12_345,
+        output_tokens: 6_789,
+        cache_read_tokens: 0,
+        cache_creation_tokens: 0,
+        cost_cents: 4_500.0,
+    };
+    let rendered = format_branch_detail(
+        StatsPeriod::Today,
+        "main",
+        Some("github.com/acme/budi"),
+        Some(&result),
+        &palette,
+    );
+    assert!(rendered.contains("Branch"));
+    assert!(rendered.contains("Repo filter github.com/acme/budi"));
+    assert!(rendered.contains("Sessions   5"));
+    assert!(rendered.contains("Messages   120"));
+    assert!(rendered.contains("Input      12.3K"));
+    assert!(rendered.contains("Output     6.8K"));
+    assert!(rendered.contains("Est. cost  $45"));
+
+    // Missing branch returns a friendly tip + suggestion.
+    let absent = format_branch_detail(StatsPeriod::Today, "ghost", None, None, &palette);
+    assert!(absent.contains("No data found for branch 'ghost'"));
+    assert!(absent.contains("budi db import"));
+    assert!(absent.contains("budi stats branches"));
+}
+
+#[test]
+fn format_tickets_renders_rows_and_source_column() {
+    let page = budi_core::analytics::BreakdownPage {
+        rows: vec![budi_core::analytics::TicketCost {
+            ticket_id: "PAVA-1669".into(),
+            ticket_prefix: "PAVA".into(),
+            session_count: 1,
+            message_count: 10,
+            input_tokens: 0,
+            output_tokens: 0,
+            cache_read_tokens: 0,
+            cache_creation_tokens: 0,
+            cost_cents: 2_265.0,
+            top_branch: "04-20-pava-1669".into(),
+            top_repo_id: "github.com/acme/web".into(),
+            source: "branch".into(),
+        }],
+        other: None,
+        total_cost_cents: 2_265.0,
+        total_rows: 1,
+        shown_rows: 1,
+        limit: 50,
+    };
+    let palette = Palette::plain();
+    let r = format_tickets(StatsPeriod::Days(7), &page, 40, &palette);
+    assert!(r.contains("Tickets"));
+    assert!(r.contains("TICKET"));
+    assert!(r.contains("SOURCE"));
+    assert!(r.contains("TOP_BRANCH"));
+    assert!(r.contains("PAVA-1669"));
+    assert!(r.contains("src=branch"));
+    assert!(r.contains("04-20-pava-1669"));
+    assert!(r.contains("$22.65"));
+    assert!(r.contains("Total"));
+}
+
+#[test]
+fn format_tickets_no_data_and_only_untagged_paths() {
+    let palette = Palette::plain();
+    let empty: budi_core::analytics::BreakdownPage<budi_core::analytics::TicketCost> =
+        budi_core::analytics::BreakdownPage {
+            rows: vec![],
+            other: None,
+            total_cost_cents: 0.0,
+            total_rows: 0,
+            shown_rows: 0,
+            limit: 50,
+        };
+    let r = format_tickets(StatsPeriod::Today, &empty, 40, &palette);
+    assert!(r.contains("No ticket data for this period"));
+    assert!(r.contains("branch names need to contain a ticket id"));
+
+    let untagged = budi_core::analytics::BreakdownPage {
+        rows: vec![budi_core::analytics::TicketCost {
+            ticket_id: budi_core::analytics::UNTAGGED_DIMENSION.into(),
+            ticket_prefix: "".into(),
+            session_count: 1,
+            message_count: 5,
+            input_tokens: 0,
+            output_tokens: 0,
+            cache_read_tokens: 0,
+            cache_creation_tokens: 0,
+            cost_cents: 50.0,
+            top_branch: "".into(),
+            top_repo_id: "".into(),
+            source: "".into(),
+        }],
+        other: None,
+        total_cost_cents: 50.0,
+        total_rows: 1,
+        shown_rows: 1,
+        limit: 50,
+    };
+    let r = format_tickets(StatsPeriod::Today, &untagged, 40, &palette);
+    assert!(r.contains("ticket attribution"));
+}
+
+#[test]
+fn format_ticket_detail_renders_branches_block() {
+    let palette = Palette::plain();
+    let detail = budi_core::analytics::TicketCostDetail {
+        ticket_id: "PAVA-1669".into(),
+        ticket_prefix: "PAVA".into(),
+        session_count: 2,
+        message_count: 40,
+        input_tokens: 1_000,
+        output_tokens: 500,
+        cache_read_tokens: 0,
+        cache_creation_tokens: 0,
+        cost_cents: 3_300.0,
+        repo_id: "github.com/acme/web".into(),
+        branches: vec![budi_core::analytics::TicketBranchBreakdown {
+            git_branch: "04-20-pava-1669".into(),
+            repo_id: "github.com/acme/web".into(),
+            message_count: 30,
+            session_count: 1,
+            cost_cents: 3_000.0,
+        }],
+        source: "branch".into(),
+    };
+    let r = format_ticket_detail(
+        StatsPeriod::Today,
+        "PAVA-1669",
+        None,
+        Some(&detail),
+        &palette,
+    );
+    assert!(r.contains("Ticket"));
+    assert!(r.contains("Prefix     PAVA"));
+    assert!(r.contains("Source     branch"));
+    assert!(r.contains("Sessions   2"));
+    assert!(r.contains("Messages   40"));
+    assert!(r.contains("Branches"));
+    assert!(r.contains("04-20-pava-1669"));
+
+    let absent = format_ticket_detail(StatsPeriod::Today, "MISSING-1", None, None, &palette);
+    assert!(absent.contains("No data found for ticket 'MISSING-1'"));
+}
+
+#[test]
+fn format_activities_renders_rows_and_confidence_column() {
+    let page = budi_core::analytics::BreakdownPage {
+        rows: vec![budi_core::analytics::ActivityCost {
+            activity: "coding".into(),
+            session_count: 1,
+            message_count: 10,
+            input_tokens: 0,
+            output_tokens: 0,
+            cache_read_tokens: 0,
+            cache_creation_tokens: 0,
+            cost_cents: 1_234.0,
+            top_branch: "main".into(),
+            top_repo_id: "github.com/acme/budi".into(),
+            source: "rule".into(),
+            confidence: "high".into(),
+        }],
+        other: None,
+        total_cost_cents: 1_234.0,
+        total_rows: 1,
+        shown_rows: 1,
+        limit: 50,
+    };
+    let palette = Palette::plain();
+    let r = format_activities(StatsPeriod::Today, &page, 40, &palette);
+    assert!(r.contains("Activities"));
+    assert!(r.contains("ACTIVITY"));
+    assert!(r.contains("CONFIDENCE"));
+    assert!(r.contains("coding"));
+    assert!(r.contains("conf=high"));
+    assert!(r.contains("$12.34"));
+}
+
+#[test]
+fn format_activity_detail_branches_and_missing_message() {
+    let palette = Palette::plain();
+    let detail = budi_core::analytics::ActivityCostDetail {
+        activity: "coding".into(),
+        session_count: 1,
+        message_count: 10,
+        input_tokens: 1_000,
+        output_tokens: 500,
+        cache_read_tokens: 0,
+        cache_creation_tokens: 0,
+        cost_cents: 1_234.0,
+        repo_id: "github.com/acme/budi".into(),
+        branches: vec![budi_core::analytics::ActivityBranchBreakdown {
+            git_branch: "main".into(),
+            repo_id: "github.com/acme/budi".into(),
+            message_count: 10,
+            session_count: 1,
+            cost_cents: 1_234.0,
+        }],
+        source: "rule".into(),
+        confidence: "high".into(),
+    };
+    let r = format_activity_detail(StatsPeriod::Today, "coding", None, Some(&detail), &palette);
+    assert!(r.contains("Activity"));
+    assert!(r.contains("Source     rule"));
+    assert!(r.contains("confidence: high"));
+    assert!(r.contains("Branches"));
+    assert!(r.contains("main"));
+
+    let absent = format_activity_detail(StatsPeriod::Today, "ghost", None, None, &palette);
+    assert!(absent.contains("No data found for activity 'ghost'"));
+}
+
+#[test]
+fn format_files_renders_rows_with_source_and_ticket_columns() {
+    let page = budi_core::analytics::BreakdownPage {
+        rows: vec![budi_core::analytics::FileCost {
+            file_path: "src/main.rs".into(),
+            session_count: 1,
+            message_count: 10,
+            input_tokens: 0,
+            output_tokens: 0,
+            cache_read_tokens: 0,
+            cache_creation_tokens: 0,
+            cost_cents: 5_877.0,
+            top_repo_id: "github.com/acme/budi".into(),
+            top_branch: "main".into(),
+            top_ticket_id: "PAVA-1669".into(),
+            source: "tool_arg".into(),
+        }],
+        other: None,
+        total_cost_cents: 5_877.0,
+        total_rows: 1,
+        shown_rows: 1,
+        limit: 50,
+    };
+    let palette = Palette::plain();
+    let r = format_files(StatsPeriod::Today, &page, 40, &palette);
+    assert!(r.contains("Files"));
+    assert!(r.contains("FILE"));
+    assert!(r.contains("TOP_TICKET"));
+    assert!(r.contains("main.rs"));
+    assert!(r.contains("src=tool_arg"));
+    assert!(r.contains("PAVA-1669"));
+    assert!(r.contains("$58.77"));
+}
+
+#[test]
+fn format_file_detail_renders_branches_and_tickets_blocks() {
+    let palette = Palette::plain();
+    let detail = budi_core::analytics::FileCostDetail {
+        file_path: "src/main.rs".into(),
+        session_count: 1,
+        message_count: 10,
+        input_tokens: 1_000,
+        output_tokens: 500,
+        cache_read_tokens: 0,
+        cache_creation_tokens: 0,
+        cost_cents: 5_877.0,
+        repo_id: "github.com/acme/budi".into(),
+        branches: vec![budi_core::analytics::FileBranchBreakdown {
+            git_branch: "main".into(),
+            repo_id: "github.com/acme/budi".into(),
+            message_count: 10,
+            session_count: 1,
+            cost_cents: 5_877.0,
+        }],
+        tickets: vec![budi_core::analytics::FileTicketBreakdown {
+            ticket_id: "PAVA-1669".into(),
+            message_count: 10,
+            session_count: 1,
+            cost_cents: 5_877.0,
+        }],
+        source: "tool_arg".into(),
+        confidence: "high".into(),
+    };
+    let r = format_file_detail(
+        StatsPeriod::Today,
+        "src/main.rs",
+        Some("github.com/acme/budi"),
+        Some(&detail),
+        &palette,
+    );
+    assert!(r.contains("File"));
+    assert!(r.contains("Repo filter github.com/acme/budi"));
+    assert!(r.contains("Source     tool_arg"));
+    assert!(r.contains("confidence: high"));
+    assert!(r.contains("Branches"));
+    assert!(r.contains("Tickets"));
+    assert!(r.contains("PAVA-1669"));
+
+    let absent = format_file_detail(StatsPeriod::Today, "ghost.rs", None, None, &palette);
+    assert!(absent.contains("No data found for file 'ghost.rs'"));
+}
+
+#[test]
+fn format_models_renders_msgs_tokens_and_pending_note() {
+    let page = budi_core::analytics::BreakdownPage {
+        rows: vec![
+            budi_core::analytics::ModelUsage {
+                model: "claude-opus-4-7".into(),
+                provider: "claude_code".into(),
+                message_count: 24_114,
+                input_tokens: 60_000_000,
+                output_tokens: 30_000_000,
+                cache_read_tokens: 0,
+                cache_creation_tokens: 0,
+                cost_cents: 210_000.0,
+            },
+            // pending row (untagged + zero cost) — gets suppressed by
+            // default so the suppressed-count footnote fires.
+            budi_core::analytics::ModelUsage {
+                model: "(untagged)".into(),
+                provider: "cursor".into(),
+                message_count: 5,
+                input_tokens: 0,
+                output_tokens: 0,
+                cache_read_tokens: 0,
+                cache_creation_tokens: 0,
+                cost_cents: 0.0,
+            },
+        ],
+        other: None,
+        total_cost_cents: 210_000.0,
+        total_rows: 2,
+        shown_rows: 2,
+        limit: 50,
+    };
+    let palette = Palette::plain();
+    let r = format_models(StatsPeriod::Today, &page, 40, false, &palette);
+    assert!(r.contains("Model usage"));
+    assert!(r.contains("MODEL"));
+    assert!(r.contains("MSGS"));
+    assert!(r.contains("TOKENS"));
+    assert!(r.contains("Claude Opus 4.7"));
+    assert!(r.contains("24114 msgs"));
+    assert!(r.contains("90.0M tok"));
+    assert!(r.contains("$2,100.00"));
+    assert!(
+        r.contains("pending"),
+        "models footer must include the pending footnote: {r:?}"
+    );
+
+    // With --include-pending the suppressed row becomes visible.
+    let r2 = format_models(StatsPeriod::Today, &page, 40, true, &palette);
+    assert!(r2.contains("(model not yet attributed)"));
+    assert!(
+        !r2.contains("pending — Cursor lag"),
+        "--include-pending must consume the suppressed bucket: {r2:?}"
+    );
+}
+
+#[test]
+fn format_models_no_data_path() {
+    let palette = Palette::plain();
+    let empty: budi_core::analytics::BreakdownPage<budi_core::analytics::ModelUsage> =
+        budi_core::analytics::BreakdownPage {
+            rows: vec![],
+            other: None,
+            total_cost_cents: 0.0,
+            total_rows: 0,
+            shown_rows: 0,
+            limit: 50,
+        };
+    let r = format_models(StatsPeriod::Today, &empty, 40, false, &palette);
+    assert!(r.contains("No data for this period"));
+}
+
+#[test]
+fn format_surfaces_renders_rows_and_handles_limit() {
+    let rows = vec![
+        budi_core::analytics::SurfaceStats {
+            surface: "vscode".into(),
+            assistant_messages: 100,
+            user_messages: 50,
+            total_messages: 150,
+            input_tokens: 0,
+            output_tokens: 0,
+            cache_creation_tokens: 0,
+            cache_read_tokens: 0,
+            estimated_cost: 12.34,
+            total_cost_cents: 1_234.0,
+        },
+        budi_core::analytics::SurfaceStats {
+            surface: "jetbrains".into(),
+            assistant_messages: 20,
+            user_messages: 10,
+            total_messages: 30,
+            input_tokens: 0,
+            output_tokens: 0,
+            cache_creation_tokens: 0,
+            cache_read_tokens: 0,
+            estimated_cost: 4.56,
+            total_cost_cents: 456.0,
+        },
+    ];
+    let palette = Palette::plain();
+    let r = format_surfaces(StatsPeriod::Today, &rows, 40, 0, &palette);
+    assert!(r.contains("budi stats surfaces"));
+    assert!(r.contains("SURFACE"));
+    assert!(r.contains("vscode"));
+    assert!(r.contains("jetbrains"));
+    assert!(r.contains("$12.34"));
+    assert!(r.contains("$4.56"));
+
+    // limit > 0 caps the visible rows.
+    let r = format_surfaces(StatsPeriod::Today, &rows, 40, 1, &palette);
+    assert!(r.contains("vscode"));
+    assert!(!r.contains("jetbrains"));
+
+    // Empty input → "No data" message, no header.
+    let empty: Vec<budi_core::analytics::SurfaceStats> = vec![];
+    let r = format_surfaces(StatsPeriod::Today, &empty, 40, 0, &palette);
+    assert!(r.contains("No data for this period"));
+    assert!(!r.contains("SURFACE"));
+}
+
+#[test]
+fn format_tags_renders_filtered_view_and_empty_state() {
+    let palette = Palette::plain();
+    let page = budi_core::analytics::BreakdownPage {
+        rows: vec![budi_core::analytics::TagCost {
+            key: "type".into(),
+            value: "feature".into(),
+            session_count: 1,
+            cost_cents: 500.0,
+        }],
+        other: None,
+        total_cost_cents: 500.0,
+        total_rows: 1,
+        shown_rows: 1,
+        limit: 50,
+    };
+    let r = format_tags(StatsPeriod::Today, "type", &page, 40, &palette);
+    assert!(r.contains("Tag: type"));
+    assert!(r.contains("VALUE"));
+    assert!(r.contains("feature"));
+    assert!(r.contains("$5.00"));
+    assert!(r.contains("Total"));
+
+    // Empty page → the "No tag data" sentinel.
+    let empty: budi_core::analytics::BreakdownPage<budi_core::analytics::TagCost> =
+        budi_core::analytics::BreakdownPage {
+            rows: vec![],
+            other: None,
+            total_cost_cents: 0.0,
+            total_rows: 0,
+            shown_rows: 0,
+            limit: 50,
+        };
+    let r = format_tags(StatsPeriod::Today, "type", &empty, 40, &palette);
+    assert!(r.contains("No tag data for 'type'"));
+
+    // Only `(untagged)` row → empty-state tip.
+    let untagged = budi_core::analytics::BreakdownPage {
+        rows: vec![budi_core::analytics::TagCost {
+            key: "type".into(),
+            value: budi_core::analytics::UNTAGGED_DIMENSION.into(),
+            session_count: 1,
+            cost_cents: 100.0,
+        }],
+        other: None,
+        total_cost_cents: 100.0,
+        total_rows: 1,
+        shown_rows: 1,
+        limit: 50,
+    };
+    let r = format_tags(StatsPeriod::Today, "type", &untagged, 40, &palette);
+    assert!(r.contains("tag attribution"));
+}

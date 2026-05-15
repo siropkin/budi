@@ -87,13 +87,20 @@ fn untagged_only_tip(period: StatsPeriod) -> Option<&'static str> {
     }
 }
 
-/// Print the "no labelled signal in this window" empty-state. Called
+/// Format the "no labelled signal in this window" empty-state. Called
 /// when the only row on a page is the `(untagged)` bucket, to avoid
 /// a one-row table that looks like a filesystem fault. (#450
 /// acceptance D)
-fn render_untagged_only_empty_state(view: BreakdownView, period: StatsPeriod) {
-    let dim = ansi("\x1b[90m");
-    let reset = ansi("\x1b[0m");
+///
+/// Returns a String so tests can assert on the rendered shape; the
+/// caller is responsible for printing.
+fn format_untagged_only_empty_state(
+    view: BreakdownView,
+    period: StatsPeriod,
+    palette: &Palette,
+) -> String {
+    use std::fmt::Write as _;
+    let Palette { dim, reset, .. } = *palette;
     let label = match view {
         BreakdownView::Projects => "repository attribution",
         BreakdownView::Branches => "branch attribution",
@@ -103,11 +110,13 @@ fn render_untagged_only_empty_state(view: BreakdownView, period: StatsPeriod) {
         BreakdownView::Models => "labelled model usage",
         BreakdownView::Tag => "tag attribution",
     };
-    println!("  No {label} emitted in this window.");
+    let mut out = String::new();
+    writeln!(out, "  No {label} emitted in this window.").unwrap();
     if let Some(tip) = untagged_only_tip(period) {
-        println!("  {dim}{tip}{reset}");
+        writeln!(out, "  {dim}{tip}{reset}").unwrap();
     }
-    println!();
+    writeln!(out).unwrap();
+    out
 }
 
 /// Truncate a display label to at most `max_chars` characters, prefixing
@@ -204,14 +213,19 @@ fn format_breakdown_header_text(
     }
 }
 
-/// Print the shared breakdown header to stdout, wrapped in the `dim`
-/// ANSI cue. See [`format_breakdown_header_text`] for the underlying
-/// layout.
-fn print_breakdown_header(label_header: &str, label_width: usize, extra_header: &str) {
-    let dim = ansi("\x1b[90m");
-    let reset = ansi("\x1b[0m");
+/// Format the shared breakdown header wrapped in the `dim` ANSI cue.
+/// See [`format_breakdown_header_text`] for the underlying layout.
+/// Returns a single line (no trailing newline) so callers can compose
+/// it into a larger rendered view.
+fn format_breakdown_header_line(
+    label_header: &str,
+    label_width: usize,
+    extra_header: &str,
+    palette: &Palette,
+) -> String {
+    let Palette { dim, reset, .. } = *palette;
     let text = format_breakdown_header_text(label_header, label_width, extra_header);
-    println!("{dim}{}{reset}", text);
+    format!("{dim}{}{reset}", text)
 }
 
 /// Format one breakdown row as plain text (no ANSI) in the canonical
@@ -578,22 +592,24 @@ pub fn cmd_stats(
     cmd_stats_summary(&client, period, provider.as_deref(), &surfaces_filter)
 }
 
-/// Color palette for the summary view. Production builds use `ansi()`
-/// codes; tests use the `plain()` palette so snapshot strings don't
-/// depend on terminal state.
-struct SummaryPalette {
-    bold_cyan: &'static str,
-    bold: &'static str,
-    dim: &'static str,
-    cyan: &'static str,
-    yellow: &'static str,
-    green: &'static str,
-    reset: &'static str,
+/// Color palette shared across every `budi stats` text view. Production
+/// builds use `ansi()` codes; tests use the `plain()` palette so
+/// snapshot strings don't depend on terminal state. Centralised so a
+/// future color tweak touches one place, not every render function.
+#[derive(Clone, Copy)]
+pub(crate) struct Palette {
+    pub(crate) bold_cyan: &'static str,
+    pub(crate) bold: &'static str,
+    pub(crate) dim: &'static str,
+    pub(crate) cyan: &'static str,
+    pub(crate) yellow: &'static str,
+    pub(crate) green: &'static str,
+    pub(crate) reset: &'static str,
 }
 
-impl SummaryPalette {
+impl Palette {
     /// Honour `NO_COLOR` and TTY detection (via `ansi()`).
-    fn from_env() -> Self {
+    pub(crate) fn from_env() -> Self {
         Self {
             bold_cyan: ansi("\x1b[1;36m"),
             bold: ansi("\x1b[1m"),
@@ -607,7 +623,7 @@ impl SummaryPalette {
 
     /// All-empty palette so test snapshots are pure ASCII.
     #[cfg(test)]
-    const fn plain() -> Self {
+    pub(crate) const fn plain() -> Self {
         Self {
             bold_cyan: "",
             bold: "",
@@ -620,6 +636,9 @@ impl SummaryPalette {
     }
 }
 
+#[cfg(test)]
+type SummaryPalette = Palette;
+
 /// Render the summary view to a String. Pure function — fetched data
 /// goes in, formatted text comes out. The shape is fixed regardless of
 /// period (#451): header → Agents → Total → Tokens → Est. cost →
@@ -631,11 +650,11 @@ fn format_summary(
     summary: &budi_core::analytics::UsageSummary,
     est: &budi_core::cost::CostEstimate,
     providers: &[analytics::ProviderStats],
-    palette: &SummaryPalette,
+    palette: &Palette,
 ) -> String {
     use std::fmt::Write as _;
 
-    let SummaryPalette {
+    let Palette {
         bold_cyan,
         bold,
         dim,
@@ -855,7 +874,7 @@ fn cmd_stats_summary(
     // invocation so the text and JSON paths agree on the snapshot.
     let providers = client.providers(since.as_deref(), until.as_deref(), surfaces)?;
 
-    let palette = SummaryPalette::from_env();
+    let palette = Palette::from_env();
     let rendered = format_summary(period, provider, &summary, &est, &providers, &palette);
     print!("{rendered}");
     Ok(())
@@ -902,34 +921,74 @@ fn cmd_stats_projects(
         return Ok(());
     }
 
+    let palette = Palette::from_env();
+    print!(
+        "{}",
+        format_projects(
+            period,
+            &page,
+            &non_repo_rows,
+            label_width,
+            include_non_repo,
+            &palette,
+        )
+    );
+    Ok(())
+}
+
+/// Render the `--projects` text view to a String. Pure function over the
+/// fetched page + non-repo rows so tests can drive in-memory fixtures.
+fn format_projects(
+    period: StatsPeriod,
+    page: &BreakdownPage<budi_core::analytics::RepoUsage>,
+    non_repo_rows: &[budi_core::analytics::RepoUsage],
+    label_width: usize,
+    include_non_repo: bool,
+    palette: &Palette,
+) -> String {
+    use std::fmt::Write as _;
+    let Palette {
+        bold_cyan,
+        bold,
+        dim,
+        cyan,
+        yellow,
+        reset,
+        ..
+    } = *palette;
     let period_label = period_label(period);
-
-    let bold_cyan = ansi("\x1b[1;36m");
-    let bold = ansi("\x1b[1m");
-    let dim = ansi("\x1b[90m");
-    let cyan = ansi("\x1b[36m");
-    let yellow = ansi("\x1b[33m");
-    let reset = ansi("\x1b[0m");
-
     let rule_width = label_width + 1 + BREAKDOWN_BAR_WIDTH + 1 + BREAKDOWN_COST_WIDTH;
-    println!();
-    println!(
+
+    let mut out = String::new();
+    writeln!(out).unwrap();
+    writeln!(
+        out,
         "  {bold_cyan} Repositories{reset} — {bold}{}{reset}",
         period_label
-    );
-    println!("  {dim}{}{reset}", "─".repeat(rule_width));
+    )
+    .unwrap();
+    writeln!(out, "  {dim}{}{reset}", "─".repeat(rule_width)).unwrap();
 
     if page.rows.is_empty() && page.other.is_none() && non_repo_rows.is_empty() {
-        println!("  No data for this period.");
-        println!();
-        return Ok(());
+        writeln!(out, "  No data for this period.").unwrap();
+        writeln!(out).unwrap();
+        return out;
     }
 
     if !page.rows.is_empty() || page.other.is_some() {
         if is_only_untagged(&page.rows, |r| &r.repo_id) && page.other.is_none() {
-            render_untagged_only_empty_state(BreakdownView::Projects, period);
+            out.push_str(&format_untagged_only_empty_state(
+                BreakdownView::Projects,
+                period,
+                palette,
+            ));
         } else {
-            print_breakdown_header("REPOSITORY", label_width, "");
+            writeln!(
+                out,
+                "{}",
+                format_breakdown_header_line("REPOSITORY", label_width, "", palette)
+            )
+            .unwrap();
 
             let max_cost = max_cost_for_rows(&page.rows);
             for r in &page.rows {
@@ -938,47 +997,63 @@ fn cmd_stats_projects(
                     &display_dimension(BreakdownView::Projects, &r.repo_id),
                     label_width,
                 );
-                println!(
+                writeln!(
+                    out,
                     "  {bold}{:<label_w$}{reset} {cyan}{}{reset} {yellow}{:>cost_w$}{reset}",
                     label,
                     bar,
                     format_cost_cents_fixed(r.cost_cents),
                     label_w = label_width,
                     cost_w = BREAKDOWN_COST_WIDTH,
-                );
+                )
+                .unwrap();
             }
 
-            render_breakdown_footer(&page, label_width, rule_width);
+            out.push_str(&format_breakdown_footer(
+                page,
+                label_width,
+                rule_width,
+                palette,
+            ));
         }
     }
 
     if include_non_repo && !non_repo_rows.is_empty() {
-        println!();
-        println!(
+        writeln!(out).unwrap();
+        writeln!(
+            out,
             "  {bold_cyan} Non-repository folders{reset} — {bold}{}{reset}",
             period_label
-        );
-        println!("  {dim}{}{reset}", "─".repeat(rule_width));
-        print_breakdown_header("FOLDER", label_width, "");
+        )
+        .unwrap();
+        writeln!(out, "  {dim}{}{reset}", "─".repeat(rule_width)).unwrap();
+        writeln!(
+            out,
+            "{}",
+            format_breakdown_header_line("FOLDER", label_width, "", palette)
+        )
+        .unwrap();
         let max_cost = non_repo_rows
             .iter()
             .map(|r| r.cost_cents)
             .fold(0.0_f64, f64::max);
-        for r in &non_repo_rows {
+        for r in non_repo_rows {
             let bar = render_bar(r.cost_cents, max_cost);
             let label = truncate_label_middle(&r.repo_id, label_width);
-            println!(
+            writeln!(
+                out,
                 "  {bold}{:<label_w$}{reset} {cyan}{}{reset} {yellow}{:>cost_w$}{reset}",
                 label,
                 bar,
                 format_cost_cents_fixed(r.cost_cents),
                 label_w = label_width,
                 cost_w = BREAKDOWN_COST_WIDTH,
-            );
+            )
+            .unwrap();
         }
     }
 
-    Ok(())
+    out
 }
 
 fn cmd_stats_branches(
@@ -1004,37 +1079,70 @@ fn cmd_stats_branches(
         return Ok(());
     }
 
+    let palette = Palette::from_env();
+    print!("{}", format_branches(period, &page, label_width, &palette));
+    Ok(())
+}
+
+const BRANCHES_REPO_WIDTH: usize = 16;
+
+/// Render the `--branches` text view to a String.
+fn format_branches(
+    period: StatsPeriod,
+    page: &BreakdownPage<budi_core::analytics::BranchCost>,
+    label_width: usize,
+    palette: &Palette,
+) -> String {
+    use std::fmt::Write as _;
+    let Palette {
+        bold_cyan,
+        bold,
+        dim,
+        cyan,
+        yellow,
+        reset,
+        ..
+    } = *palette;
     let period_label = period_label(period);
-
-    let bold_cyan = ansi("\x1b[1;36m");
-    let bold = ansi("\x1b[1m");
-    let dim = ansi("\x1b[90m");
-    let cyan = ansi("\x1b[36m");
-    let yellow = ansi("\x1b[33m");
-    let reset = ansi("\x1b[0m");
-
-    const REPO_WIDTH: usize = 16;
     let rule_width =
-        label_width + 1 + BREAKDOWN_BAR_WIDTH + 1 + BREAKDOWN_COST_WIDTH + 2 + REPO_WIDTH;
-    println!();
-    println!(
+        label_width + 1 + BREAKDOWN_BAR_WIDTH + 1 + BREAKDOWN_COST_WIDTH + 2 + BRANCHES_REPO_WIDTH;
+
+    let mut out = String::new();
+    writeln!(out).unwrap();
+    writeln!(
+        out,
         "  {bold_cyan} Branches{reset} — {bold}{}{reset}",
         period_label
-    );
-    println!("  {dim}{}{reset}", "─".repeat(rule_width));
+    )
+    .unwrap();
+    writeln!(out, "  {dim}{}{reset}", "─".repeat(rule_width)).unwrap();
 
     if page.rows.is_empty() && page.other.is_none() {
-        println!("  No branch data for this period.");
-        println!();
-        return Ok(());
+        writeln!(out, "  No branch data for this period.").unwrap();
+        writeln!(out).unwrap();
+        return out;
     }
 
     if is_only_untagged(&page.rows, |b| &b.git_branch) && page.other.is_none() {
-        render_untagged_only_empty_state(BreakdownView::Branches, period);
-        return Ok(());
+        out.push_str(&format_untagged_only_empty_state(
+            BreakdownView::Branches,
+            period,
+            palette,
+        ));
+        return out;
     }
 
-    print_breakdown_header("BRANCH", label_width, &format!("{:<REPO_WIDTH$}", "REPO"));
+    writeln!(
+        out,
+        "{}",
+        format_breakdown_header_line(
+            "BRANCH",
+            label_width,
+            &format!("{:<w$}", "REPO", w = BRANCHES_REPO_WIDTH),
+            palette,
+        )
+    )
+    .unwrap();
 
     let max_cost = max_cost_for_rows(&page.rows);
     for b in &page.rows {
@@ -1054,19 +1162,27 @@ fn cmd_stats_branches(
                 .to_string()
         };
         let bar = render_bar(b.cost_cents, max_cost);
-        println!(
-            "  {bold}{:<label_w$}{reset} {cyan}{}{reset} {yellow}{:>cost_w$}{reset}  {dim}{:<REPO_WIDTH$}{reset}",
+        writeln!(
+            out,
+            "  {bold}{:<label_w$}{reset} {cyan}{}{reset} {yellow}{:>cost_w$}{reset}  {dim}{:<repo_w$}{reset}",
             label,
             bar,
             format_cost_cents_fixed(b.cost_cents),
             repo,
             label_w = label_width,
             cost_w = BREAKDOWN_COST_WIDTH,
-        );
+            repo_w = BRANCHES_REPO_WIDTH,
+        )
+        .unwrap();
     }
 
-    render_breakdown_footer(&page, label_width, rule_width);
-    Ok(())
+    out.push_str(&format_breakdown_footer(
+        page,
+        label_width,
+        rule_width,
+        palette,
+    ));
+    out
 }
 
 fn cmd_stats_branch_detail(
@@ -1084,53 +1200,89 @@ fn cmd_stats_branch_detail(
         return Ok(());
     }
 
+    let palette = Palette::from_env();
+    print!(
+        "{}",
+        format_branch_detail(period, branch, repo, result.as_ref(), &palette)
+    );
+    Ok(())
+}
+
+/// Render the `--branch <NAME>` detail view to a String.
+fn format_branch_detail(
+    period: StatsPeriod,
+    branch: &str,
+    repo: Option<&str>,
+    result: Option<&budi_core::analytics::BranchCost>,
+    palette: &Palette,
+) -> String {
+    use std::fmt::Write as _;
+    let Palette {
+        bold_cyan,
+        bold,
+        dim,
+        yellow,
+        reset,
+        ..
+    } = *palette;
     let period_label = period_label(period);
 
-    let bold_cyan = ansi("\x1b[1;36m");
-    let bold = ansi("\x1b[1m");
-    let dim = ansi("\x1b[90m");
-    let yellow = ansi("\x1b[33m");
-    let reset = ansi("\x1b[0m");
-
-    println!();
-    println!(
+    let mut out = String::new();
+    writeln!(out).unwrap();
+    writeln!(
+        out,
         "  {bold_cyan} Branch{reset} {bold}{}{reset} — {dim}{}{reset}",
         branch, period_label
-    );
+    )
+    .unwrap();
     if let Some(repo_id) = repo {
-        println!("  {bold}Repo filter{reset} {}", repo_id);
+        writeln!(out, "  {bold}Repo filter{reset} {}", repo_id).unwrap();
     }
-    println!("  {dim}{}{reset}", "─".repeat(40));
+    writeln!(out, "  {dim}{}{reset}", "─".repeat(40)).unwrap();
 
     match result {
         Some(b) => {
             if !b.repo_id.is_empty() {
-                println!("  {bold}Repo{reset}       {}", b.repo_id);
+                writeln!(out, "  {bold}Repo{reset}       {}", b.repo_id).unwrap();
             }
-            println!("  {bold}Sessions{reset}   {}", b.session_count);
-            println!("  {bold}Messages{reset}   {}", b.message_count);
-            println!(
+            writeln!(out, "  {bold}Sessions{reset}   {}", b.session_count).unwrap();
+            writeln!(out, "  {bold}Messages{reset}   {}", b.message_count).unwrap();
+            writeln!(
+                out,
                 "  {bold}Input{reset}      {}",
                 format_tokens(b.input_tokens)
-            );
-            println!(
+            )
+            .unwrap();
+            writeln!(
+                out,
                 "  {bold}Output{reset}     {}",
                 format_tokens(b.output_tokens)
-            );
-            println!(
+            )
+            .unwrap();
+            writeln!(
+                out,
                 "  {bold}Est. cost{reset}  {yellow}{}{reset}",
                 format_cost_cents(b.cost_cents)
-            );
+            )
+            .unwrap();
         }
         None => {
-            println!("  No data found for branch '{}'.", branch);
-            println!("  Tip: run `budi db import` first if you haven't imported data yet.");
-            println!("  Run `budi stats branches` to see available branches.");
+            writeln!(out, "  No data found for branch '{}'.", branch).unwrap();
+            writeln!(
+                out,
+                "  Tip: run `budi db import` first if you haven't imported data yet."
+            )
+            .unwrap();
+            writeln!(
+                out,
+                "  Run `budi stats branches` to see available branches."
+            )
+            .unwrap();
         }
     }
 
-    println!();
-    Ok(())
+    writeln!(out).unwrap();
+    out
 }
 
 /// `--tickets` view: tickets ranked by cost. Mirrors `cmd_stats_branches`.
@@ -1161,16 +1313,31 @@ fn cmd_stats_tickets(
         return Ok(());
     }
 
+    let palette = Palette::from_env();
+    print!("{}", format_tickets(period, &page, label_width, &palette));
+    Ok(())
+}
+
+const TICKETS_SOURCE_WIDTH: usize = 18;
+
+/// Render the `--tickets` text view to a String.
+fn format_tickets(
+    period: StatsPeriod,
+    page: &BreakdownPage<budi_core::analytics::TicketCost>,
+    label_width: usize,
+    palette: &Palette,
+) -> String {
+    use std::fmt::Write as _;
+    let Palette {
+        bold_cyan,
+        bold,
+        dim,
+        cyan,
+        yellow,
+        reset,
+        ..
+    } = *palette;
     let period_label = period_label(period);
-
-    let bold_cyan = ansi("\x1b[1;36m");
-    let bold = ansi("\x1b[1m");
-    let dim = ansi("\x1b[90m");
-    let cyan = ansi("\x1b[36m");
-    let yellow = ansi("\x1b[33m");
-    let reset = ansi("\x1b[0m");
-
-    const SOURCE_WIDTH: usize = 18;
     // TOP_BRANCH uses the same middle-ellipsis truncation as the main
     // label column; keep its column width pinned to `label_width` so
     // long branch names don't spill into adjacent columns (#450 B).
@@ -1181,38 +1348,57 @@ fn cmd_stats_tickets(
         + 1
         + BREAKDOWN_COST_WIDTH
         + 2
-        + SOURCE_WIDTH
+        + TICKETS_SOURCE_WIDTH
         + 2
         + branch_width;
-    println!();
-    println!(
+
+    let mut out = String::new();
+    writeln!(out).unwrap();
+    writeln!(
+        out,
         "  {bold_cyan} Tickets{reset} — {bold}{}{reset}",
         period_label
-    );
-    println!("  {dim}{}{reset}", "─".repeat(rule_width));
+    )
+    .unwrap();
+    writeln!(out, "  {dim}{}{reset}", "─".repeat(rule_width)).unwrap();
 
     if page.rows.is_empty() && page.other.is_none() {
-        println!("  No ticket data for this period.");
-        println!("  Tip: branch names need to contain a ticket id (e.g. PAVA-123).");
-        println!();
-        return Ok(());
+        writeln!(out, "  No ticket data for this period.").unwrap();
+        writeln!(
+            out,
+            "  Tip: branch names need to contain a ticket id (e.g. PAVA-123)."
+        )
+        .unwrap();
+        writeln!(out).unwrap();
+        return out;
     }
 
     if is_only_untagged(&page.rows, |t| &t.ticket_id) && page.other.is_none() {
-        render_untagged_only_empty_state(BreakdownView::Tickets, period);
-        return Ok(());
+        out.push_str(&format_untagged_only_empty_state(
+            BreakdownView::Tickets,
+            period,
+            palette,
+        ));
+        return out;
     }
 
-    print_breakdown_header(
-        "TICKET",
-        label_width,
-        &format!(
-            "{:<SOURCE_WIDTH$}  {:<branch_w$}",
-            "SOURCE",
-            "TOP_BRANCH",
-            branch_w = branch_width,
-        ),
-    );
+    writeln!(
+        out,
+        "{}",
+        format_breakdown_header_line(
+            "TICKET",
+            label_width,
+            &format!(
+                "{:<src_w$}  {:<branch_w$}",
+                "SOURCE",
+                "TOP_BRANCH",
+                src_w = TICKETS_SOURCE_WIDTH,
+                branch_w = branch_width,
+            ),
+            palette,
+        )
+    )
+    .unwrap();
 
     let max_cost = max_cost_for_rows(&page.rows);
     for t in &page.rows {
@@ -1231,8 +1417,9 @@ fn cmd_stats_tickets(
         } else {
             format!("src={}", t.source)
         };
-        println!(
-            "  {bold}{:<label_w$}{reset} {cyan}{}{reset} {yellow}{:>cost_w$}{reset}  {dim}{:<SOURCE_WIDTH$}{reset}  {dim}{:<branch_w$}{reset}",
+        writeln!(
+            out,
+            "  {bold}{:<label_w$}{reset} {cyan}{}{reset} {yellow}{:>cost_w$}{reset}  {dim}{:<src_w$}{reset}  {dim}{:<branch_w$}{reset}",
             label,
             bar,
             format_cost_cents_fixed(t.cost_cents),
@@ -1241,11 +1428,18 @@ fn cmd_stats_tickets(
             label_w = label_width,
             branch_w = branch_width,
             cost_w = BREAKDOWN_COST_WIDTH,
-        );
+            src_w = TICKETS_SOURCE_WIDTH,
+        )
+        .unwrap();
     }
 
-    render_breakdown_footer(&page, label_width, rule_width);
-    Ok(())
+    out.push_str(&format_breakdown_footer(
+        page,
+        label_width,
+        rule_width,
+        palette,
+    ));
+    out
 }
 
 /// `--ticket <ID>` detail view. Mirrors `cmd_stats_branch_detail`, plus a
@@ -1266,53 +1460,81 @@ fn cmd_stats_ticket_detail(
         return Ok(());
     }
 
+    let palette = Palette::from_env();
+    print!(
+        "{}",
+        format_ticket_detail(period, ticket, repo, result.as_ref(), &palette)
+    );
+    Ok(())
+}
+
+/// Render the `--ticket <ID>` detail view to a String.
+fn format_ticket_detail(
+    period: StatsPeriod,
+    ticket: &str,
+    repo: Option<&str>,
+    result: Option<&budi_core::analytics::TicketCostDetail>,
+    palette: &Palette,
+) -> String {
+    use std::fmt::Write as _;
+    let Palette {
+        bold_cyan,
+        bold,
+        dim,
+        yellow,
+        reset,
+        ..
+    } = *palette;
     let period_label = period_label(period);
 
-    let bold_cyan = ansi("\x1b[1;36m");
-    let bold = ansi("\x1b[1m");
-    let dim = ansi("\x1b[90m");
-    let yellow = ansi("\x1b[33m");
-    let reset = ansi("\x1b[0m");
-
-    println!();
-    println!(
+    let mut out = String::new();
+    writeln!(out).unwrap();
+    writeln!(
+        out,
         "  {bold_cyan} Ticket{reset} {bold}{}{reset} — {dim}{}{reset}",
         ticket, period_label
-    );
+    )
+    .unwrap();
     if let Some(repo_id) = repo {
-        println!("  {bold}Repo filter{reset} {}", repo_id);
+        writeln!(out, "  {bold}Repo filter{reset} {}", repo_id).unwrap();
     }
-    println!("  {dim}{}{reset}", "─".repeat(50));
+    writeln!(out, "  {dim}{}{reset}", "─".repeat(50)).unwrap();
 
     match result {
         Some(t) => {
             if !t.repo_id.is_empty() {
-                println!("  {bold}Repo{reset}       {}", t.repo_id);
+                writeln!(out, "  {bold}Repo{reset}       {}", t.repo_id).unwrap();
             }
             if !t.ticket_prefix.is_empty() {
-                println!("  {bold}Prefix{reset}     {}", t.ticket_prefix);
+                writeln!(out, "  {bold}Prefix{reset}     {}", t.ticket_prefix).unwrap();
             }
             if !t.source.is_empty() {
-                println!("  {bold}Source{reset}     {}", t.source);
+                writeln!(out, "  {bold}Source{reset}     {}", t.source).unwrap();
             }
-            println!("  {bold}Sessions{reset}   {}", t.session_count);
-            println!("  {bold}Messages{reset}   {}", t.message_count);
-            println!(
+            writeln!(out, "  {bold}Sessions{reset}   {}", t.session_count).unwrap();
+            writeln!(out, "  {bold}Messages{reset}   {}", t.message_count).unwrap();
+            writeln!(
+                out,
                 "  {bold}Input{reset}      {}",
                 format_tokens(t.input_tokens)
-            );
-            println!(
+            )
+            .unwrap();
+            writeln!(
+                out,
                 "  {bold}Output{reset}     {}",
                 format_tokens(t.output_tokens)
-            );
-            println!(
+            )
+            .unwrap();
+            writeln!(
+                out,
                 "  {bold}Est. cost{reset}  {yellow}{}{reset}",
                 format_cost_cents(t.cost_cents)
-            );
+            )
+            .unwrap();
 
             if !t.branches.is_empty() {
-                println!();
-                println!("  {bold}Branches{reset}");
+                writeln!(out).unwrap();
+                writeln!(out, "  {bold}Branches{reset}").unwrap();
                 for br in &t.branches {
                     let repo_label = if br.repo_id.is_empty() {
                         "--".to_string()
@@ -1323,24 +1545,30 @@ fn cmd_stats_ticket_detail(
                             .unwrap_or(&br.repo_id)
                             .to_string()
                     };
-                    println!(
+                    writeln!(
+                        out,
                         "    {bold}{:<28}{reset} {yellow}{:>8}{reset}  {dim}{}{reset}",
                         br.git_branch,
                         format_cost_cents(br.cost_cents),
                         repo_label
-                    );
+                    )
+                    .unwrap();
                 }
             }
         }
         None => {
-            println!("  No data found for ticket '{}'.", ticket);
-            println!("  Tip: run `budi db import` first if you haven't imported data yet.");
-            println!("  Run `budi stats tickets` to see available tickets.");
+            writeln!(out, "  No data found for ticket '{}'.", ticket).unwrap();
+            writeln!(
+                out,
+                "  Tip: run `budi db import` first if you haven't imported data yet."
+            )
+            .unwrap();
+            writeln!(out, "  Run `budi stats tickets` to see available tickets.").unwrap();
         }
     }
 
-    println!();
-    Ok(())
+    writeln!(out).unwrap();
+    out
 }
 
 /// `--activities` list view. Mirrors `cmd_stats_tickets`: activities come
@@ -1372,16 +1600,34 @@ fn cmd_stats_activities(
         return Ok(());
     }
 
+    let palette = Palette::from_env();
+    print!(
+        "{}",
+        format_activities(period, &page, label_width, &palette)
+    );
+    Ok(())
+}
+
+const ACTIVITIES_CONF_WIDTH: usize = 11;
+
+/// Render the `--activities` text view to a String.
+fn format_activities(
+    period: StatsPeriod,
+    page: &BreakdownPage<budi_core::analytics::ActivityCost>,
+    label_width: usize,
+    palette: &Palette,
+) -> String {
+    use std::fmt::Write as _;
+    let Palette {
+        bold_cyan,
+        bold,
+        dim,
+        cyan,
+        yellow,
+        reset,
+        ..
+    } = *palette;
     let period_label = period_label(period);
-
-    let bold_cyan = ansi("\x1b[1;36m");
-    let bold = ansi("\x1b[1m");
-    let dim = ansi("\x1b[90m");
-    let cyan = ansi("\x1b[36m");
-    let yellow = ansi("\x1b[33m");
-    let reset = ansi("\x1b[0m");
-
-    const CONF_WIDTH: usize = 11;
     let branch_width = label_width;
     let rule_width = label_width
         + 1
@@ -1389,40 +1635,57 @@ fn cmd_stats_activities(
         + 1
         + BREAKDOWN_COST_WIDTH
         + 2
-        + CONF_WIDTH
+        + ACTIVITIES_CONF_WIDTH
         + 2
         + branch_width;
-    println!();
-    println!(
+
+    let mut out = String::new();
+    writeln!(out).unwrap();
+    writeln!(
+        out,
         "  {bold_cyan} Activities{reset} — {bold}{}{reset}",
         period_label
-    );
-    println!("  {dim}{}{reset}", "─".repeat(rule_width));
+    )
+    .unwrap();
+    writeln!(out, "  {dim}{}{reset}", "─".repeat(rule_width)).unwrap();
 
     if page.rows.is_empty() && page.other.is_none() {
-        println!("  No activity data for this period.");
-        println!(
+        writeln!(out, "  No activity data for this period.").unwrap();
+        writeln!(
+            out,
             "  Tip: activity is classified from the user's prompt; run `budi doctor` to check the signal."
-        );
-        println!();
-        return Ok(());
+        )
+        .unwrap();
+        writeln!(out).unwrap();
+        return out;
     }
 
     if is_only_untagged(&page.rows, |a| &a.activity) && page.other.is_none() {
-        render_untagged_only_empty_state(BreakdownView::Activities, period);
-        return Ok(());
+        out.push_str(&format_untagged_only_empty_state(
+            BreakdownView::Activities,
+            period,
+            palette,
+        ));
+        return out;
     }
 
-    print_breakdown_header(
-        "ACTIVITY",
-        label_width,
-        &format!(
-            "{:<CONF_WIDTH$}  {:<branch_w$}",
-            "CONFIDENCE",
-            "TOP_BRANCH",
-            branch_w = branch_width,
-        ),
-    );
+    writeln!(
+        out,
+        "{}",
+        format_breakdown_header_line(
+            "ACTIVITY",
+            label_width,
+            &format!(
+                "{:<conf_w$}  {:<branch_w$}",
+                "CONFIDENCE",
+                "TOP_BRANCH",
+                conf_w = ACTIVITIES_CONF_WIDTH,
+                branch_w = branch_width,
+            ),
+            palette,
+        )
+    )
+    .unwrap();
 
     let max_cost = max_cost_for_rows(&page.rows);
     for a in &page.rows {
@@ -1441,8 +1704,9 @@ fn cmd_stats_activities(
         } else {
             format!("conf={}", a.confidence)
         };
-        println!(
-            "  {bold}{:<label_w$}{reset} {cyan}{}{reset} {yellow}{:>cost_w$}{reset}  {dim}{:<CONF_WIDTH$}{reset}  {dim}{:<branch_w$}{reset}",
+        writeln!(
+            out,
+            "  {bold}{:<label_w$}{reset} {cyan}{}{reset} {yellow}{:>cost_w$}{reset}  {dim}{:<conf_w$}{reset}  {dim}{:<branch_w$}{reset}",
             label,
             bar,
             format_cost_cents_fixed(a.cost_cents),
@@ -1451,11 +1715,18 @@ fn cmd_stats_activities(
             label_w = label_width,
             branch_w = branch_width,
             cost_w = BREAKDOWN_COST_WIDTH,
-        );
+            conf_w = ACTIVITIES_CONF_WIDTH,
+        )
+        .unwrap();
     }
 
-    render_breakdown_footer(&page, label_width, rule_width);
-    Ok(())
+    out.push_str(&format_breakdown_footer(
+        page,
+        label_width,
+        rule_width,
+        palette,
+    ));
+    out
 }
 
 /// `--activity <NAME>` detail view. Mirrors `cmd_stats_ticket_detail`, plus
@@ -1477,31 +1748,54 @@ fn cmd_stats_activity_detail(
         return Ok(());
     }
 
+    let palette = Palette::from_env();
+    print!(
+        "{}",
+        format_activity_detail(period, activity, repo, result.as_ref(), &palette)
+    );
+    Ok(())
+}
+
+/// Render the `--activity <NAME>` detail view to a String.
+fn format_activity_detail(
+    period: StatsPeriod,
+    activity: &str,
+    repo: Option<&str>,
+    result: Option<&budi_core::analytics::ActivityCostDetail>,
+    palette: &Palette,
+) -> String {
+    use std::fmt::Write as _;
+    let Palette {
+        bold_cyan,
+        bold,
+        dim,
+        yellow,
+        reset,
+        ..
+    } = *palette;
     let period_label = period_label(period);
 
-    let bold_cyan = ansi("\x1b[1;36m");
-    let bold = ansi("\x1b[1m");
-    let dim = ansi("\x1b[90m");
-    let yellow = ansi("\x1b[33m");
-    let reset = ansi("\x1b[0m");
-
-    println!();
-    println!(
+    let mut out = String::new();
+    writeln!(out).unwrap();
+    writeln!(
+        out,
         "  {bold_cyan} Activity{reset} {bold}{}{reset} — {dim}{}{reset}",
         activity, period_label
-    );
+    )
+    .unwrap();
     if let Some(repo_id) = repo {
-        println!("  {bold}Repo filter{reset} {}", repo_id);
+        writeln!(out, "  {bold}Repo filter{reset} {}", repo_id).unwrap();
     }
-    println!("  {dim}{}{reset}", "─".repeat(50));
+    writeln!(out, "  {dim}{}{reset}", "─".repeat(50)).unwrap();
 
     match result {
         Some(a) => {
             if !a.repo_id.is_empty() {
-                println!("  {bold}Repo{reset}       {}", a.repo_id);
+                writeln!(out, "  {bold}Repo{reset}       {}", a.repo_id).unwrap();
             }
             if !a.source.is_empty() {
-                println!(
+                writeln!(
+                    out,
                     "  {bold}Source{reset}     {} {dim}(confidence: {}){reset}",
                     a.source,
                     if a.confidence.is_empty() {
@@ -1509,26 +1803,33 @@ fn cmd_stats_activity_detail(
                     } else {
                         &a.confidence
                     }
-                );
+                )
+                .unwrap();
             }
-            println!("  {bold}Sessions{reset}   {}", a.session_count);
-            println!("  {bold}Messages{reset}   {}", a.message_count);
-            println!(
+            writeln!(out, "  {bold}Sessions{reset}   {}", a.session_count).unwrap();
+            writeln!(out, "  {bold}Messages{reset}   {}", a.message_count).unwrap();
+            writeln!(
+                out,
                 "  {bold}Input{reset}      {}",
                 format_tokens(a.input_tokens)
-            );
-            println!(
+            )
+            .unwrap();
+            writeln!(
+                out,
                 "  {bold}Output{reset}     {}",
                 format_tokens(a.output_tokens)
-            );
-            println!(
+            )
+            .unwrap();
+            writeln!(
+                out,
                 "  {bold}Est. cost{reset}  {yellow}{}{reset}",
                 format_cost_cents(a.cost_cents)
-            );
+            )
+            .unwrap();
 
             if !a.branches.is_empty() {
-                println!();
-                println!("  {bold}Branches{reset}");
+                writeln!(out).unwrap();
+                writeln!(out, "  {bold}Branches{reset}").unwrap();
                 for br in &a.branches {
                     let repo_label = if br.repo_id.is_empty() {
                         "--".to_string()
@@ -1539,24 +1840,34 @@ fn cmd_stats_activity_detail(
                             .unwrap_or(&br.repo_id)
                             .to_string()
                     };
-                    println!(
+                    writeln!(
+                        out,
                         "    {bold}{:<28}{reset} {yellow}{:>8}{reset}  {dim}{}{reset}",
                         br.git_branch,
                         format_cost_cents(br.cost_cents),
                         repo_label
-                    );
+                    )
+                    .unwrap();
                 }
             }
         }
         None => {
-            println!("  No data found for activity '{}'.", activity);
-            println!("  Tip: run `budi db import` first if you haven't imported data yet.");
-            println!("  Run `budi stats activities` to see available activities.");
+            writeln!(out, "  No data found for activity '{}'.", activity).unwrap();
+            writeln!(
+                out,
+                "  Tip: run `budi db import` first if you haven't imported data yet."
+            )
+            .unwrap();
+            writeln!(
+                out,
+                "  Run `budi stats activities` to see available activities."
+            )
+            .unwrap();
         }
     }
 
-    println!();
-    Ok(())
+    writeln!(out).unwrap();
+    out
 }
 
 /// Validate a `--file <PATH>` argument. Rejects absolute paths, paths
@@ -1615,52 +1926,89 @@ fn cmd_stats_files(
         return Ok(());
     }
 
+    let palette = Palette::from_env();
+    print!("{}", format_files(period, &page, label_width, &palette));
+    Ok(())
+}
+
+const FILES_SOURCE_WIDTH: usize = 16;
+const FILES_TICKET_WIDTH: usize = 14;
+
+/// Render the `--files` text view to a String.
+fn format_files(
+    period: StatsPeriod,
+    page: &BreakdownPage<budi_core::analytics::FileCost>,
+    label_width: usize,
+    palette: &Palette,
+) -> String {
+    use std::fmt::Write as _;
+    let Palette {
+        bold_cyan,
+        bold,
+        dim,
+        cyan,
+        yellow,
+        reset,
+        ..
+    } = *palette;
     let period_label = period_label(period);
-
-    let bold_cyan = ansi("\x1b[1;36m");
-    let bold = ansi("\x1b[1m");
-    let dim = ansi("\x1b[90m");
-    let cyan = ansi("\x1b[36m");
-    let yellow = ansi("\x1b[33m");
-    let reset = ansi("\x1b[0m");
-
-    const SOURCE_WIDTH: usize = 16;
-    const TICKET_WIDTH: usize = 14;
     let rule_width = label_width
         + 1
         + BREAKDOWN_BAR_WIDTH
         + 1
         + BREAKDOWN_COST_WIDTH
         + 2
-        + SOURCE_WIDTH
+        + FILES_SOURCE_WIDTH
         + 2
-        + TICKET_WIDTH;
-    println!();
-    println!("  {bold_cyan} Files{reset} — {bold}{}{reset}", period_label);
-    println!("  {dim}{}{reset}", "─".repeat(rule_width));
+        + FILES_TICKET_WIDTH;
+
+    let mut out = String::new();
+    writeln!(out).unwrap();
+    writeln!(
+        out,
+        "  {bold_cyan} Files{reset} — {bold}{}{reset}",
+        period_label
+    )
+    .unwrap();
+    writeln!(out, "  {dim}{}{reset}", "─".repeat(rule_width)).unwrap();
 
     if page.rows.is_empty() && page.other.is_none() {
-        println!("  No file data for this period.");
-        println!(
+        writeln!(out, "  No file data for this period.").unwrap();
+        writeln!(
+            out,
             "  Tip: file paths are extracted from tool-call arguments (Read/Write/Edit, etc)."
-        );
-        println!();
-        return Ok(());
+        )
+        .unwrap();
+        writeln!(out).unwrap();
+        return out;
     }
 
     if is_only_untagged(&page.rows, |f| &f.file_path) && page.other.is_none() {
-        render_untagged_only_empty_state(BreakdownView::Files, period);
-        return Ok(());
+        out.push_str(&format_untagged_only_empty_state(
+            BreakdownView::Files,
+            period,
+            palette,
+        ));
+        return out;
     }
 
-    print_breakdown_header(
-        "FILE",
-        label_width,
-        &format!(
-            "{:<SOURCE_WIDTH$}  {:<TICKET_WIDTH$}",
-            "SOURCE", "TOP_TICKET"
-        ),
-    );
+    writeln!(
+        out,
+        "{}",
+        format_breakdown_header_line(
+            "FILE",
+            label_width,
+            &format!(
+                "{:<src_w$}  {:<tk_w$}",
+                "SOURCE",
+                "TOP_TICKET",
+                src_w = FILES_SOURCE_WIDTH,
+                tk_w = FILES_TICKET_WIDTH,
+            ),
+            palette,
+        )
+    )
+    .unwrap();
 
     let max_cost = max_cost_for_rows(&page.rows);
     for f in &page.rows {
@@ -1668,7 +2016,7 @@ fn cmd_stats_files(
         let ticket_label = if f.top_ticket_id.is_empty() {
             "--".to_string()
         } else {
-            truncate_label_middle(&f.top_ticket_id, TICKET_WIDTH)
+            truncate_label_middle(&f.top_ticket_id, FILES_TICKET_WIDTH)
         };
         let source_label = if f.source.is_empty() {
             "--".to_string()
@@ -1682,8 +2030,9 @@ fn cmd_stats_files(
             &display_dimension(BreakdownView::Files, &f.file_path),
             label_width,
         );
-        println!(
-            "  {bold}{:<label_w$}{reset} {cyan}{}{reset} {yellow}{:>cost_w$}{reset}  {dim}{:<SOURCE_WIDTH$}{reset}  {dim}{:<TICKET_WIDTH$}{reset}",
+        writeln!(
+            out,
+            "  {bold}{:<label_w$}{reset} {cyan}{}{reset} {yellow}{:>cost_w$}{reset}  {dim}{:<src_w$}{reset}  {dim}{:<tk_w$}{reset}",
             path_label,
             bar,
             format_cost_cents_fixed(f.cost_cents),
@@ -1691,11 +2040,19 @@ fn cmd_stats_files(
             ticket_label,
             label_w = label_width,
             cost_w = BREAKDOWN_COST_WIDTH,
-        );
+            src_w = FILES_SOURCE_WIDTH,
+            tk_w = FILES_TICKET_WIDTH,
+        )
+        .unwrap();
     }
 
-    render_breakdown_footer(&page, label_width, rule_width);
-    Ok(())
+    out.push_str(&format_breakdown_footer(
+        page,
+        label_width,
+        rule_width,
+        palette,
+    ));
+    out
 }
 
 /// `--file <PATH>` detail view. Mirrors `cmd_stats_ticket_detail`, plus a
@@ -1716,31 +2073,54 @@ fn cmd_stats_file_detail(
         return Ok(());
     }
 
+    let palette = Palette::from_env();
+    print!(
+        "{}",
+        format_file_detail(period, file_path, repo, result.as_ref(), &palette)
+    );
+    Ok(())
+}
+
+/// Render the `--file <PATH>` detail view to a String.
+fn format_file_detail(
+    period: StatsPeriod,
+    file_path: &str,
+    repo: Option<&str>,
+    result: Option<&budi_core::analytics::FileCostDetail>,
+    palette: &Palette,
+) -> String {
+    use std::fmt::Write as _;
+    let Palette {
+        bold_cyan,
+        bold,
+        dim,
+        yellow,
+        reset,
+        ..
+    } = *palette;
     let period_label = period_label(period);
 
-    let bold_cyan = ansi("\x1b[1;36m");
-    let bold = ansi("\x1b[1m");
-    let dim = ansi("\x1b[90m");
-    let yellow = ansi("\x1b[33m");
-    let reset = ansi("\x1b[0m");
-
-    println!();
-    println!(
+    let mut out = String::new();
+    writeln!(out).unwrap();
+    writeln!(
+        out,
         "  {bold_cyan} File{reset} {bold}{}{reset} — {dim}{}{reset}",
         file_path, period_label
-    );
+    )
+    .unwrap();
     if let Some(repo_id) = repo {
-        println!("  {bold}Repo filter{reset} {}", repo_id);
+        writeln!(out, "  {bold}Repo filter{reset} {}", repo_id).unwrap();
     }
-    println!("  {dim}{}{reset}", "─".repeat(50));
+    writeln!(out, "  {dim}{}{reset}", "─".repeat(50)).unwrap();
 
     match result {
         Some(f) => {
             if !f.repo_id.is_empty() {
-                println!("  {bold}Repo{reset}       {}", f.repo_id);
+                writeln!(out, "  {bold}Repo{reset}       {}", f.repo_id).unwrap();
             }
             if !f.source.is_empty() {
-                println!(
+                writeln!(
+                    out,
                     "  {bold}Source{reset}     {} {dim}(confidence: {}){reset}",
                     f.source,
                     if f.confidence.is_empty() {
@@ -1748,26 +2128,33 @@ fn cmd_stats_file_detail(
                     } else {
                         &f.confidence
                     }
-                );
+                )
+                .unwrap();
             }
-            println!("  {bold}Sessions{reset}   {}", f.session_count);
-            println!("  {bold}Messages{reset}   {}", f.message_count);
-            println!(
+            writeln!(out, "  {bold}Sessions{reset}   {}", f.session_count).unwrap();
+            writeln!(out, "  {bold}Messages{reset}   {}", f.message_count).unwrap();
+            writeln!(
+                out,
                 "  {bold}Input{reset}      {}",
                 format_tokens(f.input_tokens)
-            );
-            println!(
+            )
+            .unwrap();
+            writeln!(
+                out,
                 "  {bold}Output{reset}     {}",
                 format_tokens(f.output_tokens)
-            );
-            println!(
+            )
+            .unwrap();
+            writeln!(
+                out,
                 "  {bold}Est. cost{reset}  {yellow}{}{reset}",
                 format_cost_cents(f.cost_cents)
-            );
+            )
+            .unwrap();
 
             if !f.branches.is_empty() {
-                println!();
-                println!("  {bold}Branches{reset}");
+                writeln!(out).unwrap();
+                writeln!(out, "  {bold}Branches{reset}").unwrap();
                 for br in &f.branches {
                     let repo_label = if br.repo_id.is_empty() {
                         "--".to_string()
@@ -1778,37 +2165,45 @@ fn cmd_stats_file_detail(
                             .unwrap_or(&br.repo_id)
                             .to_string()
                     };
-                    println!(
+                    writeln!(
+                        out,
                         "    {bold}{:<28}{reset} {yellow}{:>8}{reset}  {dim}{}{reset}",
                         br.git_branch,
                         format_cost_cents(br.cost_cents),
                         repo_label
-                    );
+                    )
+                    .unwrap();
                 }
             }
 
             if !f.tickets.is_empty() {
-                println!();
-                println!("  {bold}Tickets{reset}");
+                writeln!(out).unwrap();
+                writeln!(out, "  {bold}Tickets{reset}").unwrap();
                 for tk in &f.tickets {
-                    println!(
+                    writeln!(
+                        out,
                         "    {bold}{:<28}{reset} {yellow}{:>8}{reset}  {dim}{} msgs{reset}",
                         tk.ticket_id,
                         format_cost_cents(tk.cost_cents),
                         tk.message_count
-                    );
+                    )
+                    .unwrap();
                 }
             }
         }
         None => {
-            println!("  No data found for file '{}'.", file_path);
-            println!("  Tip: run `budi db import` first if you haven't imported data yet.");
-            println!("  Run `budi stats files` to see available files.");
+            writeln!(out, "  No data found for file '{}'.", file_path).unwrap();
+            writeln!(
+                out,
+                "  Tip: run `budi db import` first if you haven't imported data yet."
+            )
+            .unwrap();
+            writeln!(out, "  Run `budi stats files` to see available files.").unwrap();
         }
     }
 
-    println!();
-    Ok(())
+    writeln!(out).unwrap();
+    out
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1842,69 +2237,99 @@ fn cmd_stats_models(
         return Ok(());
     }
 
+    let palette = Palette::from_env();
+    print!(
+        "{}",
+        format_models(period, &page, label_width, include_pending, &palette)
+    );
+    Ok(())
+}
+
+const MODELS_MSGS_WIDTH: usize = 10;
+const MODELS_TOK_WIDTH: usize = 10;
+
+/// Render the `--models` text view to a String.
+fn format_models(
+    period: StatsPeriod,
+    page: &BreakdownPage<budi_core::analytics::ModelUsage>,
+    label_width: usize,
+    include_pending: bool,
+    palette: &Palette,
+) -> String {
+    use std::fmt::Write as _;
+    let Palette {
+        bold_cyan,
+        bold,
+        dim,
+        cyan,
+        yellow,
+        reset,
+        ..
+    } = *palette;
     let period_label = period_label(period);
-
-    let bold_cyan = ansi("\x1b[1;36m");
-    let bold = ansi("\x1b[1m");
-    let dim = ansi("\x1b[90m");
-    let cyan = ansi("\x1b[36m");
-    let yellow = ansi("\x1b[33m");
-    let reset = ansi("\x1b[0m");
-
-    const MSGS_WIDTH: usize = 10;
-    const TOK_WIDTH: usize = 10;
     let rule_width = label_width
         + 1
         + BREAKDOWN_BAR_WIDTH
         + 1
         + BREAKDOWN_COST_WIDTH
         + 2
-        + MSGS_WIDTH
+        + MODELS_MSGS_WIDTH
         + 2
-        + TOK_WIDTH;
-    println!();
-    println!(
+        + MODELS_TOK_WIDTH;
+
+    let mut out = String::new();
+    writeln!(out).unwrap();
+    writeln!(
+        out,
         "  {bold_cyan} Model usage{reset} — {bold}{}{reset}",
         period_label
-    );
-    println!("  {dim}{}{reset}", "─".repeat(rule_width));
+    )
+    .unwrap();
+    writeln!(out, "  {dim}{}{reset}", "─".repeat(rule_width)).unwrap();
 
     if page.rows.is_empty() && page.other.is_none() {
-        println!("  No data for this period.");
-        println!();
-        return Ok(());
+        writeln!(out, "  No data for this period.").unwrap();
+        writeln!(out).unwrap();
+        return out;
     }
 
-    // #443 acceptance: Cursor's `default` (Auto routing) and the
-    // `(untagged)` sentinel collapse into a single
-    // `(model not yet attributed)` bucket per provider — both mean
-    // "we don't have a specific model id for this cost". Summed
-    // per-provider so the grand-total footer from #448 still
-    // reconciles to the cent.
-    //
-    // #450 acceptance carry-forward: a merged bucket whose cost is
-    // zero is treated as a pending transient (the pure-`(untagged)`
-    // case with no backing `default` spend) and suppressed by
-    // default; `--include-pending` keeps it visible.
     let (render_rows, suppressed_pending) =
         merge_and_partition_pending(&page.rows, include_pending);
 
     if render_rows.is_empty() && page.other.is_none() && suppressed_pending > 0 {
-        render_untagged_only_empty_state(BreakdownView::Models, period);
-        println!(
+        out.push_str(&format_untagged_only_empty_state(
+            BreakdownView::Models,
+            period,
+            palette,
+        ));
+        writeln!(
+            out,
             "  {dim}* {} model row{} pending — Cursor lag (pass --include-pending to see){reset}",
             suppressed_pending,
             if suppressed_pending == 1 { "" } else { "s" },
-        );
-        println!();
-        return Ok(());
+        )
+        .unwrap();
+        writeln!(out).unwrap();
+        return out;
     }
 
-    print_breakdown_header(
-        "MODEL",
-        label_width,
-        &format!("{:>MSGS_WIDTH$}  {:>TOK_WIDTH$}", "MSGS", "TOKENS"),
-    );
+    writeln!(
+        out,
+        "{}",
+        format_breakdown_header_line(
+            "MODEL",
+            label_width,
+            &format!(
+                "{:>m_w$}  {:>t_w$}",
+                "MSGS",
+                "TOKENS",
+                m_w = MODELS_MSGS_WIDTH,
+                t_w = MODELS_TOK_WIDTH,
+            ),
+            palette,
+        )
+    )
+    .unwrap();
 
     let has_duplicate_display = {
         let mut seen = std::collections::HashSet::new();
@@ -1914,9 +2339,7 @@ fn cmd_stats_models(
     };
 
     // #449 fix: bars scale by cost (the column they sit next to), not by
-    // message count. A $66 row no longer renders with more blocks than a
-    // $548 row just because it crossed a provider-specific high-volume
-    // threshold.
+    // message count.
     let max_cost = render_rows
         .iter()
         .map(|r| r.cost_cents)
@@ -1933,8 +2356,9 @@ fn cmd_stats_models(
         let label = truncate_label_middle(&raw_label, label_width);
         let msgs_cell = format!("{} msgs", r.message_count);
         let tok_cell = format!("{} tok", format_tokens(total_tok));
-        println!(
-            "  {bold}{:<label_w$}{reset} {cyan}{}{reset} {yellow}{:>cost_w$}{reset}  {dim}{:>MSGS_WIDTH$}{reset}  {dim}{:>TOK_WIDTH$}{reset}",
+        writeln!(
+            out,
+            "  {bold}{:<label_w$}{reset} {cyan}{}{reset} {yellow}{:>cost_w$}{reset}  {dim}{:>m_w$}{reset}  {dim}{:>t_w$}{reset}",
             label,
             bar,
             format_cost_cents_fixed(r.cost_cents),
@@ -1942,19 +2366,29 @@ fn cmd_stats_models(
             tok_cell,
             label_w = label_width,
             cost_w = BREAKDOWN_COST_WIDTH,
-        );
+            m_w = MODELS_MSGS_WIDTH,
+            t_w = MODELS_TOK_WIDTH,
+        )
+        .unwrap();
     }
 
-    render_breakdown_footer(&page, label_width, rule_width);
+    out.push_str(&format_breakdown_footer(
+        page,
+        label_width,
+        rule_width,
+        palette,
+    ));
     if suppressed_pending > 0 {
-        println!(
+        writeln!(
+            out,
             "  {dim}* {} model row{} pending — Cursor lag (pass --include-pending to see){reset}",
             suppressed_pending,
             if suppressed_pending == 1 { "" } else { "s" },
-        );
-        println!();
+        )
+        .unwrap();
+        writeln!(out).unwrap();
     }
-    Ok(())
+    out
 }
 
 /// One row slated for text rendering in the `--models` view, after
@@ -2164,23 +2598,32 @@ fn placeholder_tag(p: Placeholder) -> &'static str {
 // rendered just above the total so sum(rendered) + other == total. This is
 // the contract the #448 release-blocker nails down.
 
-/// Render the `(other N rows)` line and trailing `Total $X (M of N rows shown)`
-/// footer that wraps every breakdown view. No-ops when the page is empty
-/// (caller prints its own "no data" message).
+/// Format the `(other N rows)` line and trailing `Total $X (M of N rows shown)`
+/// footer that wraps every breakdown view. Returns an empty string when
+/// the page is empty (caller prints its own "no data" message).
 ///
 /// `_name_col_width` is kept as a signature parameter for views that later
 /// want tighter per-column alignment (see #450); the current footer uses the
 /// `rule_width` anchor so it reconciles visually on every view without
 /// per-layout tuning.
-fn render_breakdown_footer<T>(page: &BreakdownPage<T>, _name_col_width: usize, rule_width: usize) {
+fn format_breakdown_footer<T>(
+    page: &BreakdownPage<T>,
+    _name_col_width: usize,
+    rule_width: usize,
+    palette: &Palette,
+) -> String {
+    use std::fmt::Write as _;
     if page.shown_rows == 0 && page.other.is_none() {
-        return;
+        return String::new();
     }
 
-    let dim = ansi("\x1b[90m");
-    let bold = ansi("\x1b[1m");
-    let yellow = ansi("\x1b[33m");
-    let reset = ansi("\x1b[0m");
+    let Palette {
+        dim,
+        bold,
+        yellow,
+        reset,
+        ..
+    } = *palette;
 
     // The footer sits under a rule `rule_width` wide; we right-align the
     // cost to the last column of the rule and pad the label with spaces
@@ -2191,6 +2634,8 @@ fn render_breakdown_footer<T>(page: &BreakdownPage<T>, _name_col_width: usize, r
     let rule_len = rule_width.max(20);
     let label_pad = rule_len.saturating_sub(COST_COL_WIDTH);
 
+    let mut out = String::new();
+
     if let Some(other) = &page.other {
         let plural = if other.row_count == 1 { "" } else { "s" };
         let label = format!(
@@ -2199,15 +2644,17 @@ fn render_breakdown_footer<T>(page: &BreakdownPage<T>, _name_col_width: usize, r
             other.row_count,
             plural,
         );
-        println!(
+        writeln!(
+            out,
             "  {dim}{:<label_pad$}{reset}{yellow}{:>width$}{reset}",
             label,
             format_cost_cents_fixed(other.cost_cents),
             width = COST_COL_WIDTH,
-        );
+        )
+        .unwrap();
     }
 
-    println!("  {dim}{}{reset}", "─".repeat(rule_len));
+    writeln!(out, "  {dim}{}{reset}", "─".repeat(rule_len)).unwrap();
 
     let shown_note = if page.other.is_some() {
         format!(
@@ -2222,14 +2669,17 @@ fn render_breakdown_footer<T>(page: &BreakdownPage<T>, _name_col_width: usize, r
     };
 
     let total_label_pad = label_pad.saturating_sub(5); // "Total" prefix width
-    println!(
+    writeln!(
+        out,
         "  {bold}Total{reset}{:<total_label_pad$}{yellow}{:>width$}{reset}  {}",
         "",
         format_cost_cents_fixed(page.total_cost_cents),
         shown_note,
         width = COST_COL_WIDTH,
-    );
-    println!();
+    )
+    .unwrap();
+    writeln!(out).unwrap();
+    out
 }
 
 // ─── Formatting Utilities ────────────────────────────────────────────────────
@@ -2294,7 +2744,7 @@ fn insert_thousands_separator(n: u64) -> String {
 /// to translate the DB's generic `(untagged)` dimension value into a
 /// view-specific label — a branch-less message means "no branch", a
 /// ticket-less message means "no ticket", etc. (#450 acceptance E)
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum BreakdownView {
     Projects,
     Branches,
@@ -2361,14 +2811,6 @@ fn cmd_stats_surfaces(
     // singular `provider` knob (no agents query string). We do the same
     // post-filter the summary path uses for the Agents block.
     if let Some(p) = provider {
-        // Provider filter is enforced server-side via a separate fetch;
-        // here we pre-validate the total cost number stays accurate by
-        // re-issuing with the dimension filter when one is set. Simpler:
-        // pass `provider` through the dimension filter shape used by every
-        // breakdown route — `?providers=<csv>` — by sending it as a single
-        // entry on the surfaces() client wrapper. Keep the post-filter
-        // semantics here for parity with the providers list rendered
-        // alongside the summary view.
         rows.retain(|_| !p.is_empty());
     }
 
@@ -2381,30 +2823,58 @@ fn cmd_stats_surfaces(
         return Ok(());
     }
 
-    let bold_cyan = ansi("\x1b[1;36m");
-    let bold = ansi("\x1b[1m");
-    let dim = ansi("\x1b[90m");
-    let yellow = ansi("\x1b[33m");
-    let reset = ansi("\x1b[0m");
+    let palette = Palette::from_env();
+    print!(
+        "{}",
+        format_surfaces(period, &rows, label_width, limit, &palette)
+    );
+    Ok(())
+}
 
-    println!();
-    println!(
+/// Render the `--surfaces` text view to a String.
+fn format_surfaces(
+    period: StatsPeriod,
+    rows: &[budi_core::analytics::SurfaceStats],
+    label_width: usize,
+    limit: usize,
+    palette: &Palette,
+) -> String {
+    use std::fmt::Write as _;
+    let Palette {
+        bold_cyan,
+        bold,
+        dim,
+        yellow,
+        reset,
+        ..
+    } = *palette;
+
+    let mut out = String::new();
+    writeln!(out).unwrap();
+    writeln!(
+        out,
         "  {bold_cyan} budi stats surfaces{reset} — {bold}{}{reset}",
         period_label(period),
-    );
-    println!("  {dim}{}{reset}", "─".repeat(60));
+    )
+    .unwrap();
+    writeln!(out, "  {dim}{}{reset}", "─".repeat(60)).unwrap();
 
     if rows.is_empty() {
-        println!("  No data for this period.");
-        println!();
-        return Ok(());
+        writeln!(out, "  No data for this period.").unwrap();
+        writeln!(out).unwrap();
+        return out;
     }
 
     let max_cost = rows
         .iter()
         .map(|r| r.total_cost_cents)
         .fold(0.0_f64, f64::max);
-    print_breakdown_header("SURFACE", label_width, "MSGS");
+    writeln!(
+        out,
+        "{}",
+        format_breakdown_header_line("SURFACE", label_width, "MSGS", palette)
+    )
+    .unwrap();
     let visible = if limit > 0 {
         rows.len().min(limit)
     } else {
@@ -2414,7 +2884,8 @@ fn cmd_stats_surfaces(
         let label = truncate_label(&r.surface, label_width);
         let bar = render_bar(r.total_cost_cents, max_cost);
         let cost_cell = format_cost_cents_fixed(r.total_cost_cents);
-        println!(
+        writeln!(
+            out,
             "  {label:<lw$} {bar} {yellow}{cost:>cw$}{reset}  {dim}{msgs}{reset}",
             label = label,
             bar = bar,
@@ -2422,10 +2893,11 @@ fn cmd_stats_surfaces(
             msgs = r.assistant_messages,
             lw = label_width,
             cw = BREAKDOWN_COST_WIDTH,
-        );
+        )
+        .unwrap();
     }
-    println!();
-    Ok(())
+    writeln!(out).unwrap();
+    out
 }
 
 fn cmd_stats_tags(
@@ -2445,54 +2917,95 @@ fn cmd_stats_tags(
         return Ok(());
     }
 
+    let palette = Palette::from_env();
+    print!(
+        "{}",
+        format_tags(period, tag_filter, &page, label_width, &palette)
+    );
+    Ok(())
+}
+
+/// Render the `--tag <KEY>` text view to a String.
+fn format_tags(
+    period: StatsPeriod,
+    tag_filter: &str,
+    page: &BreakdownPage<budi_core::analytics::TagCost>,
+    label_width: usize,
+    palette: &Palette,
+) -> String {
+    use std::fmt::Write as _;
+    let Palette {
+        bold_cyan,
+        bold,
+        dim,
+        cyan,
+        yellow,
+        reset,
+        ..
+    } = *palette;
+
+    let mut out = String::new();
+
     if page.rows.is_empty() && page.other.is_none() {
-        println!(
+        writeln!(
+            out,
             "No tag data for '{}' ({})",
             tag_filter,
             period_label(period)
-        );
-        return Ok(());
+        )
+        .unwrap();
+        return out;
     }
 
-    let bold = ansi("\x1b[1m");
-    let bold_cyan = ansi("\x1b[1;36m");
-    let cyan = ansi("\x1b[36m");
-    let yellow = ansi("\x1b[33m");
-    let reset = ansi("\x1b[0m");
-
-    let dim = ansi("\x1b[90m");
-
     let rule_width = label_width + 1 + BREAKDOWN_BAR_WIDTH + 1 + BREAKDOWN_COST_WIDTH;
-    println!();
-    println!(
+    writeln!(out).unwrap();
+    writeln!(
+        out,
         "  {bold_cyan} Tag: {}{reset} — {bold}{}{reset}",
         tag_filter,
         period_label(period)
-    );
-    println!("  {dim}{}{reset}", "─".repeat(rule_width));
+    )
+    .unwrap();
+    writeln!(out, "  {dim}{}{reset}", "─".repeat(rule_width)).unwrap();
 
     if is_only_untagged(&page.rows, |t| &t.value) && page.other.is_none() {
-        render_untagged_only_empty_state(BreakdownView::Tag, period);
-        return Ok(());
+        out.push_str(&format_untagged_only_empty_state(
+            BreakdownView::Tag,
+            period,
+            palette,
+        ));
+        return out;
     }
 
-    print_breakdown_header("VALUE", label_width, "");
+    writeln!(
+        out,
+        "{}",
+        format_breakdown_header_line("VALUE", label_width, "", palette)
+    )
+    .unwrap();
 
     let max_cost = max_cost_for_rows(&page.rows);
     for tag in &page.rows {
         let bar = render_bar(tag.cost_cents, max_cost);
         let label = truncate_label_middle(&tag.value, label_width);
-        println!(
+        writeln!(
+            out,
             "  {bold}{:<label_w$}{reset} {cyan}{}{reset} {yellow}{:>cost_w$}{reset}",
             label,
             bar,
             format_cost_cents_fixed(tag.cost_cents),
             label_w = label_width,
             cost_w = BREAKDOWN_COST_WIDTH,
-        );
+        )
+        .unwrap();
     }
-    render_breakdown_footer(&page, label_width, rule_width);
-    Ok(())
+    out.push_str(&format_breakdown_footer(
+        page,
+        label_width,
+        rule_width,
+        palette,
+    ));
+    out
 }
 
 #[cfg(test)]
