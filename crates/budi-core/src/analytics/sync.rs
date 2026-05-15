@@ -880,9 +880,14 @@ fn truncate_title(text: &str, max_len: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        ProviderSyncStats, SyncProgress, SyncReport, backfill_activity_tags,
-        backfill_session_titles, first_legacy_proxy_message_timestamp, read_transcript_tail,
+        INGEST_BATCH_SIZE, ProviderSyncStats, SyncProgress, SyncReport, backfill_activity_tags,
+        backfill_session_titles, backfill_ticket_tags, cleanup_legacy_auto_tags,
+        extract_first_prompt, first_legacy_proxy_message_timestamp, ingest_in_batches,
+        read_transcript_tail, truncate_title,
     };
+    use crate::analytics::{Tag, get_sync_offset};
+    use crate::jsonl::ParsedMessage;
+    use chrono::{TimeZone, Utc};
 
     fn temp_file_path(test_name: &str) -> std::path::PathBuf {
         let nanos = std::time::SystemTime::now()
@@ -1297,5 +1302,412 @@ mod tests {
             Some("Verkada-Web"),
             "session_title tag must land in the DB after ingest"
         );
+    }
+
+    // ---- #823: chunk-bounds tests for ingest_in_batches ----
+    //
+    // `ingest_in_batches` is the "mints sync chunks" producer at the heart of
+    // analytics/sync.rs: it slices a parsed-message vec into `INGEST_BATCH_SIZE`
+    // chunks and writes the sync offset only on the final chunk. These tests
+    // exercise the boundary cases (empty, exactly one batch, batch + 1) and the
+    // idempotency contract (offset advances once at the end; re-running with
+    // the same offset is a no-op).
+
+    fn assistant_msg(uuid: &str) -> ParsedMessage {
+        ParsedMessage {
+            uuid: uuid.to_string(),
+            session_id: Some(format!("s-{uuid}")),
+            timestamp: Utc.with_ymd_and_hms(2026, 5, 14, 12, 0, 0).unwrap(),
+            role: "assistant".to_string(),
+            model: Some("claude-opus-4-6".to_string()),
+            provider: "claude_code".to_string(),
+            cost_confidence: "exact".to_string(),
+            ..ParsedMessage::default()
+        }
+    }
+
+    fn build_assistant_batch(n: usize) -> (Vec<ParsedMessage>, Vec<Vec<Tag>>) {
+        let messages: Vec<ParsedMessage> =
+            (0..n).map(|i| assistant_msg(&format!("m-{i}"))).collect();
+        let tags: Vec<Vec<Tag>> = (0..n).map(|_| Vec::new()).collect();
+        (messages, tags)
+    }
+
+    fn count_messages(conn: &rusqlite::Connection) -> i64 {
+        conn.query_row("SELECT COUNT(*) FROM messages", [], |r| r.get(0))
+            .expect("count rows")
+    }
+
+    #[test]
+    fn ingest_in_batches_handles_empty_input() {
+        let mut conn = rusqlite::Connection::open_in_memory().expect("open db");
+        crate::migration::migrate(&conn).expect("migrate");
+
+        let inserted = ingest_in_batches(&mut conn, &[], &[], "/tmp/empty.jsonl", 0)
+            .expect("empty batch ingest");
+
+        assert_eq!(inserted, 0, "no rows should land");
+        assert_eq!(count_messages(&conn), 0);
+        // Empty input means the final-chunk write never fires, so no sync row.
+        let offset = get_sync_offset(&conn, "/tmp/empty.jsonl").expect("offset lookup");
+        assert_eq!(offset, 0);
+    }
+
+    #[test]
+    fn ingest_in_batches_handles_exactly_one_chunk() {
+        // INGEST_BATCH_SIZE messages exercises the single-chunk path where
+        // `end == messages.len()` on the first iteration and the sync_file
+        // write must fire on that one iteration.
+        let mut conn = rusqlite::Connection::open_in_memory().expect("open db");
+        crate::migration::migrate(&conn).expect("migrate");
+
+        let (msgs, tags) = build_assistant_batch(INGEST_BATCH_SIZE);
+        let path = "/tmp/exactly-one.jsonl";
+        let final_offset = 12_345;
+        let inserted = ingest_in_batches(&mut conn, &msgs, &tags, path, final_offset)
+            .expect("single-chunk ingest");
+
+        assert_eq!(inserted, INGEST_BATCH_SIZE);
+        assert_eq!(count_messages(&conn), INGEST_BATCH_SIZE as i64);
+        // Sync offset must be persisted on the final (and only) chunk.
+        let offset = get_sync_offset(&conn, path).expect("offset lookup");
+        assert_eq!(offset, final_offset);
+    }
+
+    #[test]
+    fn ingest_in_batches_handles_chunk_size_plus_one() {
+        // INGEST_BATCH_SIZE + 1 forces a second pass with a single-message
+        // chunk — the off-by-one case the issue calls out explicitly.
+        let mut conn = rusqlite::Connection::open_in_memory().expect("open db");
+        crate::migration::migrate(&conn).expect("migrate");
+
+        let total = INGEST_BATCH_SIZE + 1;
+        let (msgs, tags) = build_assistant_batch(total);
+        let path = "/tmp/plus-one.jsonl";
+        let final_offset = 99;
+        let inserted = ingest_in_batches(&mut conn, &msgs, &tags, path, final_offset)
+            .expect("two-chunk ingest");
+
+        assert_eq!(inserted, total, "every message must land exactly once");
+        assert_eq!(count_messages(&conn), total as i64);
+        let offset = get_sync_offset(&conn, path).expect("offset lookup");
+        assert_eq!(
+            offset, final_offset,
+            "offset is written on the final chunk, not on intermediate chunks"
+        );
+    }
+
+    #[test]
+    fn ingest_in_batches_is_idempotent_across_runs() {
+        // The "idempotency-key stability across runs" acceptance bullet:
+        // re-running ingest_in_batches with the same UUIDs and same final
+        // offset must not double-insert messages. UUIDs act as the
+        // idempotency key on the messages table (INSERT OR IGNORE).
+        let mut conn = rusqlite::Connection::open_in_memory().expect("open db");
+        crate::migration::migrate(&conn).expect("migrate");
+
+        let (msgs, tags) = build_assistant_batch(50);
+        let path = "/tmp/idempotent.jsonl";
+
+        let first =
+            ingest_in_batches(&mut conn, &msgs, &tags, path, 1_000).expect("first run ingest");
+        let second =
+            ingest_in_batches(&mut conn, &msgs, &tags, path, 1_000).expect("second run ingest");
+
+        assert_eq!(first, 50);
+        assert_eq!(second, 0, "re-running with same UUIDs must be a no-op");
+        assert_eq!(count_messages(&conn), 50);
+        let offset = get_sync_offset(&conn, path).expect("offset lookup");
+        assert_eq!(offset, 1_000);
+    }
+
+    // ---- read_transcript_tail edge cases ----
+    //
+    // The transcript reader handles the resume-after-failure semantics: it
+    // returns the slice from the last stored offset, normalizes truncated
+    // files back to offset 0, and returns an empty string when the file is
+    // already fully consumed.
+
+    #[test]
+    fn read_transcript_tail_returns_empty_when_offset_equals_len() {
+        let path = temp_file_path("equals-len");
+        std::fs::write(&path, "abc\n").expect("write");
+
+        let (content, off) = read_transcript_tail(&path, 4).expect("read");
+        assert_eq!(content, "");
+        assert_eq!(off, 4);
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn read_transcript_tail_returns_full_content_when_offset_zero() {
+        let path = temp_file_path("zero");
+        std::fs::write(&path, "hello\nworld\n").expect("write");
+
+        let (content, off) = read_transcript_tail(&path, 0).expect("read");
+        assert_eq!(content, "hello\nworld\n");
+        assert_eq!(off, 0);
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn read_transcript_tail_handles_empty_file() {
+        let path = temp_file_path("empty");
+        std::fs::write(&path, "").expect("write");
+
+        let (content, off) = read_transcript_tail(&path, 0).expect("read");
+        assert_eq!(content, "");
+        assert_eq!(off, 0);
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    // ---- truncate_title ----
+    //
+    // Pure function — small, but on the title path for every Claude Code and
+    // Cursor session title and so worth pinning the edge cases.
+
+    #[test]
+    fn truncate_title_passes_short_strings_through() {
+        assert_eq!(truncate_title("fix bug", 120), "fix bug");
+    }
+
+    #[test]
+    fn truncate_title_collapses_internal_whitespace_and_controls() {
+        // Tabs, newlines, and runs of spaces all collapse to single spaces.
+        assert_eq!(
+            truncate_title("fix\tthe\nbug   please", 120),
+            "fix the bug please"
+        );
+    }
+
+    #[test]
+    fn truncate_title_appends_ellipsis_when_too_long() {
+        let long: String = "a".repeat(150);
+        let out = truncate_title(&long, 100);
+        assert!(out.ends_with('…'));
+        assert_eq!(out.chars().filter(|&c| c == 'a').count(), 100);
+    }
+
+    #[test]
+    fn truncate_title_respects_utf8_char_boundary() {
+        // A multi-byte character straddling the cutoff must not be split:
+        // the function walks back to the nearest char boundary first.
+        let s = format!("{}é tail", "a".repeat(98));
+        let out = truncate_title(&s, 99);
+        assert!(out.ends_with('…'));
+        assert!(out.is_char_boundary(out.len() - '…'.len_utf8()));
+    }
+
+    // ---- cleanup_legacy_auto_tags ----
+
+    #[test]
+    fn cleanup_legacy_auto_tags_removes_only_legacy_keys() {
+        let mut conn = rusqlite::Connection::open_in_memory().expect("open db");
+        crate::migration::migrate(&conn).expect("migrate");
+
+        // Need a message row first because tags.message_id is a foreign key
+        // in the schema even if not strictly enforced.
+        conn.execute(
+            "INSERT INTO messages
+             (id, role, timestamp, model, provider,
+              input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
+              cost_cents_ingested, cost_cents_effective, cost_confidence)
+             VALUES
+             ('m1', 'assistant', datetime('now'), 'claude-opus-4-6', 'claude_code',
+              0, 0, 0, 0, 0.0, 0.0, 'exact')",
+            [],
+        )
+        .expect("insert msg");
+
+        conn.execute_batch(
+            "INSERT INTO tags (message_id, key, value) VALUES
+                ('m1', 'dominant_tool', 'Edit'),
+                ('m1', 'repo',          'budi'),
+                ('m1', 'branch',        'main'),
+                ('m1', 'activity',      'feature'),
+                ('m1', 'ticket_id',     'BUD-42');",
+        )
+        .expect("insert tags");
+
+        let removed = cleanup_legacy_auto_tags(&mut conn);
+        assert_eq!(removed, 3, "three legacy tags should be deleted");
+
+        let remaining: Vec<String> = conn
+            .prepare("SELECT key FROM tags ORDER BY key")
+            .unwrap()
+            .query_map([], |r| r.get::<_, String>(0))
+            .unwrap()
+            .filter_map(|r| r.ok())
+            .collect();
+        assert_eq!(remaining, vec!["activity", "ticket_id"]);
+    }
+
+    // ---- backfill_ticket_tags ----
+
+    #[test]
+    fn backfill_ticket_tags_extracts_from_branch() {
+        let mut conn = rusqlite::Connection::open_in_memory().expect("open db");
+        crate::migration::migrate(&conn).expect("migrate");
+
+        conn.execute(
+            "INSERT INTO messages
+             (id, role, timestamp, model, provider,
+              input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
+              cost_cents_ingested, cost_cents_effective, cost_confidence, git_branch)
+             VALUES
+             ('m-ticket', 'assistant', datetime('now'), 'claude-opus-4-6', 'claude_code',
+              0, 0, 0, 0, 0.0, 0.0, 'exact', 'fix/BUDI-823-coverage')",
+            [],
+        )
+        .expect("insert msg with branch");
+
+        let n = backfill_ticket_tags(&mut conn);
+        assert_eq!(n, 1, "one ticket should be extracted");
+
+        let pairs: Vec<(String, String)> = conn
+            .prepare("SELECT key, value FROM tags WHERE message_id = 'm-ticket' ORDER BY key")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .filter_map(|r| r.ok())
+            .collect();
+        assert_eq!(
+            pairs,
+            vec![
+                ("ticket_id".to_string(), "BUDI-823".to_string()),
+                ("ticket_prefix".to_string(), "BUDI".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn backfill_ticket_tags_skips_already_tagged_messages() {
+        let mut conn = rusqlite::Connection::open_in_memory().expect("open db");
+        crate::migration::migrate(&conn).expect("migrate");
+
+        conn.execute(
+            "INSERT INTO messages
+             (id, role, timestamp, model, provider,
+              input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
+              cost_cents_ingested, cost_cents_effective, cost_confidence, git_branch)
+             VALUES
+             ('m-tagged', 'assistant', datetime('now'), 'claude-opus-4-6', 'claude_code',
+              0, 0, 0, 0, 0.0, 0.0, 'exact', 'fix/BUDI-823-coverage')",
+            [],
+        )
+        .expect("insert msg");
+        conn.execute(
+            "INSERT INTO tags (message_id, key, value) VALUES ('m-tagged', 'ticket_id', 'PREEXISTING-1')",
+            [],
+        )
+        .expect("seed existing tag");
+
+        let n = backfill_ticket_tags(&mut conn);
+        assert_eq!(n, 0, "messages with a ticket_id tag must be skipped");
+
+        let val: String = conn
+            .query_row(
+                "SELECT value FROM tags WHERE message_id = 'm-tagged' AND key = 'ticket_id'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("ticket_id row");
+        assert_eq!(val, "PREEXISTING-1", "existing tag must not be overwritten");
+    }
+
+    // ---- extract_first_prompt ----
+    //
+    // Pulled from a JSONL transcript to seed `sessions.title` on Claude Code
+    // sessions. Skips system/synthetic messages whose text starts with `<`,
+    // accepts both plain-string and content-blocks shapes.
+
+    #[test]
+    fn extract_first_prompt_reads_plain_string_content() {
+        let path = temp_file_path("first-prompt-plain");
+        std::fs::write(
+            &path,
+            r#"{"type":"user","message":{"content":"hello world"}}
+"#,
+        )
+        .expect("write");
+
+        let got = extract_first_prompt(&path);
+        assert_eq!(got.as_deref(), Some("hello world"));
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn extract_first_prompt_reads_content_blocks_array() {
+        let path = temp_file_path("first-prompt-blocks");
+        std::fs::write(
+            &path,
+            r#"{"type":"user","message":{"content":[{"type":"text","text":"hi"},{"type":"text","text":"there"}]}}
+"#,
+        )
+        .expect("write");
+
+        let got = extract_first_prompt(&path);
+        assert_eq!(got.as_deref(), Some("hi there"));
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn extract_first_prompt_skips_synthetic_and_non_user_lines() {
+        let path = temp_file_path("first-prompt-skip");
+        std::fs::write(
+            &path,
+            // First a non-user (system) message, then a synthetic user
+            // message wrapped in <local-command-…>, then the real prompt.
+            "{\"type\":\"assistant\",\"message\":{\"content\":\"a\"}}\n\
+             {\"type\":\"user\",\"message\":{\"content\":\"<local-command-stdout></local-command-stdout>\"}}\n\
+             {\"type\":\"user\",\"message\":{\"content\":\"real prompt\"}}\n",
+        )
+        .expect("write");
+
+        let got = extract_first_prompt(&path);
+        assert_eq!(got.as_deref(), Some("real prompt"));
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn extract_first_prompt_returns_none_for_missing_file() {
+        let path = std::env::temp_dir().join("does-not-exist-budi-sync.jsonl");
+        let _ = std::fs::remove_file(&path);
+        assert!(extract_first_prompt(&path).is_none());
+    }
+
+    #[test]
+    fn backfill_ticket_tags_ignores_branch_without_ticket() {
+        let mut conn = rusqlite::Connection::open_in_memory().expect("open db");
+        crate::migration::migrate(&conn).expect("migrate");
+
+        conn.execute(
+            "INSERT INTO messages
+             (id, role, timestamp, model, provider,
+              input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
+              cost_cents_ingested, cost_cents_effective, cost_confidence, git_branch)
+             VALUES
+             ('m-main', 'assistant', datetime('now'), 'claude-opus-4-6', 'claude_code',
+              0, 0, 0, 0, 0.0, 0.0, 'exact', 'main')",
+            [],
+        )
+        .expect("insert msg on main");
+
+        let n = backfill_ticket_tags(&mut conn);
+        assert_eq!(n, 0);
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM tags WHERE message_id = 'm-main'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 0);
     }
 }
