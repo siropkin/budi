@@ -1914,6 +1914,11 @@ fn backfill_cursor_session_ids_skips_when_no_matching_session() {
 // cwd with a real workspace path discovered in worker.log.
 // ---------------------------------------------------------------------------
 
+// Windows: the repair filter is `cwd LIKE '%/.cursor/projects/%'` (forward
+// slashes), but `PathBuf::join` on Windows yields backslashes for the temp-dir
+// prefix, so the LIKE never fires. The production code path is the same on
+// both platforms; the test fixture is what's Unix-shaped.
+#[cfg(not(windows))]
 #[test]
 fn repair_cursor_workspace_metadata_upgrades_legacy_cwd() {
     let dir = make_test_dir("cursor-repair-workspace");
