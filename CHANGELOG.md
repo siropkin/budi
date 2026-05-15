@@ -1,5 +1,32 @@
 # Changelog
 
+## 8.5.3 — 2026-05-15
+
+8.5.3 is a same-day hotfix for the v8.5.2 `org` → `workspace` rename (#836/#840) that surfaced the moment a fresh client ran `budi cloud init` against the live cloud. `api_version` stays at `3`.
+
+### Fixed
+
+- **Cloud whoami: parse the cloud's dual-emit `workspace_id` + `org_id` response without falsely flagging a duplicate field** (#843) — `GET /v1/whoami` on `app.getbudi.dev` now returns `{"workspace_id":"…","org_id":"…"}` (both keys, same value) per the cross-repo migration plan in siropkin/budi-cloud#321. The 8.5.2 `WhoamiResponse` struct used `#[serde(alias = "org_id")]` to dual-accept the legacy key, but a serde `alias` rejects two keys binding the same field with `duplicate field "workspace_id"`. The result was that **every fresh `budi cloud init --api-key <KEY>` against the live cloud failed** to auto-seed `workspace_id` and left the file with `# workspace_id = "your-workspace-id"` commented out — even though the api_key was valid and the cloud returned 200. Repro: `curl -H "Authorization: Bearer <KEY>" https://app.getbudi.dev/v1/whoami` returned a payload that `serde_json::from_str::<WhoamiResponse>` rejected. The fix drops the alias entirely; serde's default unknown-field handling now silently ignores any `org_id` the cloud still emits.
+
+### Removed (clean break — per #843)
+
+- **`org_id` removed from every wire/identity surface.** The user base is small and the deprecation window from ADR-0083 §2 was paying ongoing complexity for a cohort of zero installs that still need it. One-line audit:
+  - `SyncEnvelope` no longer emits `org_id` alongside `workspace_id` on `POST /v1/ingest`. The cloud already accepts the new key on its own; the dual-emit was only ever a safety net for an old cloud that hadn't shipped siropkin/budi-cloud#321, and that cloud doesn't exist in the wild.
+  - `WhoamiResponse` only consumes `workspace_id`; payloads carrying only the legacy `org_id` are rejected with a missing-field error.
+  - `TeamPricing` (`GET /v1/pricing/active`) drops the `#[serde(alias = "org_id")]`. Same dual-emit-duplicate-field bug shape as whoami, latent because the cloud currently returns "no active price list".
+  - Daemon `/cloud/reset` JSON response no longer dual-emits `org_id`.
+  - `CloudConfig` (`~/.config/budi/cloud.toml`) no longer accepts the legacy `org_id` TOML key. Users with a pre-rename config re-run `budi cloud init --api-key <KEY> --force --yes` (one command) to rewrite the file.
+  - `budi cloud init --org-id` flag removed. Use `--workspace-id`.
+
+### Internal
+
+- **Test: 8.5.2 release-mode regression in `pipeline/emit.rs` already fixed in v8.5.2** — folded here for historical context. Two `#[should_panic]` tests exercising `debug_assert!` arms are now gated `#[cfg(debug_assertions)]` so they only run in the configuration where the assertion is live. Caught locally during the 8.5.2 release build of `cargo test --release` and shipped together with the 8.5.2 release-prep PR.
+- **Regression coverage for #843** — `cloud_sync/tests.rs` now pins three wire shapes for `WhoamiResponse`: dual-emit (workspace_id + org_id, both with the same value — the actual current cloud shape), workspace_id-only (post-deprecation cloud), and org_id-only (rejected, since #843 dropped the legacy consumer). Envelope serialization test asserts `org_id` is no longer emitted. CLI test renamed from `cli_parses_cloud_init_legacy_org_id_alias` to `cli_rejects_dropped_org_id_flag` and now pins the `clap::error::ErrorKind::UnknownArgument` path.
+
+### Cross-repo lockstep
+
+- **siropkin/budi-cloud#321** — the cloud can drop its dual-emit / dual-accept too, since the daemon side is no longer reading or sending `org_id`. No flag-day cutover needed: the cloud's dual-emit is silently ignored by the new daemon, and the new daemon only sends `workspace_id` which the cloud already accepts. Recommended cloud cleanup order: stop emitting `org_id` from `/v1/whoami` and `/v1/pricing/active` first (low risk, no daemon depends on it); drop ingest's dual-accept of `org_id` last, once telemetry confirms no live envelopes still carry it.
+
 ## 8.5.2 — 2026-05-15
 
 8.5.2 is the polish-release umbrella tracked by #798. No new features and no user-visible behaviour changes outside the additive `org` → `workspace` rename below (legacy aliases remain accepted on every input surface). `api_version` stays at `3`. The release closes every 8.5.2 sub-issue (#799–#808 plus the coverage-gap follow-ups #816/#817/#818/#820/#821/#822/#823) and brings the workspace to the acceptance bar #798 set: `cargo clippy -D warnings` clean, `cargo machete` and `cargo +nightly udeps` clean on CI, a published coverage baseline in `docs/quality/`, no Rust source file above 2,500 LOC outside the one carrying an explicit `// keep-large:` rationale, and no dangling SOUL/AGENTS/CLAUDE/MEMORY references.

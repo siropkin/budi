@@ -753,13 +753,12 @@ fn cli_parses_cloud_init_manual_ids() {
 }
 
 #[test]
-fn cli_parses_cloud_init_legacy_org_id_alias() {
-    // #836: the legacy `--org-id` flag stays accepted as an alias for
-    // `--workspace-id` during the org→workspace rename deprecation
-    // window (ADR-0083 §2). Dropped once the cloud-side rename
-    // (siropkin/budi-cloud#321) lands and one release cycle of
-    // mixed-version operation has passed.
-    let cli = Cli::try_parse_from([
+fn cli_rejects_dropped_org_id_flag() {
+    // #843: `--org-id` is no longer accepted. The flag was a back-compat
+    // shim during the org→workspace rename window; the user base is
+    // small and re-running `budi cloud init --api-key <KEY> --force
+    // --yes` with `--workspace-id` is the clean path forward.
+    let err = Cli::try_parse_from([
         "budi",
         "cloud",
         "init",
@@ -768,15 +767,11 @@ fn cli_parses_cloud_init_legacy_org_id_alias() {
         "--org-id",
         "org_selfhost",
     ])
-    .expect("legacy --org-id alias parses");
-    match cli.command {
-        Commands::Cloud {
-            action: CloudAction::Init { workspace_id, .. },
-        } => {
-            assert_eq!(workspace_id.as_deref(), Some("org_selfhost"));
-        }
-        _ => panic!("expected cloud init command"),
-    }
+    .expect_err("`--org-id` must be rejected after #843");
+    assert!(
+        err.to_string().contains("--org-id") || err.to_string().contains("unexpected argument"),
+        "clap error must point at the removed flag, got: {err}"
+    );
 }
 
 #[test]

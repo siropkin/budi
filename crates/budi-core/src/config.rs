@@ -654,12 +654,10 @@ pub struct CloudConfig {
     pub device_id: Option<String>,
     /// Workspace identifier on the cloud dashboard (#836).
     ///
-    /// Renamed from `org_id` in v8.5.2; the legacy `org_id` TOML key is
-    /// still accepted via `serde(alias)` during the deprecation window
-    /// described in ADR-0083 §2. The legacy alias is dropped once the
-    /// cloud-side rename (siropkin/budi-cloud#321) ships and one release
-    /// cycle of mixed-version operation has passed.
-    #[serde(alias = "org_id")]
+    /// Renamed from `org_id` in v8.5.2. The legacy `org_id` TOML alias
+    /// was dropped in v8.5.3 (#843) since the user base is small and a
+    /// re-run of `budi cloud init --api-key <KEY> --force --yes` rewrites
+    /// the file with the new key. ADR-0083 §2 (Amended 2026-05-15).
     pub workspace_id: Option<String>,
     pub endpoint: String,
     pub sync: CloudSyncConfig,

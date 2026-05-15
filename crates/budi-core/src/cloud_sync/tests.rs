@@ -774,6 +774,51 @@ fn envelope_serializes_to_expected_shape() {
     );
     // #723: surface always emitted (NOT NULL on the local column).
     assert_eq!(json["payload"]["daily_rollups"][0]["surface"], "cursor");
+    // #843: legacy `org_id` is no longer emitted alongside `workspace_id`.
+    // The cloud accepts the new key on its own; sending both broke when
+    // the cloud started dual-emitting back its own response (whoami).
+    assert_eq!(json["workspace_id"], "org_test");
+    assert!(
+        json.get("org_id").is_none(),
+        "envelope must not emit deprecated `org_id` (got {json})"
+    );
+}
+
+/// #843: cloud's `/v1/whoami` dual-emits both `workspace_id` and the
+/// legacy `org_id` during the migration window (siropkin/budi-cloud#321).
+/// Pre-#843 the response struct used `#[serde(alias = "org_id")]`, which
+/// rejects the dual-emit shape with a "duplicate field" error and broke
+/// `budi cloud init` against the live cloud. This pins the actual wire
+/// payload captured from `curl https://app.getbudi.dev/v1/whoami` on
+/// 2026-05-15.
+#[test]
+fn whoami_parses_dual_emit_workspace_id_and_org_id() {
+    let body = r#"{"workspace_id":"ws_alpha","org_id":"ws_alpha"}"#;
+    let parsed: WhoamiResponse = serde_json::from_str(body).expect("dual-emit must parse");
+    assert_eq!(parsed.workspace_id, "ws_alpha");
+}
+
+/// #843: when only `workspace_id` is present (future cloud that has
+/// retired the `org_id` dual-emit), parsing still works.
+#[test]
+fn whoami_parses_workspace_id_only() {
+    let body = r#"{"workspace_id":"ws_only"}"#;
+    let parsed: WhoamiResponse = serde_json::from_str(body).expect("workspace_id-only must parse");
+    assert_eq!(parsed.workspace_id, "ws_only");
+}
+
+/// #843: a payload that carries only the deprecated `org_id` key (and
+/// no `workspace_id`) is rejected — per the deprecation policy we no
+/// longer consume `org_id` from the wire.
+#[test]
+fn whoami_rejects_org_id_only_payload() {
+    let body = r#"{"org_id":"ws_legacy"}"#;
+    let err = serde_json::from_str::<WhoamiResponse>(body)
+        .expect_err("org_id-only payload must be rejected");
+    assert!(
+        err.to_string().contains("workspace_id"),
+        "error must mention the missing `workspace_id` field, got: {err}"
+    );
 }
 
 /// #552: when `cloud.toml` omits `label`, `effective_label()` falls
