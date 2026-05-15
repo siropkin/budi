@@ -244,6 +244,41 @@ jobs:
       - name: Run cargo-deny
         run: cargo deny --all-features check
 
+  # Coverage baseline via `cargo llvm-cov` (issue #804).
+  #
+  # Non-blocking for now — the point is visibility, not a target. Runs the
+  # same `scripts/coverage.sh` contributors run locally, so drift between
+  # local and CI numbers stays small. Single-threaded test execution is
+  # required (see docs/quality/coverage-baseline-8.5.2.md for the why).
+  coverage:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+
+      - name: Install cargo-llvm-cov
+        run: cargo install cargo-llvm-cov --locked
+
+      - name: Run coverage
+        run: scripts/coverage.sh --lcov target/coverage/lcov.info
+
+      - name: Upload LCOV artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-lcov
+          path: target/coverage/lcov.info
+          if-no-files-found: warn
+
   # Unused-dependency scan via `cargo udeps` (issue #808).
   #
   # Requires the nightly toolchain. Allowed to fail initially so nightly

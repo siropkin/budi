@@ -39,6 +39,22 @@ To mirror CI exactly for formatting, use:
 cargo fmt --all -- --check
 ```
 
+### Coverage (optional)
+
+Coverage is a visibility tool, not a gate. The 8.5.2 baseline is captured in
+[`docs/quality/coverage-baseline-8.5.2.md`](docs/quality/coverage-baseline-8.5.2.md).
+To reproduce it locally:
+
+```bash
+cargo install cargo-llvm-cov --locked
+rustup component add llvm-tools-preview
+scripts/coverage.sh          # text summary
+scripts/coverage.sh --html   # also writes target/coverage/html/index.html
+```
+
+The same script runs in the non-blocking `coverage` CI job, which uploads an
+LCOV artifact for editor integrations.
+
 ### Supply-chain policy (`cargo-deny`)
 
 The workspace ships a [`deny.toml`](deny.toml) that pins a permissive license
