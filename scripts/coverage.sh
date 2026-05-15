@@ -47,6 +47,7 @@ if [ "$EMIT_HTML" = "1" ]; then
 fi
 
 if [ -n "$LCOV_PATH" ]; then
+  mkdir -p "$(dirname "$LCOV_PATH")"
   cargo llvm-cov --workspace --lcov --output-path "$LCOV_PATH" -- --test-threads=1
   echo "LCOV report: $LCOV_PATH"
 fi
