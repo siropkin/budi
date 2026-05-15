@@ -456,8 +456,8 @@ enum CloudAction {
         /// Manually set `workspace_id` instead of fetching it via
         /// `GET /v1/whoami`. Useful for self-hosted endpoints that
         /// don't expose `/v1/whoami` yet, or offline installs.
-        /// Accepts the legacy `--org-id` flag during the workspace
-        /// rename deprecation window (#836).
+        /// The legacy `--org-id` flag is accepted as an alias during
+        /// the workspace rename deprecation window.
         #[arg(long, value_name = "ID", alias = "org-id")]
         workspace_id: Option<String>,
     },
