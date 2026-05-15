@@ -909,7 +909,6 @@ mod tests {
                 _lock: lock,
             }
         }
-
     }
 
     impl Drop for HomeGuard {
